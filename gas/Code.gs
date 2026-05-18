@@ -26,6 +26,13 @@ function doGet(e) {
       });
     }
 
+    if (action === "list_admin_members") {
+      return jsonOutput({
+        ok: true,
+        members: listAdminMembers(),
+      });
+    }
+
     if (action === "list_member_responses") {
       return jsonOutput({
         ok: true,
@@ -71,6 +78,15 @@ function doPost(e) {
       return jsonOutput({
         ok: true,
         updated_count: result.updated_count,
+      });
+    }
+
+    if (action === "upsert_member") {
+      const result = upsertMember(body.member || {});
+      return jsonOutput({
+        ok: true,
+        member_id: result.member_id,
+        mode: result.mode,
       });
     }
 
@@ -174,6 +190,18 @@ function listPublicTournaments(pageToken) {
 }
 
 function listMembers() {
+  return listAdminMembers().filter(function(member) {
+    return member.status === "active";
+  }).map(function(member) {
+    return {
+      member_id: member.member_id,
+      display_name: member.display_name,
+      grade: member.grade || "",
+    };
+  });
+}
+
+function listAdminMembers() {
   const sheet = getSheetByName("Members");
   const values = sheet.getDataRange().getValues();
 
@@ -192,16 +220,6 @@ function listMembers() {
     })
     .map(function(row) {
       return rowToObject(headers, row);
-    })
-    .filter(function(member) {
-      return member.status === "active";
-    })
-    .map(function(member) {
-      return {
-        member_id: member.member_id,
-        display_name: member.display_name,
-        grade: member.grade || "",
-      };
     });
 }
 
@@ -384,6 +402,49 @@ function upsertResponses(pageToken, memberName, responses) {
   };
 }
 
+function upsertMember(member) {
+  validateMember(member);
+
+  const sheet = getSheetByName("Members");
+  const values = sheet.getDataRange().getValues();
+  const headers = values[0];
+  const idIndex = headers.indexOf("member_id");
+  const now = new Date();
+
+  let memberId = member.member_id;
+  let rowIndex = -1;
+  let mode = "created";
+
+  if (!memberId) {
+    memberId = generateMemberId(values.length);
+  } else {
+    for (let i = 1; i < values.length; i += 1) {
+      if (values[i][idIndex] === memberId) {
+        rowIndex = i + 1;
+        mode = "updated";
+        break;
+      }
+    }
+  }
+
+  const existing = rowIndex > 0 ? rowToObject(headers, values[rowIndex - 1]) : {};
+  const record = buildMemberRecord(headers, existing, member, memberId, now);
+  const row = headers.map(function(header) {
+    return record[header] !== undefined ? record[header] : "";
+  });
+
+  if (rowIndex > 0) {
+    sheet.getRange(rowIndex, 1, 1, row.length).setValues([row]);
+  } else {
+    sheet.appendRow(row);
+  }
+
+  return {
+    member_id: memberId,
+    mode: mode,
+  };
+}
+
 function buildTournamentRecord(headers, existing, tournament, tournamentId, now) {
   const record = {};
   const nowIso = toIsoString(now);
@@ -412,6 +473,35 @@ function buildTournamentRecord(headers, existing, tournament, tournamentId, now)
   return record;
 }
 
+function buildMemberRecord(headers, existing, member, memberId, now) {
+  const record = {};
+  const nowIso = toIsoString(now);
+
+  headers.forEach(function(header) {
+    if (existing[header] !== undefined) {
+      record[header] = existing[header];
+    }
+  });
+
+  Object.keys(member).forEach(function(key) {
+    record[key] = member[key];
+  });
+
+  record.member_id = memberId;
+  record.display_name = normalizeMemberName(member.display_name);
+  record.updated_at = nowIso;
+
+  if (!existing.created_at) {
+    record.created_at = nowIso;
+  }
+
+  if (!record.status) {
+    record.status = "active";
+  }
+
+  return record;
+}
+
 function validateTournament(tournament) {
   const requiredFields = [
     "title",
@@ -428,6 +518,12 @@ function validateTournament(tournament) {
       throw new Error("Missing required field: " + field);
     }
   });
+}
+
+function validateMember(member) {
+  if (!normalizeMemberName(member.display_name)) {
+    throw new Error("Missing display_name");
+  }
 }
 
 function validateResponseRequest(pageToken, memberName, responses) {
@@ -522,6 +618,11 @@ function generateTournamentId(eventStartDate) {
 function generateResponseId(now) {
   return "R" + Utilities.formatDate(now, "Asia/Tokyo", "yyyyMMddHHmmss") +
     "_" + randomString(6);
+}
+
+function generateMemberId(rowCount) {
+  const next = Math.max(1, rowCount);
+  return "M" + String(next).padStart(3, "0");
 }
 
 function randomString(length) {
