@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>大会参加確認</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <main class="page">
+    <section class="hero">
+      <p class="eyebrow">Saitama University Karuta Club</p>
+      <h1 id="page-title">大会参加確認</h1>
+      <p id="page-description" class="hero-description">
+        参加希望の大会に回答してください。
+      </p>
+    </section>
+
+    <section class="panel">
+      <form id="entry-form" class="entry-form">
+        <label class="field">
+          <span class="field-label">名前</span>
+          <input
+            id="member-name"
+            name="member_name"
+            type="text"
+            autocomplete="name"
+            placeholder="例: 石田"
+            required
+          >
+        </label>
+
+        <div id="tournament-list" class="tournament-list"></div>
+
+        <div class="actions">
+          <button id="submit-button" type="submit">送信する</button>
+        </div>
+      </form>
+
+      <div id="status-message" class="status-message" aria-live="polite"></div>
+    </section>
+  </main>
+
+  <template id="tournament-template">
+    <article class="tournament-card">
+      <div class="card-header">
+        <h2 class="tournament-title"></h2>
+        <p class="tournament-meta"></p>
+      </div>
+
+      <dl class="tournament-details">
+        <div>
+          <dt>日程</dt>
+          <dd class="event-date"></dd>
+        </div>
+        <div>
+          <dt>開催級</dt>
+          <dd class="grades"></dd>
+        </div>
+        <div>
+          <dt>サークル内締切</dt>
+          <dd class="internal-deadline"></dd>
+        </div>
+        <div>
+          <dt>要項</dt>
+          <dd><a class="drive-link" target="_blank" rel="noopener noreferrer">Google Drive</a></dd>
+        </div>
+      </dl>
+
+      <fieldset class="response-group">
+        <legend>回答</legend>
+        <label class="response-option">
+          <input type="radio" value="yes">
+          <span>○ 参加希望</span>
+        </label>
+        <label class="response-option">
+          <input type="radio" value="maybe">
+          <span>△ 未定・条件付き</span>
+        </label>
+        <label class="response-option">
+          <input type="radio" value="no">
+          <span>× 不参加</span>
+        </label>
+      </fieldset>
+
+      <label class="field">
+        <span class="field-label">コメント</span>
+        <textarea rows="3" placeholder="任意"></textarea>
+      </label>
+    </article>
+  </template>
+
+  <script src="./script.js"></script>
+</body>
+</html>
