@@ -1,13 +1,20 @@
 # Entry Page
 
-This directory will host the public attendance confirmation page.
+This directory contains the first member-facing attendance confirmation page.
 
-Planned responsibilities:
+## Files
 
-- render active tournaments returned by GAS
-- collect member name and per-tournament responses
-- submit response updates back to GAS
+- `index.html`
+- `style.css`
+- `script.js`
 
-Planned output:
+## Current Behavior
 
-- static files suitable for publishing as a lightweight site when needed
+- reads `page_token` from the URL
+- fetches `list_public_tournaments`
+- renders the tournament cards
+- submits selected responses to `upsert_response`
+
+## Current Note
+
+`script.js` currently points to the active Apps Script web app URL directly for development.
