@@ -14,7 +14,15 @@ function doGet(e) {
       return jsonOutput({
         ok: true,
         page: getEntryPage(pageToken),
+        members: listMembers(),
         tournaments: listPublicTournaments(pageToken),
+      });
+    }
+
+    if (action === "list_members") {
+      return jsonOutput({
+        ok: true,
+        members: listMembers(),
       });
     }
 
@@ -151,6 +159,38 @@ function listPublicTournaments(pageToken) {
         grades: tournament.grades,
         internal_deadline: tournament.internal_deadline,
         drive_url: tournament.drive_url,
+      };
+    });
+}
+
+function listMembers() {
+  const sheet = getSheetByName("Members");
+  const values = sheet.getDataRange().getValues();
+
+  if (values.length <= 1) {
+    return [];
+  }
+
+  const headers = values[0];
+  const rows = values.slice(1);
+
+  return rows
+    .filter(function(row) {
+      return row.some(function(cell) {
+        return cell !== "";
+      });
+    })
+    .map(function(row) {
+      return rowToObject(headers, row);
+    })
+    .filter(function(member) {
+      return member.status === "active";
+    })
+    .map(function(member) {
+      return {
+        member_id: member.member_id,
+        display_name: member.display_name,
+        grade: member.grade || "",
       };
     });
 }
