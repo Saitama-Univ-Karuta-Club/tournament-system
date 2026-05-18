@@ -5,6 +5,7 @@ const state = {
   pageToken: "",
   members: [],
   tournaments: [],
+  filteredTournaments: [],
 };
 
 const elements = {
@@ -41,8 +42,9 @@ async function init() {
     state.tournaments = data.tournaments || [];
     renderPage(data.page || {});
     renderMemberOptions(state.members);
-    renderTournaments(state.tournaments);
-    showStatus("", "");
+    state.filteredTournaments = [];
+    renderEmptyState("名前を選ぶと、対象の大会だけ表示されます。");
+    showStatus("名前を選択してください。", "");
     enableForm();
   } catch (error) {
     renderEmptyState("大会情報を取得できませんでした。");
@@ -86,6 +88,29 @@ elements.form.addEventListener("submit", async function(event) {
     showStatus(error.message || "送信に失敗しました。", "error");
   } finally {
     enableForm();
+  }
+});
+
+elements.memberName.addEventListener("change", function() {
+  const selectedMember = getSelectedMember();
+
+  if (!selectedMember) {
+    state.filteredTournaments = [];
+    renderEmptyState("名前を選ぶと、対象の大会だけ表示されます。");
+    showStatus("名前を選択してください。", "");
+    return;
+  }
+
+  state.filteredTournaments = filterTournamentsForMember(
+    state.tournaments,
+    selectedMember
+  );
+  renderTournaments(state.filteredTournaments);
+
+  if (state.filteredTournaments.length === 0) {
+    showStatus("該当する大会はありません。", "");
+  } else {
+    showStatus("", "");
   }
 });
 
@@ -200,7 +225,7 @@ function renderTournaments(tournaments) {
 }
 
 function collectResponses() {
-  return state.tournaments.reduce(function(result, tournament) {
+  return state.filteredTournaments.reduce(function(result, tournament) {
     const selected = document.querySelector(
       'input[name="response-' + tournament.tournament_id + '"]:checked'
     );
@@ -221,6 +246,41 @@ function collectResponses() {
 
     return result;
   }, []);
+}
+
+function getSelectedMember() {
+  const selectedName = elements.memberName.value;
+
+  if (!selectedName) {
+    return null;
+  }
+
+  return state.members.find(function(member) {
+    return member.display_name === selectedName;
+  }) || null;
+}
+
+function filterTournamentsForMember(tournaments, member) {
+  const memberGrade = normalizeGradeLabel(member.grade);
+
+  return tournaments.filter(function(tournament) {
+    if (!tournament.grades) {
+      return true;
+    }
+
+    if (!memberGrade) {
+      return false;
+    }
+
+    const tournamentGrades = String(tournament.grades)
+      .split(",")
+      .map(function(grade) {
+        return normalizeGradeLabel(grade);
+      })
+      .filter(Boolean);
+
+    return tournamentGrades.includes(memberGrade);
+  });
 }
 
 function renderEmptyState(message) {
@@ -279,6 +339,14 @@ function formatDateTime(value) {
     minute: "2-digit",
     hour12: false,
   }).format(date);
+}
+
+function normalizeGradeLabel(value) {
+  return String(value || "")
+    .trim()
+    .replace(/\s+/g, "")
+    .replace(/級$/, "")
+    .toUpperCase();
 }
 
 function escapeHtml(text) {
