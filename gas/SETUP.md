@@ -12,6 +12,7 @@
 - `action=list_tournaments`
 - `action=list_public_tournaments&page_token=...`
 - `action=list_members`
+- `action=list_member_responses&page_token=...&member_name=...`
 
 ### POST
 

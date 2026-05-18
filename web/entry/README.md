@@ -14,6 +14,7 @@ This directory contains the first member-facing attendance confirmation page.
 - fetches `list_public_tournaments`
 - renders a member dropdown from `Members`
 - shows only tournaments matching the selected member grade
+- supports `all / answered / unanswered` display switching
 - submits selected responses to `upsert_response`
 
 ## Current Note

@@ -4,8 +4,10 @@ const API_BASE_URL =
 const state = {
   pageToken: "",
   members: [],
+  responsesByTournament: {},
   tournaments: [],
   filteredTournaments: [],
+  visibilityFilter: "all",
 };
 
 const elements = {
@@ -17,6 +19,7 @@ const elements = {
   statusMessage: document.getElementById("status-message"),
   submitButton: document.getElementById("submit-button"),
   tournamentTemplate: document.getElementById("tournament-template"),
+  filterButtons: document.querySelectorAll(".filter-button"),
 };
 
 document.addEventListener("DOMContentLoaded", init);
@@ -92,9 +95,30 @@ elements.form.addEventListener("submit", async function(event) {
 });
 
 elements.memberName.addEventListener("change", function() {
+  handleMemberChange();
+});
+
+elements.filterButtons.forEach(function(button) {
+  button.addEventListener("click", function() {
+    state.visibilityFilter = button.dataset.filter;
+    updateFilterButtons();
+    renderCurrentTournamentView();
+  });
+});
+
+elements.form.addEventListener("change", function(event) {
+  syncTournamentDraft(event.target);
+});
+
+elements.form.addEventListener("input", function(event) {
+  syncTournamentDraft(event.target);
+});
+
+async function handleMemberChange() {
   const selectedMember = getSelectedMember();
 
   if (!selectedMember) {
+    state.responsesByTournament = {};
     state.filteredTournaments = [];
     renderEmptyState("名前を選ぶと、対象の大会だけ表示されます。");
     showStatus("名前を選択してください。", "");
@@ -105,14 +129,20 @@ elements.memberName.addEventListener("change", function() {
     state.tournaments,
     selectedMember
   );
-  renderTournaments(state.filteredTournaments);
+  showStatus("回答状況を読み込んでいます...", "");
 
-  if (state.filteredTournaments.length === 0) {
-    showStatus("該当する大会はありません。", "");
-  } else {
-    showStatus("", "");
+  try {
+    state.responsesByTournament = await fetchMemberResponses(
+      state.pageToken,
+      selectedMember.display_name
+    );
+  } catch (error) {
+    state.responsesByTournament = {};
+    showStatus(error.message || "既存回答の取得に失敗しました。", "error");
   }
-});
+
+  renderCurrentTournamentView();
+}
 
 async function fetchPublicTournaments(pageToken) {
   const url = new URL(API_BASE_URL);
@@ -129,6 +159,31 @@ async function fetchPublicTournaments(pageToken) {
   }
 
   return data;
+}
+
+async function fetchMemberResponses(pageToken, memberName) {
+  const url = new URL(API_BASE_URL);
+  url.searchParams.set("action", "list_member_responses");
+  url.searchParams.set("page_token", pageToken);
+  url.searchParams.set("member_name", memberName);
+
+  const response = await fetch(url.toString(), {
+    method: "GET",
+  });
+  const data = await response.json();
+
+  if (!data.ok) {
+    throw new Error(data.error || "既存回答の取得に失敗しました。");
+  }
+
+  return (data.responses || []).reduce(function(result, item) {
+    result[item.tournament_id] = {
+      response: item.response,
+      comment: item.comment || "",
+      updated_at: item.updated_at || "",
+    };
+    return result;
+  }, {});
 }
 
 async function submitResponses(payload) {
@@ -192,10 +247,13 @@ function renderTournaments(tournaments) {
   tournaments.forEach(function(tournament) {
     const fragment = elements.tournamentTemplate.content.cloneNode(true);
     const card = fragment.querySelector(".tournament-card");
+    const savedResponse = state.responsesByTournament[tournament.tournament_id] || null;
 
     fragment.querySelector(".tournament-title").textContent = tournament.title;
     fragment.querySelector(".tournament-meta").textContent =
       "締切までの回答にご協力ください";
+    fragment.querySelector(".response-state").textContent =
+      savedResponse ? "回答済み" : "未回答";
     fragment.querySelector(".event-date").textContent =
       tournament.event_date_label || "-";
     fragment.querySelector(".grades").textContent =
@@ -214,10 +272,14 @@ function renderTournaments(tournaments) {
     radioInputs.forEach(function(input) {
       input.name = "response-" + tournament.tournament_id;
       input.dataset.tournamentId = tournament.tournament_id;
+      if (savedResponse && savedResponse.response === input.value) {
+        input.checked = true;
+      }
     });
 
     const textarea = fragment.querySelector("textarea");
     textarea.dataset.tournamentId = tournament.tournament_id;
+    textarea.value = savedResponse ? savedResponse.comment || "" : "";
 
     card.dataset.tournamentId = tournament.tournament_id;
     elements.tournamentList.appendChild(fragment);
@@ -226,22 +288,16 @@ function renderTournaments(tournaments) {
 
 function collectResponses() {
   return state.filteredTournaments.reduce(function(result, tournament) {
-    const selected = document.querySelector(
-      'input[name="response-' + tournament.tournament_id + '"]:checked'
-    );
+    const savedResponse = state.responsesByTournament[tournament.tournament_id];
 
-    if (!selected) {
+    if (!savedResponse || !savedResponse.response) {
       return result;
     }
 
-    const commentField = document.querySelector(
-      'textarea[data-tournament-id="' + tournament.tournament_id + '"]'
-    );
-
     result.push({
       tournament_id: tournament.tournament_id,
-      response: selected.value,
-      comment: commentField ? commentField.value.trim() : "",
+      response: savedResponse.response,
+      comment: savedResponse.comment || "",
     });
 
     return result;
@@ -281,6 +337,84 @@ function filterTournamentsForMember(tournaments, member) {
 
     return tournamentGrades.includes(memberGrade);
   });
+}
+
+function renderCurrentTournamentView() {
+  const visibleTournaments = state.filteredTournaments.filter(function(tournament) {
+    return matchesVisibilityFilter(tournament.tournament_id);
+  });
+
+  renderTournaments(visibleTournaments);
+
+  if (!state.filteredTournaments.length) {
+    showStatus("該当する大会はありません。", "");
+    return;
+  }
+
+  if (!visibleTournaments.length) {
+    if (state.visibilityFilter === "answered") {
+      renderEmptyState("回答済みの大会はありません。");
+    } else if (state.visibilityFilter === "unanswered") {
+      renderEmptyState("未回答の大会はありません。");
+    }
+  }
+
+  if (visibleTournaments.length) {
+    showStatus("", "");
+  }
+}
+
+function matchesVisibilityFilter(tournamentId) {
+  const hasResponse = Boolean(
+    state.responsesByTournament[tournamentId] &&
+    state.responsesByTournament[tournamentId].response
+  );
+
+  if (state.visibilityFilter === "answered") {
+    return hasResponse;
+  }
+
+  if (state.visibilityFilter === "unanswered") {
+    return !hasResponse;
+  }
+
+  return true;
+}
+
+function updateFilterButtons() {
+  elements.filterButtons.forEach(function(button) {
+    button.classList.toggle(
+      "is-active",
+      button.dataset.filter === state.visibilityFilter
+    );
+  });
+}
+
+function syncTournamentDraft(target) {
+  const tournamentId = target.dataset.tournamentId;
+
+  if (!tournamentId) {
+    return;
+  }
+
+  const current = state.responsesByTournament[tournamentId] || {
+    response: "",
+    comment: "",
+  };
+
+  if (target.type === "radio") {
+    current.response = target.value;
+  }
+
+  if (target.tagName === "TEXTAREA") {
+    current.comment = target.value.trim();
+  }
+
+  state.responsesByTournament[tournamentId] = current;
+
+  if (state.visibilityFilter !== "all") {
+    renderCurrentTournamentView();
+  }
 }
 
 function renderEmptyState(message) {

@@ -32,6 +32,12 @@
           </select>
         </label>
 
+        <div class="filter-bar" role="group" aria-label="回答表示切り替え">
+          <button type="button" class="filter-button is-active" data-filter="all">全て</button>
+          <button type="button" class="filter-button" data-filter="answered">回答済み</button>
+          <button type="button" class="filter-button" data-filter="unanswered">未回答</button>
+        </div>
+
         <div id="tournament-list" class="tournament-list"></div>
 
         <div class="actions">
@@ -48,6 +54,7 @@
       <div class="card-header">
         <h2 class="tournament-title"></h2>
         <p class="tournament-meta"></p>
+        <p class="response-state"></p>
       </div>
 
       <dl class="tournament-details">

@@ -26,6 +26,16 @@ function doGet(e) {
       });
     }
 
+    if (action === "list_member_responses") {
+      return jsonOutput({
+        ok: true,
+        responses: listMemberResponses(
+          e.parameter.page_token || "",
+          e.parameter.member_name || ""
+        ),
+      });
+    }
+
     return jsonOutput({
       ok: false,
       error: "Unknown action",
@@ -191,6 +201,54 @@ function listMembers() {
         member_id: member.member_id,
         display_name: member.display_name,
         grade: member.grade || "",
+      };
+    });
+}
+
+function listMemberResponses(pageToken, memberName) {
+  if (!pageToken) {
+    throw new Error("Missing page_token");
+  }
+
+  if (!memberName) {
+    throw new Error("Missing member_name");
+  }
+
+  const publicTournaments = listPublicTournaments(pageToken);
+  const allowedTournamentIds = {};
+  const sheet = getSheetByName("Responses");
+  const values = sheet.getDataRange().getValues();
+
+  publicTournaments.forEach(function(tournament) {
+    allowedTournamentIds[tournament.tournament_id] = true;
+  });
+
+  if (values.length <= 1) {
+    return [];
+  }
+
+  const headers = values[0];
+  const rows = values.slice(1);
+
+  return rows
+    .filter(function(row) {
+      return row.some(function(cell) {
+        return cell !== "";
+      });
+    })
+    .map(function(row) {
+      return rowToObject(headers, row);
+    })
+    .filter(function(response) {
+      return response.member_name === memberName &&
+        allowedTournamentIds[response.tournament_id];
+    })
+    .map(function(response) {
+      return {
+        tournament_id: response.tournament_id,
+        response: response.response,
+        comment: response.comment || "",
+        updated_at: response.updated_at || "",
       };
     });
 }

@@ -104,6 +104,29 @@ textarea:focus {
   gap: 20px;
 }
 
+.filter-bar {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.filter-button {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 10px 14px;
+  font: inherit;
+  font-weight: 700;
+  color: var(--muted);
+  background: #fff;
+  cursor: pointer;
+}
+
+.filter-button.is-active {
+  color: #fff;
+  background: var(--accent-dark);
+  border-color: var(--accent-dark);
+}
+
 .tournament-card {
   border: 1px solid var(--line);
   border-radius: 22px;
@@ -122,9 +145,21 @@ textarea:focus {
 }
 
 .tournament-meta {
-  margin: 0;
+  margin: 0 0 8px;
   color: var(--muted);
   font-size: 0.95rem;
+}
+
+.response-state {
+  display: inline-flex;
+  width: fit-content;
+  margin: 0;
+  padding: 6px 10px;
+  border-radius: 999px;
+  font-size: 0.82rem;
+  font-weight: 700;
+  background: var(--accent-soft);
+  color: var(--accent-dark);
 }
 
 .tournament-details {
