@@ -564,3 +564,46 @@ function testUpsertResponses() {
 
   Logger.log(result);
 }
+
+function seedAdditionalTestTournaments() {
+  const tournaments = [
+    {
+      title: "テスト大会C級",
+      event_start_date: "2026-07-04",
+      event_end_date: "2026-07-04",
+      grades: "C",
+      is_official: true,
+      venue: "テスト会場C",
+      true_deadline: "2026-06-30T23:59:00+09:00",
+      internal_deadline: "2026-06-27T23:59:00+09:00",
+      drive_url: "https://drive.google.com/",
+      entry_page_token: "test-page-token",
+      entry_url: "https://example.com/entry/?page_token=test-page-token",
+      manager_name: "your-name",
+      manager_line_user_id: "dummy",
+      status: "active",
+    },
+    {
+      title: "テスト大会級制限なし",
+      event_start_date: "2026-07-12",
+      event_end_date: "2026-07-12",
+      grades: "",
+      is_official: false,
+      venue: "テスト会場フリー",
+      true_deadline: "2026-07-08T23:59:00+09:00",
+      internal_deadline: "2026-07-05T23:59:00+09:00",
+      drive_url: "https://drive.google.com/",
+      entry_page_token: "test-page-token",
+      entry_url: "https://example.com/entry/?page_token=test-page-token",
+      manager_name: "your-name",
+      manager_line_user_id: "dummy",
+      status: "active",
+    },
+  ];
+
+  const results = tournaments.map(function(tournament) {
+    return upsertTournament(tournament);
+  });
+
+  Logger.log(results);
+}
