@@ -1,16 +1,23 @@
 # GAS Directory
 
-This directory will contain the Google Apps Script implementation for:
+This directory contains the working Google Apps Script baseline for the project.
 
-- tournament APIs
-- response APIs
-- LINE notification handlers
-- scheduled reminder jobs
-- Google Calendar synchronization
-
-Planned early files:
+## Current Files
 
 - `Code.gs`
-- `api/`
-- `services/`
-- `lib/`
+  Current single-file implementation for tournament listing and upsert
+- `SETUP.md`
+  Script properties and deployment notes
+
+## Implemented So Far
+
+- `GET action=list_tournaments`
+- `GET action=list_public_tournaments&page_token=...`
+- `POST action=upsert_tournament`
+
+## Next Planned Work
+
+- `POST action=upsert_response`
+- notification log helpers
+- manager lookup helpers
+- LINE and Calendar integration
