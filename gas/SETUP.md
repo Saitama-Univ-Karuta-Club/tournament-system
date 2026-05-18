@@ -15,6 +15,7 @@
 ### POST
 
 - `action=upsert_tournament`
+- `action=upsert_response`
 
 ## Manual Deployment Flow
 
@@ -23,6 +24,7 @@
 3. Update the existing web app deployment
 4. Test `list_tournaments`
 5. Test `list_public_tournaments`
+6. Test `upsert_response`
 
 ## Suggested Public Test URL
 
