@@ -44,6 +44,18 @@ function doPost(e) {
       });
     }
 
+    if (action === "upsert_response") {
+      const result = upsertResponses(
+        body.page_token || "",
+        body.member_name || "",
+        body.responses || []
+      );
+      return jsonOutput({
+        ok: true,
+        updated_count: result.updated_count,
+      });
+    }
+
     return jsonOutput({
       ok: false,
       error: "Unknown action",
@@ -218,6 +230,61 @@ function upsertTournament(tournament) {
   };
 }
 
+function upsertResponses(pageToken, memberName, responses) {
+  validateResponseRequest(pageToken, memberName, responses);
+  getEntryPage(pageToken);
+
+  const tournaments = listPublicTournaments(pageToken);
+  const allowedTournamentIds = {};
+  const sheet = getSheetByName("Responses");
+  const values = sheet.getDataRange().getValues();
+  const headers = values[0];
+  const now = new Date();
+  let updatedCount = 0;
+
+  tournaments.forEach(function(tournament) {
+    allowedTournamentIds[tournament.tournament_id] = true;
+  });
+
+  responses.forEach(function(responseInput) {
+    validateSingleResponse(responseInput, allowedTournamentIds);
+
+    const existingRowIndex = findResponseRowIndex(
+      values,
+      headers,
+      responseInput.tournament_id,
+      memberName
+    );
+    const existing = existingRowIndex > 0 ?
+      rowToObject(headers, values[existingRowIndex - 1]) :
+      {};
+    const record = buildResponseRecord(
+      headers,
+      existing,
+      responseInput,
+      memberName,
+      now
+    );
+    const row = headers.map(function(header) {
+      return record[header] !== undefined ? record[header] : "";
+    });
+
+    if (existingRowIndex > 0) {
+      sheet.getRange(existingRowIndex, 1, 1, row.length).setValues([row]);
+      values[existingRowIndex - 1] = row;
+    } else {
+      sheet.appendRow(row);
+      values.push(row);
+    }
+
+    updatedCount += 1;
+  });
+
+  return {
+    updated_count: updatedCount,
+  };
+}
+
 function buildTournamentRecord(headers, existing, tournament, tournamentId, now) {
   const record = {};
   const nowIso = toIsoString(now);
@@ -264,6 +331,80 @@ function validateTournament(tournament) {
   });
 }
 
+function validateResponseRequest(pageToken, memberName, responses) {
+  if (!pageToken) {
+    throw new Error("Missing page_token");
+  }
+
+  if (!memberName) {
+    throw new Error("Missing member_name");
+  }
+
+  if (!Array.isArray(responses) || responses.length === 0) {
+    throw new Error("Responses must be a non-empty array");
+  }
+}
+
+function validateSingleResponse(responseInput, allowedTournamentIds) {
+  const allowedResponses = {
+    yes: true,
+    maybe: true,
+    no: true,
+  };
+
+  if (!responseInput.tournament_id) {
+    throw new Error("Missing tournament_id");
+  }
+
+  if (!allowedTournamentIds[responseInput.tournament_id]) {
+    throw new Error("Tournament is not available for this page_token");
+  }
+
+  if (!allowedResponses[responseInput.response]) {
+    throw new Error("Invalid response value");
+  }
+}
+
+function findResponseRowIndex(values, headers, tournamentId, memberName) {
+  const tournamentIdIndex = headers.indexOf("tournament_id");
+  const memberNameIndex = headers.indexOf("member_name");
+
+  for (let i = 1; i < values.length; i += 1) {
+    if (
+      values[i][tournamentIdIndex] === tournamentId &&
+      values[i][memberNameIndex] === memberName
+    ) {
+      return i + 1;
+    }
+  }
+
+  return -1;
+}
+
+function buildResponseRecord(headers, existing, responseInput, memberName, now) {
+  const record = {};
+  const nowIso = toIsoString(now);
+
+  headers.forEach(function(header) {
+    if (existing[header] !== undefined) {
+      record[header] = existing[header];
+    }
+  });
+
+  record.response_id = existing.response_id || generateResponseId(now);
+  record.tournament_id = responseInput.tournament_id;
+  record.member_name = memberName;
+  record.response = responseInput.response;
+  record.comment = responseInput.comment || "";
+  record.updated_at = nowIso;
+
+  if (!existing.created_at) {
+    record.created_at = nowIso;
+  }
+
+  return record;
+}
+
 function rowToObject(headers, row) {
   const obj = {};
   headers.forEach(function(header, index) {
@@ -273,8 +414,13 @@ function rowToObject(headers, row) {
 }
 
 function generateTournamentId(eventStartDate) {
-  const ymd = String(eventStartDate).replace(/-/g, "");
+  const ymd = normalizeDateKey(eventStartDate);
   return "T" + ymd + "_" + randomString(6);
+}
+
+function generateResponseId(now) {
+  return "R" + Utilities.formatDate(now, "Asia/Tokyo", "yyyyMMddHHmmss") +
+    "_" + randomString(6);
 }
 
 function randomString(length) {
@@ -289,8 +435,8 @@ function randomString(length) {
 }
 
 function buildEventDateLabel(startDate, endDate) {
-  const start = String(startDate);
-  const end = String(endDate);
+  const start = normalizeDateKey(startDate);
+  const end = normalizeDateKey(endDate);
 
   if (!start) {
     return "";
@@ -308,11 +454,38 @@ function buildEventDateLabel(startDate, endDate) {
 
 function formatDateLabel(dateString) {
   const parts = String(dateString).split("-");
+  if (parts.length !== 3 && /^\d{8}$/.test(String(dateString))) {
+    return Number(String(dateString).slice(4, 6)) + "月" +
+      Number(String(dateString).slice(6, 8)) + "日";
+  }
+
   if (parts.length !== 3) {
     return String(dateString);
   }
 
   return Number(parts[1]) + "月" + Number(parts[2]) + "日";
+}
+
+function normalizeDateKey(value) {
+  if (!value) {
+    return "";
+  }
+
+  if (Object.prototype.toString.call(value) === "[object Date]") {
+    return Utilities.formatDate(value, "Asia/Tokyo", "yyyy-MM-dd");
+  }
+
+  const text = String(value).trim();
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) {
+    return text;
+  }
+
+  if (/^\d{8}$/.test(text)) {
+    return text.slice(0, 4) + "-" + text.slice(4, 6) + "-" + text.slice(6, 8);
+  }
+
+  return text;
 }
 
 function toIsoString(date) {
@@ -336,6 +509,18 @@ function testUpsertTournament() {
     manager_line_user_id: "dummy",
     status: "draft",
   });
+
+  Logger.log(result);
+}
+
+function testUpsertResponses() {
+  const result = upsertResponses("test-page-token", "テスト太郎", [
+    {
+      tournament_id: "T20260627_KA59R2",
+      response: "yes",
+      comment: "参加希望です",
+    },
+  ]);
 
   Logger.log(result);
 }
