@@ -6,16 +6,23 @@ const state = {
   members: [],
   selectedTournamentId: "",
   selectedMemberId: "",
+  primaryTab: "tournaments",
+  tournamentMode: "tournament-create",
+  memberMode: "member-create",
 };
 
 const elements = {
+  primaryTabs: document.querySelectorAll(".primary-tab"),
+  panels: document.querySelectorAll("[data-panel]"),
+  secondaryTabs: document.querySelectorAll(".secondary-tab"),
+  subpanels: document.querySelectorAll("[data-subpanel]"),
   tournamentList: document.getElementById("tournament-list"),
   memberList: document.getElementById("member-list"),
   statusMessage: document.getElementById("status-message"),
   tournamentForm: document.getElementById("tournament-form"),
   memberForm: document.getElementById("member-form"),
-  newTournamentButton: document.getElementById("new-tournament-button"),
-  newMemberButton: document.getElementById("new-member-button"),
+  resetTournamentButton: document.getElementById("reset-tournament-button"),
+  resetMemberButton: document.getElementById("reset-member-button"),
   tournamentId: document.getElementById("tournament-id"),
   tournamentTitle: document.getElementById("tournament-title"),
   eventStartDate: document.getElementById("event-start-date"),
@@ -39,19 +46,32 @@ const elements = {
 
 document.addEventListener("DOMContentLoaded", init);
 
-elements.newTournamentButton.addEventListener("click", function() {
-  state.selectedTournamentId = "";
-  elements.tournamentForm.reset();
-  elements.tournamentStatus.value = "draft";
-  elements.entryPageToken.value = "test-page-token";
-  renderTournamentList();
+elements.primaryTabs.forEach(function(button) {
+  button.addEventListener("click", function() {
+    state.primaryTab = button.dataset.primaryTab;
+    renderTabs();
+  });
 });
 
-elements.newMemberButton.addEventListener("click", function() {
-  state.selectedMemberId = "";
-  elements.memberForm.reset();
-  elements.memberStatus.value = "active";
-  renderMemberList();
+elements.secondaryTabs.forEach(function(button) {
+  button.addEventListener("click", function() {
+    const key = button.dataset.secondaryTab;
+    if (key.startsWith("tournament-")) {
+      state.tournamentMode = key;
+    }
+    if (key.startsWith("member-")) {
+      state.memberMode = key;
+    }
+    renderTabs();
+  });
+});
+
+elements.resetTournamentButton.addEventListener("click", function() {
+  resetTournamentForm();
+});
+
+elements.resetMemberButton.addEventListener("click", function() {
+  resetMemberForm();
 });
 
 elements.tournamentForm.addEventListener("submit", async function(event) {
@@ -82,6 +102,8 @@ elements.tournamentForm.addEventListener("submit", async function(event) {
     });
     showStatus("大会情報を保存しました。", "success");
     await loadAdminData();
+    state.primaryTab = "tournaments";
+    state.tournamentMode = "tournament-list";
     selectTournamentById(result.tournament_id);
   } catch (error) {
     showStatus(error.message || "大会情報の保存に失敗しました。", "error");
@@ -105,6 +127,8 @@ elements.memberForm.addEventListener("submit", async function(event) {
     });
     showStatus("メンバー情報を保存しました。", "success");
     await loadAdminData();
+    state.primaryTab = "members";
+    state.memberMode = "member-list";
     selectMemberById(result.member_id);
   } catch (error) {
     showStatus(error.message || "メンバー情報の保存に失敗しました。", "error");
@@ -112,6 +136,9 @@ elements.memberForm.addEventListener("submit", async function(event) {
 });
 
 async function init() {
+  renderTabs();
+  resetTournamentForm();
+  resetMemberForm();
   await loadAdminData();
 }
 
@@ -135,6 +162,32 @@ async function loadAdminData() {
   }
 }
 
+function renderTabs() {
+  elements.primaryTabs.forEach(function(button) {
+    button.classList.toggle("is-active", button.dataset.primaryTab === state.primaryTab);
+  });
+
+  elements.panels.forEach(function(panel) {
+    panel.classList.toggle("is-hidden", panel.dataset.panel !== state.primaryTab);
+  });
+
+  elements.secondaryTabs.forEach(function(button) {
+    const target = button.dataset.secondaryTab;
+    const isActive =
+      target === state.tournamentMode ||
+      target === state.memberMode;
+    button.classList.toggle("is-active", isActive);
+  });
+
+  elements.subpanels.forEach(function(panel) {
+    const target = panel.dataset.subpanel;
+    const isActive =
+      target === state.tournamentMode ||
+      target === state.memberMode;
+    panel.classList.toggle("is-active", isActive);
+  });
+}
+
 function renderTournamentList() {
   if (!state.tournaments.length) {
     elements.tournamentList.innerHTML = '<li class="empty-state">大会がまだありません。</li>';
@@ -153,6 +206,8 @@ function renderTournamentList() {
 
   elements.tournamentList.querySelectorAll("[data-tournament-id]").forEach(function(button) {
     button.addEventListener("click", function() {
+      state.primaryTab = "tournaments";
+      state.tournamentMode = "tournament-create";
       selectTournamentById(button.dataset.tournamentId);
     });
   });
@@ -176,6 +231,8 @@ function renderMemberList() {
 
   elements.memberList.querySelectorAll("[data-member-id]").forEach(function(button) {
     button.addEventListener("click", function() {
+      state.primaryTab = "members";
+      state.memberMode = "member-create";
       selectMemberById(button.dataset.memberId);
     });
   });
@@ -191,6 +248,7 @@ function selectTournamentById(id) {
   }
 
   state.selectedTournamentId = id;
+  renderTabs();
   renderTournamentList();
 
   elements.tournamentId.value = item.tournament_id || "";
@@ -220,12 +278,28 @@ function selectMemberById(id) {
   }
 
   state.selectedMemberId = id;
+  renderTabs();
   renderMemberList();
 
   elements.memberId.value = item.member_id || "";
   elements.memberDisplayName.value = item.display_name || "";
   elements.memberGrade.value = item.grade || "";
   elements.memberStatus.value = item.status || "active";
+}
+
+function resetTournamentForm() {
+  state.selectedTournamentId = "";
+  elements.tournamentForm.reset();
+  elements.tournamentStatus.value = "draft";
+  elements.entryPageToken.value = "test-page-token";
+  renderTournamentList();
+}
+
+function resetMemberForm() {
+  state.selectedMemberId = "";
+  elements.memberForm.reset();
+  elements.memberStatus.value = "active";
+  renderMemberList();
 }
 
 async function fetchJson(action) {

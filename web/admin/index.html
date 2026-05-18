@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>大会管理</title>
+  <title>管理画面</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
@@ -13,128 +13,155 @@
   <main class="page">
     <header class="hero">
       <p class="eyebrow">Admin Console</p>
-      <h1>大会情報とメンバー管理</h1>
-      <p class="hero-description">大会情報の登録・更新と、メンバーの追加・級変更をこの画面だけで行えます。</p>
+      <h1>大会情報とメンバー情報の管理</h1>
+      <p class="hero-description">最初に対象を選び、その後で新規入力か登録済み一覧かを切り替えて操作します。</p>
     </header>
 
-    <div class="layout">
-      <section class="panel">
-        <div class="section-header">
-          <h2>大会管理</h2>
-          <button type="button" id="new-tournament-button" class="secondary-button">新規大会</button>
-        </div>
+    <nav class="primary-tabs" aria-label="管理対象切り替え">
+      <button type="button" class="primary-tab is-active" data-primary-tab="tournaments">大会</button>
+      <button type="button" class="primary-tab" data-primary-tab="members">メンバー</button>
+    </nav>
 
+    <section class="panel" data-panel="tournaments">
+      <div class="section-header">
+        <h2>大会管理</h2>
+      </div>
+
+      <div class="secondary-tabs" aria-label="大会操作切り替え">
+        <button type="button" class="secondary-tab is-active" data-secondary-tab="tournament-create">新規入力</button>
+        <button type="button" class="secondary-tab" data-secondary-tab="tournament-list">登録済み一覧</button>
+      </div>
+
+      <div class="subpanel is-active" data-subpanel="tournament-create">
+        <form id="tournament-form" class="editor-form">
+          <input type="hidden" id="tournament-id">
+          <label class="field">
+            <span>大会名</span>
+            <input id="tournament-title" type="text" required>
+          </label>
+          <label class="field">
+            <span>大会開始日</span>
+            <input id="event-start-date" type="date" required>
+          </label>
+          <label class="field">
+            <span>大会終了日</span>
+            <input id="event-end-date" type="date" required>
+          </label>
+          <label class="field">
+            <span>開催級</span>
+            <input id="grades" type="text" placeholder="例: C または B,C,D">
+          </label>
+          <label class="field">
+            <span>真の申込締切</span>
+            <input id="true-deadline" type="datetime-local" required>
+          </label>
+          <label class="field">
+            <span>サークル内締切</span>
+            <input id="internal-deadline" type="datetime-local" required>
+          </label>
+          <label class="field">
+            <span>会場</span>
+            <input id="venue" type="text">
+          </label>
+          <label class="field">
+            <span>要項URL</span>
+            <input id="drive-url" type="url">
+          </label>
+          <label class="field">
+            <span>参加ページ token</span>
+            <input id="entry-page-token" type="text" value="test-page-token">
+          </label>
+          <label class="field">
+            <span>参加ページ URL</span>
+            <input id="entry-url" type="url" placeholder="https://example.com/entry/?page_token=...">
+          </label>
+          <label class="field">
+            <span>申込担当者名</span>
+            <input id="manager-name" type="text" required>
+          </label>
+          <label class="field">
+            <span>担当者 LINE user ID</span>
+            <input id="manager-line-user-id" type="text">
+          </label>
+          <label class="field">
+            <span>ステータス</span>
+            <select id="tournament-status">
+              <option value="draft">draft</option>
+              <option value="active">active</option>
+              <option value="applied">applied</option>
+              <option value="closed">closed</option>
+              <option value="canceled">canceled</option>
+            </select>
+          </label>
+          <label class="checkbox-field">
+            <input id="is-official" type="checkbox">
+            <span>公認大会</span>
+          </label>
+          <div class="actions">
+            <button type="button" id="reset-tournament-button" class="secondary-button">入力をリセット</button>
+            <button type="submit">大会を保存</button>
+          </div>
+        </form>
+      </div>
+
+      <div class="subpanel" data-subpanel="tournament-list">
         <div class="admin-grid">
           <div class="list-pane">
             <ul id="tournament-list" class="item-list"></ul>
           </div>
-
-          <form id="tournament-form" class="editor-form">
-            <input type="hidden" id="tournament-id">
-            <label class="field">
-              <span>大会名</span>
-              <input id="tournament-title" type="text" required>
-            </label>
-            <label class="field">
-              <span>大会開始日</span>
-              <input id="event-start-date" type="date" required>
-            </label>
-            <label class="field">
-              <span>大会終了日</span>
-              <input id="event-end-date" type="date" required>
-            </label>
-            <label class="field">
-              <span>開催級</span>
-              <input id="grades" type="text" placeholder="例: C または B,C,D">
-            </label>
-            <label class="field">
-              <span>真の申込締切</span>
-              <input id="true-deadline" type="datetime-local" required>
-            </label>
-            <label class="field">
-              <span>サークル内締切</span>
-              <input id="internal-deadline" type="datetime-local" required>
-            </label>
-            <label class="field">
-              <span>会場</span>
-              <input id="venue" type="text">
-            </label>
-            <label class="field">
-              <span>要項URL</span>
-              <input id="drive-url" type="url">
-            </label>
-            <label class="field">
-              <span>参加ページ token</span>
-              <input id="entry-page-token" type="text" value="test-page-token">
-            </label>
-            <label class="field">
-              <span>参加ページ URL</span>
-              <input id="entry-url" type="url" placeholder="https://example.com/entry/?page_token=...">
-            </label>
-            <label class="field">
-              <span>申込担当者名</span>
-              <input id="manager-name" type="text" required>
-            </label>
-            <label class="field">
-              <span>担当者 LINE user ID</span>
-              <input id="manager-line-user-id" type="text">
-            </label>
-            <label class="field">
-              <span>ステータス</span>
-              <select id="tournament-status">
-                <option value="draft">draft</option>
-                <option value="active">active</option>
-                <option value="applied">applied</option>
-                <option value="closed">closed</option>
-                <option value="canceled">canceled</option>
-              </select>
-            </label>
-            <label class="checkbox-field">
-              <input id="is-official" type="checkbox">
-              <span>公認大会</span>
-            </label>
-            <div class="actions">
-              <button type="submit">大会を保存</button>
-            </div>
-          </form>
+          <div class="detail-pane">
+            <p class="detail-note">一覧から大会を選ぶと、新規入力フォームに内容を読み込みます。</p>
+          </div>
         </div>
-      </section>
+      </div>
+    </section>
 
-      <section class="panel">
-        <div class="section-header">
-          <h2>メンバー管理</h2>
-          <button type="button" id="new-member-button" class="secondary-button">新規メンバー</button>
-        </div>
+    <section class="panel is-hidden" data-panel="members">
+      <div class="section-header">
+        <h2>メンバー管理</h2>
+      </div>
 
+      <div class="secondary-tabs" aria-label="メンバー操作切り替え">
+        <button type="button" class="secondary-tab is-active" data-secondary-tab="member-create">新規入力</button>
+        <button type="button" class="secondary-tab" data-secondary-tab="member-list">登録済み一覧</button>
+      </div>
+
+      <div class="subpanel is-active" data-subpanel="member-create">
+        <form id="member-form" class="editor-form">
+          <input type="hidden" id="member-id">
+          <label class="field">
+            <span>表示名</span>
+            <input id="member-display-name" type="text" required>
+          </label>
+          <label class="field">
+            <span>級</span>
+            <input id="member-grade" type="text" placeholder="例: D">
+          </label>
+          <label class="field">
+            <span>ステータス</span>
+            <select id="member-status">
+              <option value="active">active</option>
+              <option value="inactive">inactive</option>
+            </select>
+          </label>
+          <div class="actions">
+            <button type="button" id="reset-member-button" class="secondary-button">入力をリセット</button>
+            <button type="submit">メンバーを保存</button>
+          </div>
+        </form>
+      </div>
+
+      <div class="subpanel" data-subpanel="member-list">
         <div class="admin-grid">
           <div class="list-pane">
             <ul id="member-list" class="item-list"></ul>
           </div>
-
-          <form id="member-form" class="editor-form">
-            <input type="hidden" id="member-id">
-            <label class="field">
-              <span>表示名</span>
-              <input id="member-display-name" type="text" required>
-            </label>
-            <label class="field">
-              <span>級</span>
-              <input id="member-grade" type="text" placeholder="例: D">
-            </label>
-            <label class="field">
-              <span>ステータス</span>
-              <select id="member-status">
-                <option value="active">active</option>
-                <option value="inactive">inactive</option>
-              </select>
-            </label>
-            <div class="actions">
-              <button type="submit">メンバーを保存</button>
-            </div>
-          </form>
+          <div class="detail-pane">
+            <p class="detail-note">一覧からメンバーを選ぶと、新規入力フォームに内容を読み込みます。</p>
+          </div>
         </div>
-      </section>
-    </div>
+      </div>
+    </section>
 
     <div id="status-message" class="status-message" aria-live="polite"></div>
   </main>
