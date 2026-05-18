@@ -81,6 +81,7 @@ body {
 }
 
 input[type="text"],
+select,
 textarea {
   width: 100%;
   border: 1px solid var(--line);
@@ -92,6 +93,7 @@ textarea {
 }
 
 input[type="text"]:focus,
+select:focus,
 textarea:focus {
   outline: 2px solid rgba(163, 54, 47, 0.18);
   border-color: var(--accent);

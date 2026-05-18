@@ -23,14 +23,13 @@
       <form id="entry-form" class="entry-form">
         <label class="field">
           <span class="field-label">名前</span>
-          <input
+          <select
             id="member-name"
             name="member_name"
-            type="text"
-            autocomplete="name"
-            placeholder="例: 石田"
             required
           >
+            <option value="">選択してください</option>
+          </select>
         </label>
 
         <div id="tournament-list" class="tournament-list"></div>

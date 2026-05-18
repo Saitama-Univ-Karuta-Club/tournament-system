@@ -13,6 +13,7 @@ This directory contains the working Google Apps Script baseline for the project.
 
 - `GET action=list_tournaments`
 - `GET action=list_public_tournaments&page_token=...`
+- `GET action=list_members`
 - `POST action=upsert_tournament`
 - `POST action=upsert_response`
 

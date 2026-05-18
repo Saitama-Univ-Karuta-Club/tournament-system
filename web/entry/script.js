@@ -3,6 +3,7 @@ const API_BASE_URL =
 
 const state = {
   pageToken: "",
+  members: [],
   tournaments: [],
 };
 
@@ -36,8 +37,10 @@ async function init() {
 
   try {
     const data = await fetchPublicTournaments(pageToken);
+    state.members = data.members || [];
     state.tournaments = data.tournaments || [];
     renderPage(data.page || {});
+    renderMemberOptions(state.members);
     renderTournaments(state.tournaments);
     showStatus("", "");
     enableForm();
@@ -133,6 +136,24 @@ function renderPage(page) {
   if (page.description) {
     elements.pageDescription.textContent = page.description;
   }
+}
+
+function renderMemberOptions(members) {
+  elements.memberName.innerHTML = "";
+
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = "選択してください";
+  elements.memberName.appendChild(placeholder);
+
+  members.forEach(function(member) {
+    const option = document.createElement("option");
+    option.value = member.display_name;
+    option.textContent = member.grade ?
+      member.display_name + " (" + member.grade + ")" :
+      member.display_name;
+    elements.memberName.appendChild(option);
+  });
 }
 
 function renderTournaments(tournaments) {

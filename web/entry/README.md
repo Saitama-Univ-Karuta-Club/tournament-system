@@ -12,6 +12,7 @@ This directory contains the first member-facing attendance confirmation page.
 
 - reads `page_token` from the URL
 - fetches `list_public_tournaments`
+- renders a member dropdown from `Members`
 - renders the tournament cards
 - submits selected responses to `upsert_response`
 
