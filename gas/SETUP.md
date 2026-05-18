@@ -12,11 +12,13 @@
 - `action=list_tournaments`
 - `action=list_public_tournaments&page_token=...`
 - `action=list_members`
+- `action=list_admin_members`
 - `action=list_member_responses&page_token=...&member_name=...`
 
 ### POST
 
 - `action=upsert_tournament`
+- `action=upsert_member`
 - `action=upsert_response`
 
 ## Manual Deployment Flow
