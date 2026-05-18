@@ -218,6 +218,7 @@ function listMemberResponses(pageToken, memberName) {
   const allowedTournamentIds = {};
   const sheet = getSheetByName("Responses");
   const values = sheet.getDataRange().getValues();
+  const normalizedMemberName = normalizeMemberName(memberName);
 
   publicTournaments.forEach(function(tournament) {
     allowedTournamentIds[tournament.tournament_id] = true;
@@ -240,7 +241,7 @@ function listMemberResponses(pageToken, memberName) {
       return rowToObject(headers, row);
     })
     .filter(function(response) {
-      return response.member_name === memberName &&
+      return normalizeMemberName(response.member_name) === normalizedMemberName &&
         allowedTournamentIds[response.tournament_id];
     })
     .map(function(response) {
@@ -434,7 +435,7 @@ function validateResponseRequest(pageToken, memberName, responses) {
     throw new Error("Missing page_token");
   }
 
-  if (!memberName) {
+  if (!normalizeMemberName(memberName)) {
     throw new Error("Missing member_name");
   }
 
@@ -466,11 +467,12 @@ function validateSingleResponse(responseInput, allowedTournamentIds) {
 function findResponseRowIndex(values, headers, tournamentId, memberName) {
   const tournamentIdIndex = headers.indexOf("tournament_id");
   const memberNameIndex = headers.indexOf("member_name");
+  const normalizedMemberName = normalizeMemberName(memberName);
 
   for (let i = 1; i < values.length; i += 1) {
     if (
       values[i][tournamentIdIndex] === tournamentId &&
-      values[i][memberNameIndex] === memberName
+      normalizeMemberName(values[i][memberNameIndex]) === normalizedMemberName
     ) {
       return i + 1;
     }
@@ -482,6 +484,7 @@ function findResponseRowIndex(values, headers, tournamentId, memberName) {
 function buildResponseRecord(headers, existing, responseInput, memberName, now) {
   const record = {};
   const nowIso = toIsoString(now);
+  const normalizedMemberName = normalizeMemberName(memberName);
 
   headers.forEach(function(header) {
     if (existing[header] !== undefined) {
@@ -491,7 +494,7 @@ function buildResponseRecord(headers, existing, responseInput, memberName, now) 
 
   record.response_id = existing.response_id || generateResponseId(now);
   record.tournament_id = responseInput.tournament_id;
-  record.member_name = memberName;
+  record.member_name = normalizedMemberName;
   record.response = responseInput.response;
   record.comment = responseInput.comment || "";
   record.updated_at = nowIso;
@@ -584,6 +587,13 @@ function normalizeDateKey(value) {
   }
 
   return text;
+}
+
+function normalizeMemberName(value) {
+  return String(value || "")
+    .trim()
+    .replace(/\u3000/g, " ")
+    .replace(/\s+/g, " ");
 }
 
 function toIsoString(date) {
