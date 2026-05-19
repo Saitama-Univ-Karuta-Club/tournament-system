@@ -1,5 +1,30 @@
 # サークル大会情報管理・参加意思確認・LINE通知Bot 仕様書
 
+## 0. 現在の実装状況と引き継ぎ方針
+
+この文書は初期設計書であると同時に、現在の運用手順書としても使う。
+
+2026-05-19 時点で、以下は実装済みである。
+
+- Google Apps Script による大会・メンバー・回答の読み書きAPI
+- GitHub Pages 管理画面からの大会登録・編集
+- GitHub Pages 参加意思確認ページからの回答送信
+- Google Calendar への大会日、サークル内締切、真の申込締切の同期
+- LINE Bot によるグループ通知
+- LINE Bot による申込担当者個人通知
+- `/groupid` による LINE グループID登録
+- `/担当者登録` による申込担当者の LINE userId 登録
+- `NotificationLogs` を使った通知履歴管理
+- 毎日 17 時台の一斉大会通知トリガー
+
+引き継ぎしやすさを重視し、以下の原則で運用する。
+
+- 正本データは Google Sheets に置く
+- 自動処理の判定根拠は `NotificationLogs` に残す
+- 申込担当者の特定は `Managers` シートで行う
+- 日々の運用は「大会を登録する」「必要なら修正する」だけで回るようにする
+- 新しい担当者が来ても、この文書だけで最低限の再設定ができる状態を維持する
+
 ## 1. 目的
 
 本システムは、競技かるたサークルにおける大会情報共有、参加意思確認、申込締切管理、申込担当者へのリマインドを自動化することを目的とする。
@@ -46,13 +71,17 @@ GitHub Pages
 Google Apps Script
   ├─ 大会情報API
   ├─ 参加回答API
+  ├─ メンバーAPI
+  ├─ 申込担当者API
   ├─ Google Sheets読み書き
   ├─ LINE Messaging API送信
   ├─ Google Calendar同期
+  ├─ 毎日17時台の一斉大会通知
   └─ 定期実行リマインド処理
 
 Google Sheets
   ├─ Tournaments
+  ├─ Members
   ├─ Responses
   ├─ EntryPages
   ├─ Managers
@@ -203,40 +232,44 @@ https://example.github.io/karuta-entry/admin/?admin_token=LONG_RANDOM_ADMIN_TOKE
 
 大会情報を管理するシート。
 
-| 列名 | 型 | 説明 |
-|---|---|---|
-| tournament_id | string | 大会ごとの一意ID |
-| title | string | 大会名 |
-| event_start_date | date | 大会開始日 |
-| event_end_date | date | 大会終了日 |
-| grades | string | 開催級。例: `B,C,D` |
-| is_official | boolean | 公認大会かどうか |
-| venue | string | 会場 |
-| true_deadline | datetime | 真の申込締切 |
-| internal_deadline | datetime | サークル内締切 |
-| drive_url | string | Google Drive上の要項URL |
-| entry_page_token | string | 対応する参加意思確認ページtoken |
-| entry_url | string | 参加意思確認ページURL |
-| manager_name | string | 申込担当者名 |
-| manager_line_user_id | string | 申込担当者のLINE userId |
-| status | string | `draft`, `active`, `applied`, `closed`, `canceled`, `deleted` |
-| calendar_event_id_event | string | 大会日予定のGoogle Calendar event id |
-| calendar_event_id_internal_deadline | string | サークル内締切予定のevent id |
-| calendar_event_id_true_deadline | string | 真の締切予定のevent id |
-| created_at | datetime | 作成日時 |
-| updated_at | datetime | 更新日時 |
-| deleted_at | datetime | 削除扱い日時 |
+
+| 列名                                  | 型        | 説明                                                            |
+| ----------------------------------- | -------- | ------------------------------------------------------------- |
+| tournament_id                       | string   | 大会ごとの一意ID                                                     |
+| title                               | string   | 大会名                                                           |
+| event_start_date                    | date     | 大会開始日                                                         |
+| event_end_date                      | date     | 大会終了日                                                         |
+| grades                              | string   | 開催級。例: `B,C,D`                                                |
+| is_official                         | boolean  | 公認大会かどうか                                                      |
+| venue                               | string   | 会場                                                            |
+| true_deadline                       | datetime | 真の申込締切                                                        |
+| internal_deadline                   | datetime | サークル内締切                                                       |
+| drive_url                           | string   | Google Drive上の要項URL                                           |
+| entry_page_token                    | string   | 対応する参加意思確認ページtoken                                            |
+| entry_url                           | string   | 参加意思確認ページURL                                                  |
+| manager_name                        | string   | 申込担当者名                                                        |
+| manager_line_user_id                | string   | 申込担当者のLINE userId                                             |
+| status                              | string   | `draft`, `active`, `applied`, `closed`, `canceled`, `deleted` |
+| calendar_event_id_event             | string   | 大会日予定のGoogle Calendar event id                                |
+| calendar_event_id_internal_deadline | string   | サークル内締切予定のevent id                                            |
+| calendar_event_id_true_deadline     | string   | 真の締切予定のevent id                                               |
+| created_at                          | datetime | 作成日時                                                          |
+| updated_at                          | datetime | 更新日時                                                          |
+| deleted_at                          | datetime | 削除扱い日時                                                        |
+
 
 ### 6.1.1 statusの意味
 
-| status | 意味 |
-|---|---|
-| draft | 下書き。参加者ページ・通知対象にはしない |
-| active | 公開中。参加者ページ・通知対象にする |
-| applied | 申込完了済み。担当者リマインド対象外 |
-| closed | 大会終了・運用終了 |
-| canceled | 大会中止 |
-| deleted | 削除扱い。物理削除はしない |
+
+| status   | 意味                   |
+| -------- | -------------------- |
+| draft    | 下書き。参加者ページ・通知対象にはしない |
+| active   | 公開中。参加者ページ・通知対象にする   |
+| applied  | 申込完了済み。担当者リマインド対象外   |
+| closed   | 大会終了・運用終了            |
+| canceled | 大会中止                 |
+| deleted  | 削除扱い。物理削除はしない        |
+
 
 ---
 
@@ -244,23 +277,27 @@ https://example.github.io/karuta-entry/admin/?admin_token=LONG_RANDOM_ADMIN_TOKE
 
 参加回答を管理するシート。
 
-| 列名 | 型 | 説明 |
-|---|---|---|
-| response_id | string | 回答ごとの一意ID |
-| tournament_id | string | 対応する大会ID |
-| member_name | string | 回答者名 |
-| response | string | `yes`, `maybe`, `no` |
-| comment | string | 任意コメント |
-| created_at | datetime | 作成日時 |
-| updated_at | datetime | 更新日時 |
+
+| 列名            | 型        | 説明                   |
+| ------------- | -------- | -------------------- |
+| response_id   | string   | 回答ごとの一意ID            |
+| tournament_id | string   | 対応する大会ID             |
+| member_name   | string   | 回答者名                 |
+| response      | string   | `yes`, `maybe`, `no` |
+| comment       | string   | 任意コメント               |
+| created_at    | datetime | 作成日時                 |
+| updated_at    | datetime | 更新日時                 |
+
 
 ### 6.2.1 responseの意味
 
-| response | 表示 | 意味 |
-|---|---|---|
-| yes | ○ | 参加希望 |
-| maybe | △ | 未定・条件付き |
-| no | × | 不参加 |
+
+| response | 表示  | 意味      |
+| -------- | --- | ------- |
+| yes      | ○   | 参加希望    |
+| maybe    | △   | 未定・条件付き |
+| no       | ×   | 不参加     |
+
 
 ### 6.2.2 回答更新ルール
 
@@ -276,16 +313,18 @@ unique key = tournament_id + member_name
 
 参加意思確認ページのtokenを管理するシート。
 
-| 列名 | 型 | 説明 |
-|---|---|---|
-| page_token | string | 参加意思確認ページtoken |
-| title | string | ページタイトル |
-| description | string | ページ説明文 |
-| active_from | datetime | 有効開始日時 |
-| active_until | datetime | 有効終了日時 |
-| status | string | `active`, `inactive`, `archived` |
-| created_at | datetime | 作成日時 |
-| updated_at | datetime | 更新日時 |
+
+| 列名           | 型        | 説明                               |
+| ------------ | -------- | -------------------------------- |
+| page_token   | string   | 参加意思確認ページtoken                   |
+| title        | string   | ページタイトル                          |
+| description  | string   | ページ説明文                           |
+| active_from  | datetime | 有効開始日時                           |
+| active_until | datetime | 有効終了日時                           |
+| status       | string   | `active`, `inactive`, `archived` |
+| created_at   | datetime | 作成日時                             |
+| updated_at   | datetime | 更新日時                             |
+
 
 ---
 
@@ -293,14 +332,16 @@ unique key = tournament_id + member_name
 
 申込担当者情報を管理するシート。
 
-| 列名 | 型 | 説明 |
-|---|---|---|
-| manager_name | string | 申込担当者名 |
-| line_user_id | string | LINE userId |
-| display_name | string | LINE表示名または任意表示名 |
-| status | string | `active`, `inactive` |
-| created_at | datetime | 作成日時 |
-| updated_at | datetime | 更新日時 |
+
+| 列名           | 型        | 説明                   |
+| ------------ | -------- | -------------------- |
+| manager_name | string   | 申込担当者名               |
+| line_user_id | string   | LINE userId          |
+| display_name | string   | LINE表示名または任意表示名      |
+| status       | string   | `active`, `inactive` |
+| created_at   | datetime | 作成日時                 |
+| updated_at   | datetime | 更新日時                 |
+
 
 ---
 
@@ -308,26 +349,30 @@ unique key = tournament_id + member_name
 
 通知済み判定に使うシート。
 
-| 列名 | 型 | 説明 |
-|---|---|---|
-| log_id | string | 通知ログID |
-| tournament_id | string | 対応する大会ID |
-| notification_type | string | 通知種別 |
-| sent_to_type | string | `group` または `manager` |
-| sent_to_id | string | LINE groupId または userId |
-| sent_at | datetime | 送信日時 |
-| message | string | 送信本文 |
+
+| 列名                | 型        | 説明                      |
+| ----------------- | -------- | ----------------------- |
+| log_id            | string   | 通知ログID                  |
+| tournament_id     | string   | 対応する大会ID                |
+| notification_type | string   | 通知種別                    |
+| sent_to_type      | string   | `group` または `manager`   |
+| sent_to_id        | string   | LINE groupId または userId |
+| sent_at           | datetime | 送信日時                    |
+| message           | string   | 送信本文                    |
+
 
 ### 6.5.1 notification_type
 
-| notification_type | 意味 |
-|---|---|
-| announcement | 大会情報更新通知 |
-| internal_deadline_2days_before | サークル内締切2日前リマインド |
-| internal_deadline_1day_before | サークル内締切前日リマインド |
+
+| notification_type                  | 意味              |
+| ---------------------------------- | --------------- |
+| announcement                       | 大会情報更新通知        |
+| internal_deadline_2days_before     | サークル内締切2日前リマインド |
+| internal_deadline_1day_before      | サークル内締切前日リマインド  |
 | internal_deadline_next_day_manager | サークル内締切翌日の担当者通知 |
-| true_deadline_morning_manager | 真の締切日朝の担当者最終通知 |
-| application_completed | 申込完了通知 |
+| true_deadline_morning_manager      | 真の締切日朝の担当者最終通知  |
+| application_completed              | 申込完了通知          |
+
 
 ---
 
@@ -395,27 +440,32 @@ https://example.github.io/karuta-entry/admin/?admin_token=LONG_RANDOM_ADMIN_TOKE
 - 新規大会作成
 - 既存大会編集
 - 大会情報保存
+- 保存中モーダルの表示と操作ロック
 - 大会ステータス変更
+- 申込担当者プルダウン選択
+- 開催級の複数選択UI
 - LINE更新通知送信
 - カレンダー同期実行
 
 ### 8.1.4 入力項目
 
-| 項目 | UI | 必須 | 備考 |
-|---|---|---|---|
-| 大会ID | text / readonly | 編集時必須 | 新規作成時は自動生成 |
-| 大会名 | text | 必須 | 例: 東会大会D級 |
-| 大会開始日 | date | 必須 | ISO date形式で保存 |
-| 大会終了日 | date | 必須 | 1日大会なら開始日と同じ |
-| 開催級 | checkbox | 任意 | A/B/C/D/E |
-| 公認区分 | select | 任意 | 公認/非公認 |
-| 会場 | text | 任意 | 未定可 |
-| 真の申込締切 | datetime-local | 必須 | JSTとして扱う |
-| サークル内締切 | datetime-local | 必須 | JSTとして扱う |
-| Google Drive URL | url | 任意 | 要項PDFの保存先 |
-| 申込担当者 | select / text | 必須 | Managersから選択できるのが望ましい |
-| ステータス | select | 必須 | draft/active/applied/closed/canceled |
-| 備考 | textarea | 任意 | 参加資格等の補足 |
+
+| 項目               | UI              | 必須    | 備考                                   |
+| ---------------- | --------------- | ----- | ------------------------------------ |
+| 大会ID             | text / readonly | 編集時必須 | 新規作成時は自動生成                           |
+| 大会名              | text            | 必須    | 例: 東会大会D級                            |
+| 大会開始日            | date            | 必須    | ISO date形式で保存                        |
+| 大会終了日            | date            | 必須    | 1日大会なら開始日と同じ                         |
+| 開催級              | 複数選択チップ        | 任意    | A/B/C/D/E/F/初心者 を複数選択可能                |
+| 公認区分             | select          | 任意    | 公認/非公認                               |
+| 会場               | text            | 任意    | 未定可                                  |
+| 真の申込締切           | datetime-local  | 必須    | JSTとして扱う                             |
+| サークル内締切          | datetime-local  | 必須    | JSTとして扱う                             |
+| Google Drive URL | url             | 任意    | 要項PDFの保存先                            |
+| 申込担当者            | select          | 必須    | `Managers` シートの active な担当者から選択する      |
+| ステータス            | select          | 必須    | draft/active/applied/closed/canceled |
+| 備考               | textarea        | 任意    | 参加資格等の補足                             |
+
 
 ### 8.1.5 ボタン
 
@@ -442,8 +492,11 @@ MVPでは以下に絞ってもよい。
 - `tournament_id` が空の場合、新規作成として扱う
 - `tournament_id` が既存の場合、該当行を更新する
 - `tournament_id` が指定されているが未登録の場合、そのIDで新規作成する
-- LINE通知は保存時に自動送信しない
-- LINE通知は「LINEグループへ更新通知を送る」ボタン押下時のみ送信する
+- 保存時に Google Calendar 同期も実行する
+- 保存時に LINE 通知は自動送信しない
+- 日常運用では、LINE 通知は毎日 17 時台の定期トリガーに任せる
+- 緊急共有が必要な場合のみ「LINEグループへ更新通知を送る」ボタンを使う
+- 保存中はポップアップで進捗文言を表示し、画面の他操作を受け付けない
 
 ---
 
@@ -698,7 +751,32 @@ Content-Type: application/json
 
 ## 10.1 大会情報更新通知
 
-管理画面の「LINEグループへ更新通知を送る」ボタンから送信する。
+基本運用では、毎日 17 時台の定期トリガーから一斉送信する。
+
+管理画面の「LINEグループへ更新通知を送る」ボタンは残しておき、以下のような例外時のみ手動送信に使う。
+
+- 当日中に至急共有したい大会がある
+- 定期トリガーの設定直後で、試験送信したい
+- 何らかの理由で自動送信が失敗し、手動再送したい
+
+### 送信対象
+
+以下をすべて満たす大会を通知対象とする。
+
+- `status = active`
+- まだ `announcement` のグループ通知ログが存在しない
+
+複数大会が未通知なら、1 通にまとめて送る。
+
+### 二重送信防止
+
+`NotificationLogs` に以下を満たす履歴があれば、その大会は「通知済み」とみなす。
+
+```text
+notification_type = announcement
+sent_to_type = group
+tournament_id = 対象大会ID
+```
 
 ### 文面例
 
@@ -726,6 +804,17 @@ https://example.github.io/karuta-entry/entry/?page_token=...
 ```
 
 ---
+
+### 10.1.1 実装メモ
+
+- 実装関数: `sendScheduledDailyAnnouncements()`
+- 補助関数:
+  - `getPendingAnnouncementTournaments()`
+  - `getAnnouncedTournamentIdMap()`
+  - `sendAnnouncementForTournaments()`
+- テスト関数: `testSendScheduledDailyAnnouncements()`
+
+Apps Script の時間トリガーは厳密に 17:00:00 ではなく、17 時台のどこかで実行されることがある。
 
 ## 10.2 サークル内締切前リマインド
 
@@ -925,21 +1014,29 @@ response = yes
 
 Google Apps Scriptの時間主導トリガーで、毎日または毎時間実行する。
 
-MVPでは毎日9:00実行でよい。
+2026-05-19 時点では、少なくとも以下の定期処理を想定する。
+
+- 毎日 17 時台の大会情報一斉通知
+- 締切系リマインドの定期処理
+
+大会情報一斉通知は実装済みである。締切系リマインドは手動テスト関数で検証できる状態にあり、必要に応じて別トリガーで定期実行する。
 
 ### 12.1 処理概要
 
 ```text
-1. Tournamentsからstatus = activeの大会を取得
+1. Tournamentsから対象大会を取得
 2. 現在日時を取得
-3. サークル内締切2日前・前日の大会を抽出
-4. LINEグループへリマインド送信
-5. サークル内締切翌日の大会を抽出
-6. Responsesから申込希望者を抽出
-7. 担当者個人LINEへ通知
-8. 真の申込締切日当日の大会を抽出
-9. 申込完了済みでなければ担当者へ最終通知
-10. 各通知後、NotificationLogsに記録
+3. 大会情報一斉通知対象を抽出する
+4. 未通知大会があれば1通にまとめてLINEグループへ送る
+5. NotificationLogsへ記録する
+6. サークル内締切2日前・前日の大会を抽出する
+7. LINEグループへリマインド送信する
+8. サークル内締切翌日の大会を抽出する
+9. Responsesから申込希望者を抽出する
+10. 担当者個人LINEへ通知する
+11. 真の申込締切日当日の大会を抽出する
+12. 申込完了済みでなければ担当者へ最終通知する
+13. 各通知後、NotificationLogsに記録する
 ```
 
 ### 12.2 二重送信防止
@@ -951,6 +1048,17 @@ MVPでは毎日9:00実行でよい。
 ```text
 tournament_id + notification_type
 ```
+
+### 12.3 大会情報一斉通知トリガー
+
+実装済みの大会情報一斉通知トリガーは以下の運用とする。
+
+- ハンドラ関数: `sendScheduledDailyAnnouncements`
+- 作成関数: `installDailyAnnouncementTrigger()`
+- 削除関数: `deleteDailyAnnouncementTrigger()`
+- 実行時刻: 毎日 17 時台
+
+`installDailyAnnouncementTrigger()` は既存の同名トリガーを削除してから再作成する。
 
 ---
 
@@ -1045,8 +1153,9 @@ MVPでは管理画面中心とし、LINEコマンドは最小限でよい。
 3. 管理画面を開く
 4. 大会名、日時、開催級、締切、Drive URL等を入力する
 5. 保存する
-6. 必要に応じてLINEグループへ更新通知を送る
-7. Botまたは定期処理がGoogle Calendarへ予定を同期する
+6. 保存時にGoogle Calendarへ同期される
+7. 通常は毎日17時台の定期トリガーが未通知大会をまとめてLINEグループへ送る
+8. 緊急時のみ手動でLINEグループへ更新通知を送る
 ```
 
 ## 15.2 参加回答フロー
@@ -1155,12 +1264,158 @@ MVPの成功条件は以下である。
 
 ## 20. 用語
 
-| 用語 | 意味 |
-|---|---|
-| 真の申込締切 | 大会主催者が定める正式な申込締切 |
-| サークル内締切 | サークル内で参加希望を集めるための締切。真の締切より数日前に設定する |
-| 申込担当者 | サークル内で大会申込作業を担当する人 |
-| 参加意思確認ページ | メンバーが各大会への参加希望を回答するWebページ |
-| tournament_id | 大会ごとの一意ID |
-| page_token | 参加意思確認ページにアクセスするためのランダムtoken |
-| admin_token | 管理画面および管理APIを利用するためのランダムtoken |
+
+| 用語            | 意味                                 |
+| ------------- | ---------------------------------- |
+| 真の申込締切        | 大会主催者が定める正式な申込締切                   |
+| サークル内締切       | サークル内で参加希望を集めるための締切。真の締切より数日前に設定する |
+| 申込担当者         | サークル内で大会申込作業を担当する人                 |
+| 参加意思確認ページ     | メンバーが各大会への参加希望を回答するWebページ          |
+| tournament_id | 大会ごとの一意ID                          |
+| page_token    | 参加意思確認ページにアクセスするためのランダムtoken       |
+| admin_token   | 管理画面および管理APIを利用するためのランダムtoken      |
+
+
+---
+
+## 21. 初期設定・再設定手順
+
+この章は、新任担当者が最初に確認するための運用手順である。
+
+### 21.1 Script Properties
+
+Google Apps Script の `Script Properties` には最低限以下を設定する。
+
+| キー | 用途 |
+| --- | --- |
+| `SHEET_ID` | 利用する Google Sheets のファイルID |
+| `CALENDAR_ID` | 同期先 Google Calendar の ID |
+| `LINE_CHANNEL_ACCESS_TOKEN` | LINE Messaging API のチャネルアクセストークン |
+| `LINE_GROUP_ID` | 通知先グループの groupId |
+| `LINE_ADMIN_TOKEN` | 管理API保護用トークン。未設定でも動くが設定推奨 |
+
+### 21.2 `appsscript.json` の権限
+
+少なくとも以下の OAuth scope を設定する。
+
+```json
+[
+  "https://www.googleapis.com/auth/spreadsheets",
+  "https://www.googleapis.com/auth/calendar",
+  "https://www.googleapis.com/auth/script.external_request",
+  "https://www.googleapis.com/auth/script.scriptapp"
+]
+```
+
+`installDailyAnnouncementTrigger()` 実行時には `script.scriptapp` 権限が必要である。
+
+### 21.3 LINE の初期登録
+
+1. Bot を対象 LINE グループに参加させる
+2. グループ内で `/groupid` を送る
+3. 申込担当者が各自 `/担当者登録` を送る
+4. `Managers` シートに `line_user_id` が入ったことを確認する
+
+### 21.4 毎日17時通知トリガー設定
+
+Apps Script エディタから一度だけ以下を実行する。
+
+```text
+installDailyAnnouncementTrigger()
+```
+
+トリガーを作り直したいときは以下を使う。
+
+```text
+deleteDailyAnnouncementTrigger()
+installDailyAnnouncementTrigger()
+```
+
+### 21.5 GitHub Pages 側の更新
+
+管理画面や参加者画面の見た目を変更した場合、`index.html` の CSS / JS のクエリバージョンを上げてキャッシュを避ける。
+
+例:
+
+```text
+style.css?v=20260519-4
+script.js?v=20260519-8
+```
+
+---
+
+## 22. 実装済みの運用ポイント
+
+### 22.1 大会通知の考え方
+
+- 大会を保存しても、その場では自動通知しない
+- 毎日 17 時台に、その日までに追加された未通知大会だけをまとめて 1 通送る
+- すでに通知済みの大会は、`NotificationLogs` を見て再送しない
+- 急ぎの大会だけ、管理画面から手動送信する
+
+### 22.2 管理画面の現在仕様
+
+- 申込担当者は `Managers` シートからプルダウン選択する
+- 開催級は `A/B/C/D/E/F/初心者` の複数選択チップUIで入力する
+- 保存中は中央ポップアップで `保存中です...` を表示する
+- 保存中は他の操作を受け付けない
+
+### 22.3 担当者通知の現在仕様
+
+- サークル内締切翌日通知では、`Responses` の `yes` 回答者だけを抽出する
+- 参加希望者がいない場合も、担当者には「申込対応不要」の通知を送る
+- 大会に `manager_line_user_id` が無い場合、`Managers` シートから `manager_name` または `display_name` で補完する
+
+### 22.4 Google Calendar の現在仕様
+
+- 保存時にカレンダー同期も走る
+- `draft` と `deleted` はカレンダー予定を削除対象とする
+- `canceled` は `[中止]` をタイトルにつけて残す
+
+---
+
+## 23. 引き継ぎチェックリスト
+
+### 23.1 新任担当者が確認すること
+
+- Google Sheets の場所
+- Apps Script プロジェクトの場所
+- GitHub Pages の配置場所
+- LINE Developers のチャネル情報
+- Google Calendar の同期先
+- `Script Properties` の設定値
+- 毎日 17 時通知トリガーが生きているか
+
+### 23.2 まず動作確認する関数
+
+初回引き継ぎ時は、以下を順に試すと切り分けしやすい。
+
+- `testUpsertTournament()`
+- `testSendAnnouncement()`
+- `testSendScheduledDailyAnnouncements()`
+- `testSendGroupReminder2DaysBefore()`
+- `testSendGroupReminder1DayBefore()`
+- `testSendManagerReminderAfterInternalDeadline()`
+- `testSendManagerReminderTrueDeadlineMorning()`
+- `syncAllTournamentCalendars()`
+
+### 23.3 トラブル時の見方
+
+- 通知が送られない場合:
+  - `NotificationLogs` に既存ログがないか確認する
+  - `LINE_GROUP_ID` や `LINE_CHANNEL_ACCESS_TOKEN` を確認する
+  - 対象大会が `active` か確認する
+- 担当者通知が送られない場合:
+  - `Managers` シートの `line_user_id` を確認する
+  - 大会の `manager_name` が一致しているか確認する
+- トリガーが作れない場合:
+  - `appsscript.json` に `https://www.googleapis.com/auth/script.scriptapp` があるか確認する
+- カレンダー同期しない場合:
+  - `CALENDAR_ID` とカレンダー共有権限を確認する
+
+### 23.4 今後の改善候補
+
+- 締切系リマインドも本番トリガー化し、設定関数を揃える
+- `applied` 更新時の申込完了通知を実装する
+- 管理画面から通知履歴を見られるようにする
+- 引き継ぎ者向けのシート雛形作成手順も別紙化する
