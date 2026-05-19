@@ -86,6 +86,14 @@ elements.resetMemberButton.addEventListener("click", function() {
   resetMemberForm();
 });
 
+elements.eventStartDate.addEventListener("change", function() {
+  elements.eventEndDate.value = elements.eventStartDate.value;
+});
+
+elements.trueDeadline.addEventListener("change", function() {
+  syncInternalDeadlineDefault();
+});
+
 elements.tournamentForm.addEventListener("submit", async function(event) {
   event.preventDefault();
 
@@ -93,12 +101,12 @@ elements.tournamentForm.addEventListener("submit", async function(event) {
     tournament_id: elements.tournamentId.value.trim(),
     title: elements.tournamentTitle.value.trim(),
     event_start_date: elements.eventStartDate.value,
-    event_end_date: elements.eventEndDate.value,
+    event_end_date: elements.eventStartDate.value,
     grades: elements.grades.value.trim(),
     is_official: elements.isOfficial.checked,
     venue: elements.venue.value.trim(),
-    true_deadline: toApiDateTime(elements.trueDeadline.value),
-    internal_deadline: toApiDateTime(elements.internalDeadline.value),
+    true_deadline: toApiEndOfDay(elements.trueDeadline.value),
+    internal_deadline: toApiEndOfDay(elements.internalDeadline.value),
     drive_url: elements.driveUrl.value.trim(),
     entry_page_token: elements.entryPageToken.value.trim(),
     entry_url: elements.entryUrl.value.trim(),
@@ -293,10 +301,10 @@ function selectTournamentById(id) {
   elements.tournamentId.value = item.tournament_id || "";
   elements.tournamentTitle.value = item.title || "";
   elements.eventStartDate.value = toDateInputValue(item.event_start_date);
-  elements.eventEndDate.value = toDateInputValue(item.event_end_date);
+  elements.eventEndDate.value = toDateInputValue(item.event_start_date);
   elements.grades.value = item.grades || "";
-  elements.trueDeadline.value = toDateTimeLocalValue(item.true_deadline);
-  elements.internalDeadline.value = toDateTimeLocalValue(item.internal_deadline);
+  elements.trueDeadline.value = toDateInputValue(item.true_deadline);
+  elements.internalDeadline.value = toDateInputValue(item.internal_deadline);
   elements.venue.value = item.venue || "";
   elements.driveUrl.value = item.drive_url || "";
   elements.entryPageToken.value = item.entry_page_token || "";
@@ -331,6 +339,7 @@ function resetTournamentForm() {
   elements.tournamentForm.reset();
   elements.tournamentStatus.value = "draft";
   elements.entryPageToken.value = "test-page-token";
+  elements.eventEndDate.value = "";
   renderTournamentList();
   syncDetailEditors();
 }
@@ -412,8 +421,8 @@ async function postJson(payload) {
   return data;
 }
 
-function toApiDateTime(value) {
-  return value ? value + ":00+09:00" : "";
+function toApiEndOfDay(value) {
+  return value ? value + "T23:59:00+09:00" : "";
 }
 
 function toDateInputValue(value) {
@@ -422,6 +431,38 @@ function toDateInputValue(value) {
 
 function toDateTimeLocalValue(value) {
   return String(value || "").slice(0, 16);
+}
+
+function syncInternalDeadlineDefault() {
+  if (!elements.trueDeadline.value) {
+    elements.internalDeadline.value = "";
+    return;
+  }
+
+  elements.internalDeadline.value = shiftDateString(
+    elements.trueDeadline.value,
+    -3
+  );
+}
+
+function shiftDateString(value, days) {
+  const parts = String(value || "").split("-");
+  if (parts.length !== 3) {
+    return "";
+  }
+
+  const shifted = new Date(
+    Number(parts[0]),
+    Number(parts[1]) - 1,
+    Number(parts[2])
+  );
+  shifted.setDate(shifted.getDate() + days);
+
+  return [
+    shifted.getFullYear(),
+    String(shifted.getMonth() + 1).padStart(2, "0"),
+    String(shifted.getDate()).padStart(2, "0"),
+  ].join("-");
 }
 
 function showStatus(message, type) {
