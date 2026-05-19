@@ -86,24 +86,21 @@
       <input id="tournament-title" type="text" required>
     </label>
     <label class="field">
-      <span>大会開始日</span>
+      <span>大会日</span>
       <input id="event-start-date" type="date" required>
     </label>
-    <label class="field">
-      <span>大会終了日</span>
-      <input id="event-end-date" type="date" required>
-    </label>
+    <input id="event-end-date" type="hidden">
     <label class="field">
       <span>開催級</span>
       <input id="grades" type="text" placeholder="例: C または B,C,D">
     </label>
     <label class="field">
-      <span>真の申込締切</span>
-      <input id="true-deadline" type="datetime-local" required>
+      <span>主催締切日</span>
+      <input id="true-deadline" type="date" required>
     </label>
     <label class="field">
-      <span>サークル内締切</span>
-      <input id="internal-deadline" type="datetime-local" required>
+      <span>サークル内締切日</span>
+      <input id="internal-deadline" type="date" required>
     </label>
     <label class="field">
       <span>会場</span>
@@ -172,6 +169,6 @@
     </div>
   </form>
 
-  <script src="./script.js?v=20260519-3"></script>
+  <script src="./script.js?v=20260519-4"></script>
 </body>
 </html>
