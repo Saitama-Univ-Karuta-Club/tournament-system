@@ -66,6 +66,7 @@ function doPost(e) {
         ok: true,
         tournament_id: result.tournament_id,
         mode: result.mode,
+        calendar_sync: result.calendar_sync,
       });
     }
 
@@ -339,11 +340,20 @@ function upsertTournament(tournament) {
     sheet.getRange(rowIndex, 1, 1, row.length).setValues([row]);
   } else {
     sheet.appendRow(row);
+    rowIndex = sheet.getLastRow();
   }
+
+  const calendarSync = syncTournamentCalendarForRow(
+    sheet,
+    headers,
+    rowIndex,
+    record
+  );
 
   return {
     tournament_id: tournamentId,
     mode: mode,
+    calendar_sync: calendarSync,
   };
 }
 
@@ -471,6 +481,222 @@ function buildTournamentRecord(headers, existing, tournament, tournamentId, now)
   }
 
   return record;
+}
+
+function syncTournamentCalendarForRow(sheet, headers, rowIndex, tournament) {
+  const calendarHeaders = [
+    "calendar_event_id_event",
+    "calendar_event_id_internal_deadline",
+    "calendar_event_id_true_deadline",
+  ];
+  const missingHeaders = calendarHeaders.filter(function(header) {
+    return headers.indexOf(header) === -1;
+  });
+
+  if (missingHeaders.length > 0) {
+    return {
+      ok: false,
+      skipped: true,
+      message: "Calendar columns are missing: " + missingHeaders.join(", "),
+    };
+  }
+
+  try {
+    const syncResult = syncTournamentCalendarRecord(tournament);
+    const updatedRow = headers.map(function(header) {
+      return syncResult.record[header] !== undefined ?
+        syncResult.record[header] :
+        "";
+    });
+
+    sheet.getRange(rowIndex, 1, 1, updatedRow.length).setValues([updatedRow]);
+
+    return {
+      ok: true,
+      action: syncResult.action,
+      message: syncResult.message,
+      event_ids: {
+        event: syncResult.record.calendar_event_id_event || "",
+        internal_deadline:
+          syncResult.record.calendar_event_id_internal_deadline || "",
+        true_deadline:
+          syncResult.record.calendar_event_id_true_deadline || "",
+      },
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      skipped: false,
+      message: String(error),
+    };
+  }
+}
+
+function syncTournamentCalendarRecord(tournament) {
+  const record = cloneObject(tournament);
+  const status = String(record.status || "").trim();
+
+  if (status === "draft" || status === "deleted") {
+    deleteCalendarEventIfExists(record.calendar_event_id_event);
+    deleteCalendarEventIfExists(record.calendar_event_id_internal_deadline);
+    deleteCalendarEventIfExists(record.calendar_event_id_true_deadline);
+
+    record.calendar_event_id_event = "";
+    record.calendar_event_id_internal_deadline = "";
+    record.calendar_event_id_true_deadline = "";
+
+    return {
+      action: "cleared",
+      message: "Draft/deleted tournament is not synced to Calendar.",
+      record: record,
+    };
+  }
+
+  const calendar = getTournamentCalendar();
+  const titlePrefix = status === "canceled" ? "[中止] " : "";
+  const eventDateStart = parseDateOnly(record.event_start_date);
+  const eventDateEnd = addDays(
+    parseDateOnly(record.event_end_date || record.event_start_date),
+    1
+  );
+
+  record.calendar_event_id_event = upsertAllDayCalendarEvent(
+    calendar,
+    record.calendar_event_id_event,
+    titlePrefix + "【大会】" + record.title,
+    eventDateStart,
+    eventDateEnd,
+    buildCalendarEventDescription(record)
+  );
+
+  record.calendar_event_id_internal_deadline = upsertTimedCalendarEvent(
+    calendar,
+    record.calendar_event_id_internal_deadline,
+    titlePrefix + "【サークル内締切】" + record.title,
+    parseDateTimeValue(record.internal_deadline),
+    addMinutes(parseDateTimeValue(record.internal_deadline), 30),
+    buildInternalDeadlineDescription(record)
+  );
+
+  record.calendar_event_id_true_deadline = upsertTimedCalendarEvent(
+    calendar,
+    record.calendar_event_id_true_deadline,
+    titlePrefix + "【真の申込締切】" + record.title,
+    parseDateTimeValue(record.true_deadline),
+    addMinutes(parseDateTimeValue(record.true_deadline), 30),
+    buildTrueDeadlineDescription(record)
+  );
+
+  return {
+    action: "synced",
+    message: "Google Calendar synced.",
+    record: record,
+  };
+}
+
+function getTournamentCalendar() {
+  const calendarId =
+    PropertiesService.getScriptProperties().getProperty("CALENDAR_ID");
+
+  if (!calendarId) {
+    throw new Error("CALENDAR_ID is not set");
+  }
+
+  const calendar = CalendarApp.getCalendarById(calendarId);
+  if (!calendar) {
+    throw new Error("Calendar not found: " + calendarId);
+  }
+
+  return calendar;
+}
+
+function upsertAllDayCalendarEvent(
+  calendar,
+  eventId,
+  title,
+  startDate,
+  endDateExclusive,
+  description
+) {
+  const event = getCalendarEventById(eventId);
+
+  if (event) {
+    event.setTitle(title);
+    event.setDescription(description);
+    event.setAllDayDates(startDate, endDateExclusive);
+    return event.getId();
+  }
+
+  return calendar.createAllDayEvent(title, startDate, endDateExclusive, {
+    description: description,
+  }).getId();
+}
+
+function upsertTimedCalendarEvent(
+  calendar,
+  eventId,
+  title,
+  startTime,
+  endTime,
+  description
+) {
+  const event = getCalendarEventById(eventId);
+
+  if (event) {
+    event.setTitle(title);
+    event.setDescription(description);
+    event.setTime(startTime, endTime);
+    return event.getId();
+  }
+
+  return calendar.createEvent(title, startTime, endTime, {
+    description: description,
+  }).getId();
+}
+
+function getCalendarEventById(eventId) {
+  if (!eventId) {
+    return null;
+  }
+
+  try {
+    return CalendarApp.getEventById(eventId);
+  } catch (error) {
+    return null;
+  }
+}
+
+function deleteCalendarEventIfExists(eventId) {
+  const event = getCalendarEventById(eventId);
+  if (event) {
+    event.deleteEvent();
+  }
+}
+
+function buildCalendarEventDescription(tournament) {
+  const lines = [
+    "開催級: " + (tournament.grades || "級制限なし"),
+    "会場: " + (tournament.venue || "-"),
+    "要項URL: " + (tournament.drive_url || "-"),
+    "参加意思確認URL: " + (tournament.entry_url || "-"),
+  ];
+
+  return lines.join("\n");
+}
+
+function buildInternalDeadlineDescription(tournament) {
+  return [
+    "この日までに参加意思確認ページへ回答。",
+    "参加意思確認URL: " + (tournament.entry_url || "-"),
+  ].join("\n");
+}
+
+function buildTrueDeadlineDescription(tournament) {
+  return [
+    "申込担当者が主催者へ申込を行う最終締切。",
+    "要項URL: " + (tournament.drive_url || "-"),
+    "担当者: " + (tournament.manager_name || "-"),
+  ].join("\n");
 }
 
 function buildMemberRecord(headers, existing, member, memberId, now) {
@@ -610,6 +836,14 @@ function rowToObject(headers, row) {
   return obj;
 }
 
+function cloneObject(source) {
+  const clone = {};
+  Object.keys(source || {}).forEach(function(key) {
+    clone[key] = source[key];
+  });
+  return clone;
+}
+
 function generateTournamentId(eventStartDate) {
   const ymd = normalizeDateKey(eventStartDate);
   return "T" + ymd + "_" + randomString(6);
@@ -688,6 +922,49 @@ function normalizeDateKey(value) {
   }
 
   return text;
+}
+
+function parseDateOnly(value) {
+  const normalized = normalizeDateKey(value);
+  const parts = normalized.split("-");
+
+  if (parts.length !== 3) {
+    throw new Error("Invalid date value: " + value);
+  }
+
+  return new Date(
+    Number(parts[0]),
+    Number(parts[1]) - 1,
+    Number(parts[2])
+  );
+}
+
+function parseDateTimeValue(value) {
+  if (Object.prototype.toString.call(value) === "[object Date]") {
+    return new Date(value.getTime());
+  }
+
+  const text = String(value || "").trim();
+  if (!text) {
+    throw new Error("Invalid datetime value");
+  }
+
+  const date = new Date(text);
+  if (isNaN(date.getTime())) {
+    throw new Error("Invalid datetime value: " + value);
+  }
+
+  return date;
+}
+
+function addDays(date, days) {
+  const next = new Date(date.getTime());
+  next.setDate(next.getDate() + days);
+  return next;
+}
+
+function addMinutes(date, minutes) {
+  return new Date(date.getTime() + minutes * 60 * 1000);
 }
 
 function normalizeMemberName(value) {
@@ -775,4 +1052,32 @@ function seedAdditionalTestTournaments() {
   });
 
   Logger.log(results);
+}
+
+function syncAllTournamentCalendars() {
+  const sheet = getSheetByName("Tournaments");
+  const values = sheet.getDataRange().getValues();
+
+  if (values.length <= 1) {
+    return [];
+  }
+
+  const headers = values[0];
+  const results = [];
+
+  for (let i = 1; i < values.length; i += 1) {
+    if (!values[i].some(function(cell) { return cell !== ""; })) {
+      continue;
+    }
+
+    results.push(syncTournamentCalendarForRow(
+      sheet,
+      headers,
+      i + 1,
+      rowToObject(headers, values[i])
+    ));
+  }
+
+  Logger.log(results);
+  return results;
 }

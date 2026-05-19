@@ -18,6 +18,11 @@ This file tracks the initial setup needed to start development.
 - scheduled reminder jobs
 - Google Calendar sync
 
+## Script Properties
+
+- `SHEET_ID`: 運用用 Google Sheets の ID
+- `CALENDAR_ID`: 大会予定を書き込む Google Calendar の ID
+
 ### Google Sheets
 
 - `Tournaments`
