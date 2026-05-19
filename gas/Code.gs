@@ -57,7 +57,13 @@ function doGet(e) {
 
 function doPost(e) {
   try {
-    const body = JSON.parse(e.postData.contents || "{}");
+    const body = JSON.parse((e && e.postData && e.postData.contents) || "{}");
+
+    if (body.events && Array.isArray(body.events)) {
+      handleLineWebhook(body);
+      return ContentService.createTextOutput("OK");
+    }
+
     const action = body.action || "";
 
     if (action === "upsert_tournament") {
@@ -91,6 +97,19 @@ function doPost(e) {
       });
     }
 
+    if (action === "send_announcement") {
+      const result = sendAnnouncement(
+        body.admin_token || "",
+        body.tournament_ids || []
+      );
+      return jsonOutput({
+        ok: true,
+        sent: result.sent,
+        group_id: result.group_id,
+        tournament_ids: result.tournament_ids,
+      });
+    }
+
     return jsonOutput({
       ok: false,
       error: "Unknown action",
@@ -100,6 +119,39 @@ function doPost(e) {
       ok: false,
       error: String(error),
     });
+  }
+}
+
+function handleLineWebhook(body) {
+  body.events.forEach(function(event) {
+    handleSingleLineEvent(event);
+  });
+}
+
+function handleSingleLineEvent(event) {
+  if (!event || event.type !== "message" || !event.message) {
+    return;
+  }
+
+  if (event.message.type !== "text") {
+    return;
+  }
+
+  const text = String(event.message.text || "").trim();
+
+  if (text === "/groupid") {
+    replyLineMessage(event.replyToken, [{
+      type: "text",
+      text: registerLineGroup(event),
+    }]);
+    return;
+  }
+
+  if (text === "/担当者登録") {
+    replyLineMessage(event.replyToken, [{
+      type: "text",
+      text: registerManagerFromLine(event),
+    }]);
   }
 }
 
@@ -699,6 +751,271 @@ function buildTrueDeadlineDescription(tournament) {
   ].join("\n");
 }
 
+function registerLineGroup(event) {
+  const source = event && event.source ? event.source : {};
+  const groupId = source.groupId || "";
+
+  if (!groupId) {
+    return "このコマンドはLINEグループ内で実行してください。";
+  }
+
+  PropertiesService.getScriptProperties().setProperty("LINE_GROUP_ID", groupId);
+  return "groupId を登録しました。\n" + groupId;
+}
+
+function registerManagerFromLine(event) {
+  const source = event && event.source ? event.source : {};
+  const userId = source.userId || "";
+
+  if (!userId) {
+    return "userId を取得できませんでした。";
+  }
+
+  const profile = getLineUserProfile(userId);
+  upsertManagerFromLineProfile(userId, profile.displayName || "LINE担当者");
+
+  return "担当者を登録しました。\n" +
+    "表示名: " + (profile.displayName || "LINE担当者") + "\n" +
+    "userId: " + userId;
+}
+
+function upsertManagerFromLineProfile(userId, displayName) {
+  const sheet = getSheetByName("Managers");
+  const values = sheet.getDataRange().getValues();
+  const headers = values[0];
+  const now = new Date();
+  const lineUserIdIndex = headers.indexOf("line_user_id");
+  let rowIndex = -1;
+
+  for (let i = 1; i < values.length; i += 1) {
+    if (values[i][lineUserIdIndex] === userId) {
+      rowIndex = i + 1;
+      break;
+    }
+  }
+
+  const existing = rowIndex > 0 ? rowToObject(headers, values[rowIndex - 1]) : {};
+  const record = {};
+  const nowIso = toIsoString(now);
+
+  headers.forEach(function(header) {
+    if (existing[header] !== undefined) {
+      record[header] = existing[header];
+    }
+  });
+
+  record.manager_name = existing.manager_name || displayName;
+  record.line_user_id = userId;
+  record.display_name = displayName;
+  record.status = "active";
+  record.updated_at = nowIso;
+
+  if (!existing.created_at) {
+    record.created_at = nowIso;
+  }
+
+  const row = headers.map(function(header) {
+    return record[header] !== undefined ? record[header] : "";
+  });
+
+  if (rowIndex > 0) {
+    sheet.getRange(rowIndex, 1, 1, row.length).setValues([row]);
+  } else {
+    sheet.appendRow(row);
+  }
+}
+
+function sendAnnouncement(adminToken, tournamentIds) {
+  validateAdminToken(adminToken);
+
+  if (!Array.isArray(tournamentIds) || tournamentIds.length === 0) {
+    throw new Error("tournament_ids must be a non-empty array");
+  }
+
+  const groupId = getLineGroupId();
+  const tournaments = listTournaments().filter(function(tournament) {
+    return tournamentIds.indexOf(tournament.tournament_id) !== -1;
+  });
+
+  if (!tournaments.length) {
+    throw new Error("No tournaments found for announcement");
+  }
+
+  const message = buildAnnouncementMessage(tournaments);
+  pushLineMessage(groupId, [{
+    type: "text",
+    text: message,
+  }]);
+
+  tournaments.forEach(function(tournament) {
+    appendNotificationLog({
+      tournament_id: tournament.tournament_id,
+      notification_type: "announcement",
+      sent_to_type: "group",
+      sent_to_id: groupId,
+      message: message,
+    });
+  });
+
+  return {
+    sent: true,
+    group_id: groupId,
+    tournament_ids: tournaments.map(function(tournament) {
+      return tournament.tournament_id;
+    }),
+  };
+}
+
+function buildAnnouncementMessage(tournaments) {
+  const first = tournaments[0];
+  const lines = [
+    "【大会情報更新】",
+    "大会情報を更新しました。",
+    "案内は下記Google Driveから閲覧可能です。",
+    "",
+    "【更新内容】",
+  ];
+
+  tournaments.forEach(function(tournament) {
+    const officialLabel =
+      tournament.is_official === true ||
+      tournament.is_official === "TRUE" ||
+      tournament.is_official === "true" ?
+        "（公認）" :
+        "";
+    lines.push(
+      buildEventDateLabel(
+        tournament.event_start_date,
+        tournament.event_end_date
+      ) + " " + tournament.title + officialLabel
+    );
+  });
+
+  lines.push("");
+  lines.push("【Google Drive】");
+  lines.push(first.drive_url || "-");
+  lines.push("");
+  lines.push("【大会申し込み方法】");
+  lines.push("参加希望者は、下記URLから出たい大会の日程に○をつけてください。");
+  lines.push("各日程にサークル内締切を併記しています。");
+  lines.push("締切までの回答にご協力お願いします。");
+  lines.push("");
+  lines.push(first.entry_url || "-");
+
+  return lines.join("\n");
+}
+
+function appendNotificationLog(input) {
+  const sheet = getSheetByName("NotificationLogs");
+  const values = sheet.getDataRange().getValues();
+  const headers = values[0];
+  const nowIso = toIsoString(new Date());
+  const record = {
+    log_id: generateNotificationLogId(),
+    tournament_id: input.tournament_id || "",
+    notification_type: input.notification_type || "",
+    sent_to_type: input.sent_to_type || "",
+    sent_to_id: input.sent_to_id || "",
+    sent_at: nowIso,
+    message: input.message || "",
+  };
+  const row = headers.map(function(header) {
+    return record[header] !== undefined ? record[header] : "";
+  });
+
+  sheet.appendRow(row);
+}
+
+function getLineGroupId() {
+  const groupId =
+    PropertiesService.getScriptProperties().getProperty("LINE_GROUP_ID");
+
+  if (!groupId) {
+    throw new Error("LINE_GROUP_ID is not set");
+  }
+
+  return groupId;
+}
+
+function validateAdminToken(adminToken) {
+  const expected =
+    PropertiesService.getScriptProperties().getProperty("LINE_ADMIN_TOKEN");
+
+  if (expected && adminToken !== expected) {
+    throw new Error("Invalid admin_token");
+  }
+}
+
+function getLineChannelAccessToken() {
+  const token =
+    PropertiesService.getScriptProperties().getProperty(
+      "LINE_CHANNEL_ACCESS_TOKEN"
+    );
+
+  if (!token) {
+    throw new Error("LINE_CHANNEL_ACCESS_TOKEN is not set");
+  }
+
+  return token;
+}
+
+function getLineUserProfile(userId) {
+  const response = UrlFetchApp.fetch(
+    "https://api.line.me/v2/bot/profile/" + encodeURIComponent(userId),
+    {
+      method: "get",
+      headers: {
+        Authorization: "Bearer " + getLineChannelAccessToken(),
+      },
+      muteHttpExceptions: true,
+    }
+  );
+  const statusCode = response.getResponseCode();
+  const body = response.getContentText();
+
+  if (statusCode < 200 || statusCode >= 300) {
+    throw new Error("Failed to fetch LINE profile: " + body);
+  }
+
+  return JSON.parse(body);
+}
+
+function replyLineMessage(replyToken, messages) {
+  if (!replyToken) {
+    return;
+  }
+
+  callLineMessagingApi("https://api.line.me/v2/bot/message/reply", {
+    replyToken: replyToken,
+    messages: messages,
+  });
+}
+
+function pushLineMessage(to, messages) {
+  callLineMessagingApi("https://api.line.me/v2/bot/message/push", {
+    to: to,
+    messages: messages,
+  });
+}
+
+function callLineMessagingApi(url, payload) {
+  const response = UrlFetchApp.fetch(url, {
+    method: "post",
+    contentType: "application/json; charset=UTF-8",
+    headers: {
+      Authorization: "Bearer " + getLineChannelAccessToken(),
+    },
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true,
+  });
+  const statusCode = response.getResponseCode();
+  const body = response.getContentText();
+
+  if (statusCode < 200 || statusCode >= 300) {
+    throw new Error("LINE API request failed: " + body);
+  }
+}
+
 function buildMemberRecord(headers, existing, member, memberId, now) {
   const record = {};
   const nowIso = toIsoString(now);
@@ -857,6 +1174,14 @@ function generateResponseId(now) {
 function generateMemberId(rowCount) {
   const next = Math.max(1, rowCount);
   return "M" + String(next).padStart(3, "0");
+}
+
+function generateNotificationLogId() {
+  return "N" + Utilities.formatDate(
+    new Date(),
+    "Asia/Tokyo",
+    "yyyyMMddHHmmss"
+  ) + "_" + randomString(6);
 }
 
 function randomString(length) {
@@ -1080,4 +1405,14 @@ function syncAllTournamentCalendars() {
 
   Logger.log(results);
   return results;
+}
+
+function testSendAnnouncement() {
+  const tournaments = listTournaments();
+  if (!tournaments.length) {
+    throw new Error("No tournaments available");
+  }
+
+  const result = sendAnnouncement("", [tournaments[0].tournament_id]);
+  Logger.log(result);
 }
