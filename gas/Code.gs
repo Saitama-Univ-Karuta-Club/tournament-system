@@ -33,6 +33,15 @@ function doGet(e) {
       });
     }
 
+    if (action === "list_managers") {
+      return jsonOutput({
+        ok: true,
+        managers: listManagers().filter(function(manager) {
+          return manager.status === "active";
+        }),
+      });
+    }
+
     if (action === "list_member_responses") {
       return jsonOutput({
         ok: true,
@@ -107,6 +116,36 @@ function doPost(e) {
         sent: result.sent,
         group_id: result.group_id,
         tournament_ids: result.tournament_ids,
+      });
+    }
+
+    if (action === "send_group_reminder") {
+      const result = sendGroupReminder(
+        body.admin_token || "",
+        body.tournament_ids || [],
+        body.notification_type || ""
+      );
+      return jsonOutput({
+        ok: true,
+        sent: result.sent,
+        group_id: result.group_id,
+        tournament_ids: result.tournament_ids,
+        notification_type: result.notification_type,
+      });
+    }
+
+    if (action === "send_manager_reminder") {
+      const result = sendManagerReminder(
+        body.admin_token || "",
+        body.tournament_ids || [],
+        body.notification_type || ""
+      );
+      return jsonOutput({
+        ok: true,
+        sent: result.sent,
+        manager_count: result.manager_count,
+        tournament_ids: result.tournament_ids,
+        notification_type: result.notification_type,
       });
     }
 
@@ -832,7 +871,6 @@ function sendAnnouncement(adminToken, tournamentIds) {
     throw new Error("tournament_ids must be a non-empty array");
   }
 
-  const groupId = getLineGroupId();
   const tournaments = listTournaments().filter(function(tournament) {
     return tournamentIds.indexOf(tournament.tournament_id) !== -1;
   });
@@ -841,6 +879,11 @@ function sendAnnouncement(adminToken, tournamentIds) {
     throw new Error("No tournaments found for announcement");
   }
 
+  return sendAnnouncementForTournaments(tournaments);
+}
+
+function sendAnnouncementForTournaments(tournaments) {
+  const groupId = getLineGroupId();
   const message = buildAnnouncementMessage(tournaments);
   pushLineMessage(groupId, [{
     type: "text",
@@ -863,6 +906,163 @@ function sendAnnouncement(adminToken, tournamentIds) {
     tournament_ids: tournaments.map(function(tournament) {
       return tournament.tournament_id;
     }),
+  };
+}
+
+function sendScheduledDailyAnnouncements() {
+  const tournaments = getPendingAnnouncementTournaments();
+
+  if (!tournaments.length) {
+    Logger.log("No pending tournaments for scheduled announcement.");
+    return {
+      sent: false,
+      reason: "no_pending_tournaments",
+      tournament_ids: [],
+    };
+  }
+
+  const result = sendAnnouncementForTournaments(tournaments);
+  Logger.log(result);
+  return result;
+}
+
+function getPendingAnnouncementTournaments() {
+  const announcedTournamentIds = getAnnouncedTournamentIdMap();
+
+  return listTournaments().filter(function(tournament) {
+    return tournament.status === "active" &&
+      !announcedTournamentIds[String(tournament.tournament_id || "")];
+  }).sort(function(a, b) {
+    return String(a.event_start_date || "").localeCompare(
+      String(b.event_start_date || "")
+    );
+  });
+}
+
+function getAnnouncedTournamentIdMap() {
+  const logs = listNotificationLogs().filter(function(log) {
+    return log.notification_type === "announcement" &&
+      log.sent_to_type === "group" &&
+      log.tournament_id;
+  });
+  const announced = {};
+
+  logs.forEach(function(log) {
+    announced[String(log.tournament_id)] = true;
+  });
+
+  return announced;
+}
+
+function sendGroupReminder(adminToken, tournamentIds, notificationType) {
+  validateAdminToken(adminToken);
+
+  if (!Array.isArray(tournamentIds) || tournamentIds.length === 0) {
+    throw new Error("tournament_ids must be a non-empty array");
+  }
+
+  if (
+    notificationType !== "internal_deadline_2days_before" &&
+    notificationType !== "internal_deadline_1day_before"
+  ) {
+    throw new Error("Invalid notification_type for group reminder");
+  }
+
+  const groupId = getLineGroupId();
+  const tournaments = getTournamentsByIdsForReminder(tournamentIds);
+
+  if (!tournaments.length) {
+    throw new Error("No tournaments found for reminder");
+  }
+
+  const message = buildGroupReminderMessage(tournaments, notificationType);
+  pushLineMessage(groupId, [{
+    type: "text",
+    text: message,
+  }]);
+
+  tournaments.forEach(function(tournament) {
+    appendNotificationLog({
+      tournament_id: tournament.tournament_id,
+      notification_type: notificationType,
+      sent_to_type: "group",
+      sent_to_id: groupId,
+      message: message,
+    });
+  });
+
+  return {
+    sent: true,
+    group_id: groupId,
+    tournament_ids: tournaments.map(function(tournament) {
+      return tournament.tournament_id;
+    }),
+    notification_type: notificationType,
+  };
+}
+
+function sendManagerReminder(adminToken, tournamentIds, notificationType) {
+  validateAdminToken(adminToken);
+
+  if (!Array.isArray(tournamentIds) || tournamentIds.length === 0) {
+    throw new Error("tournament_ids must be a non-empty array");
+  }
+
+  if (
+    notificationType !== "internal_deadline_next_day_manager" &&
+    notificationType !== "true_deadline_morning_manager"
+  ) {
+    throw new Error("Invalid notification_type for manager reminder");
+  }
+
+  const tournaments = getTournamentsByIdsForReminder(tournamentIds);
+
+  if (!tournaments.length) {
+    throw new Error("No tournaments found for reminder");
+  }
+
+  const resolvedTargets = tournaments.map(function(tournament) {
+    const managerLineUserId = resolveManagerLineUserId(tournament);
+
+    if (!managerLineUserId) {
+      throw new Error(
+        "manager_line_user_id is missing for tournament and could not be resolved from Managers: " +
+        tournament.tournament_id
+      );
+    }
+
+    return {
+      tournament: tournament,
+      manager_line_user_id: managerLineUserId,
+    };
+  });
+
+  resolvedTargets.forEach(function(target) {
+    const message = notificationType === "internal_deadline_next_day_manager" ?
+      buildManagerInternalDeadlineReminderMessage(target.tournament) :
+      buildManagerTrueDeadlineReminderMessage(target.tournament);
+
+    pushLineMessage(target.manager_line_user_id, [{
+      type: "text",
+      text: message,
+    }]);
+
+    appendNotificationLog({
+      tournament_id: target.tournament.tournament_id,
+      notification_type: notificationType,
+      sent_to_type: "manager",
+      sent_to_id: target.manager_line_user_id,
+      message: message,
+    });
+  });
+
+  return {
+    sent: true,
+    manager_count: tournaments.length,
+    tournament_ids: tournaments.map(function(tournament) {
+      return tournament.tournament_id;
+    }),
+    notification_type: notificationType,
   };
 }
 
@@ -905,6 +1105,218 @@ function buildAnnouncementMessage(tournaments) {
   return lines.join("\n");
 }
 
+function buildGroupReminderMessage(tournaments, notificationType) {
+  const first = tournaments[0];
+  const intro = notificationType === "internal_deadline_1day_before" ?
+    "以下の大会のサークル内締切が明日に迫っています。" :
+    "以下の大会のサークル内締切が近づいています。";
+  const lines = [
+    "【大会申込リマインド】",
+    intro,
+    "",
+  ];
+
+  tournaments.forEach(function(tournament, index) {
+    if (index > 0) {
+      lines.push("");
+    }
+    lines.push("大会名: " + (tournament.title || "-"));
+    lines.push(
+      "大会日: " + buildEventDateLabel(
+        tournament.event_start_date,
+        tournament.event_end_date
+      )
+    );
+    lines.push("開催級: " + (tournament.grades || "級制限なし"));
+    lines.push(
+      "サークル内締切: " + formatDateTimeLabel(tournament.internal_deadline)
+    );
+  });
+
+  lines.push("");
+  lines.push("参加希望者は、締切までに参加意思確認ページへ回答してください。");
+  lines.push(first.entry_url || "-");
+
+  return lines.join("\n");
+}
+
+function buildManagerInternalDeadlineReminderMessage(tournament) {
+  const applicants = listTournamentApplicants(tournament.tournament_id);
+  const lines = [
+    "【申込対応リマインド】",
+    "サークル内締切を過ぎました。",
+    "以下の大会について申込対応をお願いします。",
+    "",
+    "大会名: " + (tournament.title || "-"),
+    "大会日: " + buildEventDateLabel(
+      tournament.event_start_date,
+      tournament.event_end_date
+    ),
+    "開催級: " + (tournament.grades || "級制限なし"),
+    "主催締切日: " + formatDateTimeLabel(tournament.true_deadline),
+    "要項: " + (tournament.drive_url || "-"),
+    "参加確認ページ: " + (tournament.entry_url || "-"),
+    "",
+  ];
+
+  if (applicants.length) {
+    lines.push("【申込希望者】");
+    appendApplicantLines(lines, applicants);
+    lines.push("");
+    lines.push("必要に応じて、級・段位・会員番号等を別途確認してから申込してください。");
+  } else {
+    lines.push("【参加希望者】");
+    lines.push("今回は参加希望者はいません。");
+    lines.push("");
+    lines.push("申込対応は不要です。必要に応じて大会状況のみ確認してください。");
+  }
+
+  return lines.join("\n");
+}
+
+function buildManagerTrueDeadlineReminderMessage(tournament) {
+  const applicants = listTournamentApplicants(tournament.tournament_id);
+  const lines = [
+    "【最終リマインド】",
+    "本日が主催締切日です。",
+    "",
+    "大会名: " + (tournament.title || "-"),
+    "主催締切日: 本日 23:59",
+    "",
+  ];
+
+  if (applicants.length) {
+    lines.push("【申込希望者】");
+    appendApplicantLines(lines, applicants);
+    lines.push("");
+    lines.push("申込完了後は、申込完了処理を行ってください。");
+  } else {
+    lines.push("【参加希望者】");
+    lines.push("今回は参加希望者はいません。");
+    lines.push("");
+    lines.push("申込対応は不要です。必要に応じて申込完了処理のみ確認してください。");
+  }
+
+  return lines.join("\n");
+}
+
+function appendApplicantLines(lines, applicants) {
+  if (!applicants.length) {
+    lines.push("- 該当者なし");
+    return;
+  }
+
+  applicants.forEach(function(name) {
+    lines.push("- " + name);
+  });
+}
+
+function listTournamentApplicants(tournamentId) {
+  const sheet = getSheetByName("Responses");
+  const values = sheet.getDataRange().getValues();
+
+  if (values.length <= 1) {
+    return [];
+  }
+
+  const headers = values[0];
+  const rows = values.slice(1);
+  const applicants = rows
+    .filter(function(row) {
+      return row.some(function(cell) {
+        return cell !== "";
+      });
+    })
+    .map(function(row) {
+      return rowToObject(headers, row);
+    })
+    .filter(function(response) {
+      return response.tournament_id === tournamentId &&
+        response.response === "yes";
+    })
+    .map(function(response) {
+      return normalizeMemberName(response.member_name);
+    });
+
+  return uniqueStrings(applicants);
+}
+
+function resolveManagerLineUserId(tournament) {
+  if (tournament.manager_line_user_id) {
+    return String(tournament.manager_line_user_id).trim();
+  }
+
+  const managerName = normalizeMemberName(tournament.manager_name);
+  if (!managerName) {
+    return "";
+  }
+
+  const managers = listManagers();
+
+  for (let i = 0; i < managers.length; i += 1) {
+    const manager = managers[i];
+    const managerNames = [
+      normalizeMemberName(manager.manager_name),
+      normalizeMemberName(manager.display_name),
+    ];
+
+    if (
+      manager.status === "active" &&
+      manager.line_user_id &&
+      managerNames.indexOf(managerName) !== -1
+    ) {
+      return String(manager.line_user_id).trim();
+    }
+  }
+
+  return "";
+}
+
+function listManagers() {
+  const sheet = getSheetByName("Managers");
+  const values = sheet.getDataRange().getValues();
+
+  if (values.length <= 1) {
+    return [];
+  }
+
+  const headers = values[0];
+  const rows = values.slice(1);
+
+  return rows
+    .filter(function(row) {
+      return row.some(function(cell) {
+        return cell !== "";
+      });
+    })
+    .map(function(row) {
+      return rowToObject(headers, row);
+    });
+}
+
+function getTournamentsByIdsForReminder(tournamentIds) {
+  return listTournaments().filter(function(tournament) {
+    return tournamentIds.indexOf(tournament.tournament_id) !== -1 &&
+      tournament.status === "active";
+  });
+}
+
+function uniqueStrings(values) {
+  const seen = {};
+  return values.filter(function(value) {
+    if (!value || seen[value]) {
+      return false;
+    }
+    seen[value] = true;
+    return true;
+  });
+}
+
+function formatDateTimeLabel(value) {
+  const date = parseDateTimeValue(value);
+  return Utilities.formatDate(date, "Asia/Tokyo", "M月d日 HH:mm");
+}
+
 function appendNotificationLog(input) {
   const sheet = getSheetByName("NotificationLogs");
   const values = sheet.getDataRange().getValues();
@@ -924,6 +1336,28 @@ function appendNotificationLog(input) {
   });
 
   sheet.appendRow(row);
+}
+
+function listNotificationLogs() {
+  const sheet = getSheetByName("NotificationLogs");
+  const values = sheet.getDataRange().getValues();
+
+  if (values.length <= 1) {
+    return [];
+  }
+
+  const headers = values[0];
+  const rows = values.slice(1);
+
+  return rows
+    .filter(function(row) {
+      return row.some(function(cell) {
+        return cell !== "";
+      });
+    })
+    .map(function(row) {
+      return rowToObject(headers, row);
+    });
 }
 
 function getLineGroupId() {
@@ -1408,11 +1842,145 @@ function syncAllTournamentCalendars() {
 }
 
 function testSendAnnouncement() {
-  const tournaments = listTournaments();
-  if (!tournaments.length) {
+  const tournament = getFirstActiveTournamentForTest();
+  if (!tournament) {
     throw new Error("No tournaments available");
   }
 
-  const result = sendAnnouncement("", [tournaments[0].tournament_id]);
+  const result = sendAnnouncement("", [tournament.tournament_id]);
   Logger.log(result);
+}
+
+function testSendScheduledDailyAnnouncements() {
+  const result = sendScheduledDailyAnnouncements();
+  Logger.log(result);
+}
+
+function testSendGroupReminder2DaysBefore() {
+  const tournament = getFirstActiveTournamentForTest();
+  if (!tournament) {
+    throw new Error("No tournaments available");
+  }
+
+  const result = sendGroupReminder(
+    "",
+    [tournament.tournament_id],
+    "internal_deadline_2days_before"
+  );
+  Logger.log(result);
+}
+
+function testSendGroupReminder1DayBefore() {
+  const tournament = getFirstActiveTournamentForTest();
+  if (!tournament) {
+    throw new Error("No tournaments available");
+  }
+
+  const result = sendGroupReminder(
+    "",
+    [tournament.tournament_id],
+    "internal_deadline_1day_before"
+  );
+  Logger.log(result);
+}
+
+function testSendManagerReminderAfterInternalDeadline() {
+  const tournament = getFirstActiveTournamentForTest();
+  if (!tournament) {
+    throw new Error("No tournaments available");
+  }
+
+  const result = sendManagerReminder(
+    "",
+    [tournament.tournament_id],
+    "internal_deadline_next_day_manager"
+  );
+  Logger.log(result);
+}
+
+function testSendManagerReminderAfterInternalDeadlineNoApplicants() {
+  const tournament = getFirstActiveTournamentWithoutApplicantsForTest();
+  if (!tournament) {
+    throw new Error("No active tournament without applicants available");
+  }
+
+  const result = sendManagerReminder(
+    "",
+    [tournament.tournament_id],
+    "internal_deadline_next_day_manager"
+  );
+  Logger.log(result);
+}
+
+function testSendManagerReminderTrueDeadlineMorning() {
+  const tournament = getFirstActiveTournamentForTest();
+  if (!tournament) {
+    throw new Error("No tournaments available");
+  }
+
+  const result = sendManagerReminder(
+    "",
+    [tournament.tournament_id],
+    "true_deadline_morning_manager"
+  );
+  Logger.log(result);
+}
+
+function testSendManagerReminderTrueDeadlineMorningNoApplicants() {
+  const tournament = getFirstActiveTournamentWithoutApplicantsForTest();
+  if (!tournament) {
+    throw new Error("No active tournament without applicants available");
+  }
+
+  const result = sendManagerReminder(
+    "",
+    [tournament.tournament_id],
+    "true_deadline_morning_manager"
+  );
+  Logger.log(result);
+}
+
+function getFirstActiveTournamentForTest() {
+  const tournaments = listTournaments().filter(function(tournament) {
+    return tournament.status === "active";
+  });
+
+  return tournaments.length ? tournaments[0] : null;
+}
+
+function getFirstActiveTournamentWithoutApplicantsForTest() {
+  const tournaments = listTournaments().filter(function(tournament) {
+    return tournament.status === "active" &&
+      listTournamentApplicants(tournament.tournament_id).length === 0;
+  });
+
+  return tournaments.length ? tournaments[0] : null;
+}
+
+function installDailyAnnouncementTrigger() {
+  deleteTriggersByHandler_("sendScheduledDailyAnnouncements");
+
+  const trigger = ScriptApp.newTrigger("sendScheduledDailyAnnouncements")
+    .timeBased()
+    .everyDays(1)
+    .atHour(17)
+    .nearMinute(0)
+    .create();
+
+  Logger.log(trigger.getUniqueId());
+  return trigger.getUniqueId();
+}
+
+function deleteDailyAnnouncementTrigger() {
+  deleteTriggersByHandler_("sendScheduledDailyAnnouncements");
+}
+
+function deleteTriggersByHandler_(handlerName) {
+  const triggers = ScriptApp.getProjectTriggers();
+
+  triggers.forEach(function(trigger) {
+    if (trigger.getHandlerFunction() === handlerName) {
+      ScriptApp.deleteTrigger(trigger);
+    }
+  });
 }

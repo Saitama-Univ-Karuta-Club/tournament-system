@@ -1,14 +1,18 @@
 const API_BASE_URL =
   "https://script.google.com/macros/s/AKfycbzlYunO5FHWb75UXJCU8opm9nassYo74nQdlSKg-XXTntea6hEzq87konXxHEfzWsvf/exec";
 
+const TOURNAMENT_GRADE_OPTIONS = ["A", "B", "C", "D", "E", "F", "初心者"];
+
 const state = {
   tournaments: [],
   members: [],
+  managers: [],
   selectedTournamentId: "",
   selectedMemberId: "",
   primaryTab: "tournaments",
   tournamentMode: "tournament-create",
   memberMode: "member-create",
+  isBusy: false,
 };
 
 const elements = {
@@ -25,6 +29,8 @@ const elements = {
   memberDetailHost: document.getElementById("member-detail-host"),
   memberDetailNote: document.getElementById("member-detail-note"),
   statusMessage: document.getElementById("status-message"),
+  busyOverlay: document.getElementById("busy-overlay"),
+  busyMessage: document.getElementById("busy-message"),
   tournamentForm: document.getElementById("tournament-form"),
   memberForm: document.getElementById("member-form"),
   resetTournamentButton: document.getElementById("reset-tournament-button"),
@@ -35,6 +41,7 @@ const elements = {
   eventStartDate: document.getElementById("event-start-date"),
   eventEndDate: document.getElementById("event-end-date"),
   grades: document.getElementById("grades"),
+  gradesSelector: document.getElementById("grades-selector"),
   trueDeadline: document.getElementById("true-deadline"),
   internalDeadline: document.getElementById("internal-deadline"),
   venue: document.getElementById("venue"),
@@ -116,15 +123,21 @@ elements.trueDeadline.addEventListener("change", function() {
   syncInternalDeadlineDefault();
 });
 
+elements.managerName.addEventListener("change", function() {
+  syncSelectedManagerFields();
+});
+
 elements.tournamentForm.addEventListener("submit", async function(event) {
   event.preventDefault();
+
+  const selectedManager = getSelectedManager();
 
   const payload = {
     tournament_id: elements.tournamentId.value.trim(),
     title: elements.tournamentTitle.value.trim(),
     event_start_date: elements.eventStartDate.value,
     event_end_date: elements.eventStartDate.value,
-    grades: elements.grades.value.trim(),
+    grades: getSelectedTournamentGrades().join(","),
     is_official: elements.isOfficial.checked,
     venue: elements.venue.value.trim(),
     true_deadline: toApiEndOfDay(elements.trueDeadline.value),
@@ -132,12 +145,13 @@ elements.tournamentForm.addEventListener("submit", async function(event) {
     drive_url: elements.driveUrl.value.trim(),
     entry_page_token: elements.entryPageToken.value.trim(),
     entry_url: elements.entryUrl.value.trim(),
-    manager_name: elements.managerName.value.trim(),
-    manager_line_user_id: elements.managerLineUserId.value.trim(),
+    manager_name: selectedManager ? selectedManager.manager_name : "",
+    manager_line_user_id: selectedManager ? selectedManager.line_user_id : "",
     status: elements.tournamentStatus.value,
   };
 
   try {
+    setBusyState(true, "大会情報を保存中です...");
     const result = await postJson({
       action: "upsert_tournament",
       tournament: payload,
@@ -149,6 +163,8 @@ elements.tournamentForm.addEventListener("submit", async function(event) {
     selectTournamentById(result.tournament_id);
   } catch (error) {
     showStatus(error.message || "大会情報の保存に失敗しました。", "error");
+  } finally {
+    setBusyState(false);
   }
 });
 
@@ -163,6 +179,7 @@ elements.memberForm.addEventListener("submit", async function(event) {
   };
 
   try {
+    setBusyState(true, "メンバー情報を保存中です...");
     const result = await postJson({
       action: "upsert_member",
       member: payload,
@@ -174,11 +191,14 @@ elements.memberForm.addEventListener("submit", async function(event) {
     selectMemberById(result.member_id);
   } catch (error) {
     showStatus(error.message || "メンバー情報の保存に失敗しました。", "error");
+  } finally {
+    setBusyState(false);
   }
 });
 
 async function init() {
   attachFormsToHosts();
+  renderTournamentGradeSelector();
   renderTabs();
   resetTournamentForm();
   resetMemberForm();
@@ -189,14 +209,17 @@ async function loadAdminData() {
   showStatus("管理データを読み込んでいます...", "");
 
   try {
-    const [tournamentData, memberData] = await Promise.all([
+    const [tournamentData, memberData, managerData] = await Promise.all([
       fetchJson("list_tournaments"),
       fetchJson("list_admin_members"),
+      fetchJson("list_managers"),
     ]);
 
     state.tournaments = tournamentData.tournaments || [];
     state.members = memberData.members || [];
+    state.managers = managerData.managers || [];
 
+    populateManagerOptions();
     renderTournamentList();
     renderMemberList();
     showStatus("", "");
@@ -345,15 +368,14 @@ function selectTournamentById(id) {
   elements.tournamentTitle.value = item.title || "";
   elements.eventStartDate.value = toDateInputValue(item.event_start_date);
   elements.eventEndDate.value = toDateInputValue(item.event_start_date);
-  elements.grades.value = item.grades || "";
+  setSelectedTournamentGrades(item.grades || "");
   elements.trueDeadline.value = toDateInputValue(item.true_deadline);
   elements.internalDeadline.value = toDateInputValue(item.internal_deadline);
   elements.venue.value = item.venue || "";
   elements.driveUrl.value = item.drive_url || "";
   elements.entryPageToken.value = item.entry_page_token || "";
   elements.entryUrl.value = item.entry_url || "";
-  elements.managerName.value = item.manager_name || "";
-  elements.managerLineUserId.value = item.manager_line_user_id || "";
+  setSelectedManager(item.manager_line_user_id || "", item.manager_name || "");
   elements.tournamentStatus.value = item.status || "draft";
   elements.isOfficial.checked = item.is_official === true || item.is_official === "TRUE" || item.is_official === "true";
 }
@@ -383,6 +405,9 @@ function resetTournamentForm() {
   elements.tournamentStatus.value = "draft";
   elements.entryPageToken.value = "test-page-token";
   elements.eventEndDate.value = "";
+  setSelectedTournamentGrades("");
+  populateManagerOptions();
+  syncSelectedManagerFields();
   renderTournamentList();
   syncDetailEditors();
 }
@@ -519,6 +544,174 @@ function showStatus(message, type) {
   if (type === "error") {
     elements.statusMessage.classList.add("is-error");
   }
+}
+
+function setBusyState(isBusy, message) {
+  state.isBusy = isBusy;
+  document.body.classList.toggle("is-busy", isBusy);
+  elements.busyOverlay.classList.toggle("is-hidden", !isBusy);
+  elements.busyMessage.textContent = message || "保存中です...";
+
+  Array.from(document.querySelectorAll("button, input, select, textarea")).forEach(function(element) {
+    if (elements.busyMessage.contains(element)) {
+      return;
+    }
+    element.disabled = isBusy;
+  });
+}
+
+function populateManagerOptions() {
+  const currentValue = elements.managerName.value;
+  const options = ['<option value="">担当者を選択してください</option>'].concat(
+    state.managers.map(function(manager) {
+      const lineUserId = escapeHtml(manager.line_user_id || "");
+      const managerName = escapeHtml(manager.manager_name || manager.display_name || "");
+      const displayLabel = escapeHtml(buildManagerLabel(manager));
+      const selected = currentValue && currentValue === (manager.line_user_id || "") ?
+        ' selected' :
+        "";
+      return (
+        '<option value="' + lineUserId + '" data-manager-name="' + managerName + '"' +
+        selected + ">" + displayLabel + "</option>"
+      );
+    })
+  );
+
+  elements.managerName.innerHTML = options.join("");
+}
+
+function getSelectedTournamentGrades() {
+  return normalizeGradeValues(elements.grades.value);
+}
+
+function setSelectedTournamentGrades(value) {
+  const selectedValues = normalizeGradeValues(value);
+  elements.grades.value = selectedValues.join(",");
+  syncTournamentGradeSelector();
+}
+
+function normalizeGradeValues(value) {
+  if (Array.isArray(value)) {
+    return value
+      .map(function(item) {
+        return String(item || "").trim();
+      })
+      .filter(Boolean);
+  }
+
+  return String(value || "")
+    .replace(/、/g, ",")
+    .split(",")
+    .map(function(item) {
+      return item.trim();
+    })
+    .filter(function(item) {
+      return item && TOURNAMENT_GRADE_OPTIONS.indexOf(item) !== -1;
+    });
+}
+
+function renderTournamentGradeSelector() {
+  elements.gradesSelector.innerHTML = TOURNAMENT_GRADE_OPTIONS.map(function(grade) {
+    return (
+      '<button type="button" class="chip-button" data-grade="' + escapeHtml(grade) +
+      '" aria-pressed="false">○' + escapeHtml(grade) + "</button>"
+    );
+  }).join("");
+
+  elements.gradesSelector.querySelectorAll("[data-grade]").forEach(function(button) {
+    button.addEventListener("click", function() {
+      toggleTournamentGrade(button.dataset.grade);
+    });
+  });
+}
+
+function toggleTournamentGrade(grade) {
+  const selectedValues = getSelectedTournamentGrades();
+  const index = selectedValues.indexOf(grade);
+
+  if (index === -1) {
+    selectedValues.push(grade);
+  } else {
+    selectedValues.splice(index, 1);
+  }
+
+  setSelectedTournamentGrades(selectedValues);
+}
+
+function syncTournamentGradeSelector() {
+  const selectedValues = getSelectedTournamentGrades();
+
+  elements.gradesSelector.querySelectorAll("[data-grade]").forEach(function(button) {
+    const isSelected = selectedValues.indexOf(button.dataset.grade) !== -1;
+    button.classList.toggle("is-selected", isSelected);
+    button.setAttribute("aria-pressed", isSelected ? "true" : "false");
+    button.textContent = (isSelected ? "●" : "○") + button.dataset.grade;
+  });
+}
+
+function buildManagerLabel(manager) {
+  const displayName = String(manager.display_name || "").trim();
+  const managerName = String(manager.manager_name || "").trim();
+
+  if (displayName && managerName && displayName !== managerName) {
+    return displayName + " (" + managerName + ")";
+  }
+
+  return displayName || managerName || "名称未設定";
+}
+
+function getSelectedManager() {
+  const lineUserId = elements.managerName.value;
+  if (!lineUserId) {
+    return null;
+  }
+
+  return state.managers.find(function(manager) {
+    return String(manager.line_user_id || "") === lineUserId;
+  }) || null;
+}
+
+function syncSelectedManagerFields() {
+  const selectedManager = getSelectedManager();
+  elements.managerLineUserId.value = selectedManager ?
+    String(selectedManager.line_user_id || "") :
+    "";
+}
+
+function setSelectedManager(lineUserId, managerName) {
+  let selectedValue = "";
+
+  if (lineUserId) {
+    const matchedById = state.managers.find(function(manager) {
+      return String(manager.line_user_id || "") === String(lineUserId);
+    });
+    if (matchedById) {
+      selectedValue = String(matchedById.line_user_id || "");
+    }
+  }
+
+  if (!selectedValue && managerName) {
+    const normalizedName = normalizeText(managerName);
+    const matchedByName = state.managers.find(function(manager) {
+      return [
+        normalizeText(manager.manager_name),
+        normalizeText(manager.display_name),
+      ].indexOf(normalizedName) !== -1;
+    });
+    if (matchedByName) {
+      selectedValue = String(matchedByName.line_user_id || "");
+    }
+  }
+
+  elements.managerName.value = selectedValue;
+  syncSelectedManagerFields();
+}
+
+function normalizeText(value) {
+  return String(value || "")
+    .trim()
+    .replace(/\u3000/g, " ")
+    .replace(/\s+/g, " ");
 }
 
 function escapeHtml(text) {
