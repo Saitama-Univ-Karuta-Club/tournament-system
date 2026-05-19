@@ -112,7 +112,7 @@ elements.tournamentForm.addEventListener("submit", async function(event) {
       action: "upsert_tournament",
       tournament: payload,
     });
-    showStatus("大会情報を保存しました。", "success");
+    showStatus(buildTournamentSaveMessage(result), "success");
     await loadAdminData();
     state.primaryTab = "tournaments";
     state.tournamentMode = "tournament-list";
@@ -260,6 +260,21 @@ function formatTournamentListMeta(item) {
 
 function formatMemberListMeta(item) {
   return item.grade ? String(item.grade) : "級未設定";
+}
+
+function buildTournamentSaveMessage(result) {
+  const sync = result && result.calendar_sync;
+
+  if (!sync) {
+    return "大会情報を保存しました。";
+  }
+
+  if (sync.ok) {
+    return "大会情報を保存しました。Google Calendarも同期しました。";
+  }
+
+  return "大会情報を保存しました。Google Calendar同期は未完了です: " +
+    (sync.message || "設定を確認してください。");
 }
 
 function selectTournamentById(id) {
