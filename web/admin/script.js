@@ -199,7 +199,7 @@ function renderTournamentList() {
     return (
       '<li><button type="button" class="item-button' + activeClass + '" data-tournament-id="' + escapeHtml(item.tournament_id || "") + '">' +
       '<span class="item-title">' + escapeHtml(item.title || "無題") + "</span>" +
-      '<span class="item-meta">' + escapeHtml((item.event_start_date || "") + " / " + (item.status || "")) + "</span>" +
+      '<span class="item-meta">' + escapeHtml(formatTournamentListMeta(item)) + "</span>" +
       "</button></li>"
     );
   }).join("");
@@ -224,7 +224,7 @@ function renderMemberList() {
     return (
       '<li><button type="button" class="item-button' + activeClass + '" data-member-id="' + escapeHtml(item.member_id || "") + '">' +
       '<span class="item-title">' + escapeHtml(item.display_name || "名称未設定") + "</span>" +
-      '<span class="item-meta">' + escapeHtml((item.grade || "-") + " / " + (item.status || "")) + "</span>" +
+      '<span class="item-meta">' + escapeHtml(formatMemberListMeta(item)) + "</span>" +
       "</button></li>"
     );
   }).join("");
@@ -236,6 +236,14 @@ function renderMemberList() {
       selectMemberById(button.dataset.memberId);
     });
   });
+}
+
+function formatTournamentListMeta(item) {
+  return item.grades ? String(item.grades) : "級制限なし";
+}
+
+function formatMemberListMeta(item) {
+  return item.grade ? String(item.grade) : "級未設定";
 }
 
 function selectTournamentById(id) {
