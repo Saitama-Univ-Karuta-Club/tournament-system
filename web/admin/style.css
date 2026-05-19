@@ -120,8 +120,17 @@ body {
   border-color: var(--accent);
   background: #f9ece6;
 }
-.item-title { display: block; font-weight: 700; }
-.item-meta { display: block; margin-top: 4px; color: var(--muted); font-size: .9rem; }
+.item-title {
+  display: block;
+  font-weight: 700;
+  color: var(--ink);
+}
+.item-meta {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: .9rem;
+}
 .item-button.is-active .item-title { color: var(--accent-dark); }
 .item-button.is-active .item-meta { color: var(--muted); }
 .editor-form {
