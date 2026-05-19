@@ -12,6 +12,7 @@
 }
 
 * { box-sizing: border-box; }
+.is-hidden { display: none !important; }
 body {
   margin: 0;
   min-height: 100vh;
@@ -42,6 +43,7 @@ body {
   flex-wrap: wrap;
 }
 .primary-tabs { margin-bottom: 20px; }
+.secondary-tabs { margin-bottom: 14px; }
 .primary-tab,
 .secondary-tab {
   border: 1px solid var(--line);
@@ -91,14 +93,13 @@ body {
 }
 .detail-pane {
   padding: 18px;
-  display: flex;
-  align-items: center;
 }
 .detail-note {
   margin: 0;
   color: var(--muted);
   line-height: 1.8;
 }
+.form-host.is-hidden { display: none; }
 .item-list {
   list-style: none;
   margin: 0;

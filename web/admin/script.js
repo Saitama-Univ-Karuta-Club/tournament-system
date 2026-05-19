@@ -18,6 +18,12 @@ const elements = {
   subpanels: document.querySelectorAll("[data-subpanel]"),
   tournamentList: document.getElementById("tournament-list"),
   memberList: document.getElementById("member-list"),
+  tournamentCreateHost: document.getElementById("tournament-create-host"),
+  tournamentDetailHost: document.getElementById("tournament-detail-host"),
+  tournamentDetailNote: document.getElementById("tournament-detail-note"),
+  memberCreateHost: document.getElementById("member-create-host"),
+  memberDetailHost: document.getElementById("member-detail-host"),
+  memberDetailNote: document.getElementById("member-detail-note"),
   statusMessage: document.getElementById("status-message"),
   tournamentForm: document.getElementById("tournament-form"),
   memberForm: document.getElementById("member-form"),
@@ -136,6 +142,7 @@ elements.memberForm.addEventListener("submit", async function(event) {
 });
 
 async function init() {
+  attachFormsToHosts();
   renderTabs();
   resetTournamentForm();
   resetMemberForm();
@@ -186,6 +193,9 @@ function renderTabs() {
       target === state.memberMode;
     panel.classList.toggle("is-active", isActive);
   });
+
+  syncFormPlacement();
+  syncDetailEditors();
 }
 
 function renderTournamentList() {
@@ -207,7 +217,7 @@ function renderTournamentList() {
   elements.tournamentList.querySelectorAll("[data-tournament-id]").forEach(function(button) {
     button.addEventListener("click", function() {
       state.primaryTab = "tournaments";
-      state.tournamentMode = "tournament-create";
+      state.tournamentMode = "tournament-list";
       selectTournamentById(button.dataset.tournamentId);
     });
   });
@@ -232,7 +242,7 @@ function renderMemberList() {
   elements.memberList.querySelectorAll("[data-member-id]").forEach(function(button) {
     button.addEventListener("click", function() {
       state.primaryTab = "members";
-      state.memberMode = "member-create";
+      state.memberMode = "member-list";
       selectMemberById(button.dataset.memberId);
     });
   });
@@ -301,6 +311,7 @@ function resetTournamentForm() {
   elements.tournamentStatus.value = "draft";
   elements.entryPageToken.value = "test-page-token";
   renderTournamentList();
+  syncDetailEditors();
 }
 
 function resetMemberForm() {
@@ -308,6 +319,45 @@ function resetMemberForm() {
   elements.memberForm.reset();
   elements.memberStatus.value = "active";
   renderMemberList();
+  syncDetailEditors();
+}
+
+function attachFormsToHosts() {
+  elements.tournamentForm.hidden = false;
+  elements.memberForm.hidden = false;
+  elements.tournamentCreateHost.appendChild(elements.tournamentForm);
+  elements.memberCreateHost.appendChild(elements.memberForm);
+}
+
+function syncFormPlacement() {
+  const tournamentTarget = state.tournamentMode === "tournament-list" ?
+    elements.tournamentDetailHost :
+    elements.tournamentCreateHost;
+  const memberTarget = state.memberMode === "member-list" ?
+    elements.memberDetailHost :
+    elements.memberCreateHost;
+
+  if (elements.tournamentForm.parentElement !== tournamentTarget) {
+    tournamentTarget.appendChild(elements.tournamentForm);
+  }
+
+  if (elements.memberForm.parentElement !== memberTarget) {
+    memberTarget.appendChild(elements.memberForm);
+  }
+}
+
+function syncDetailEditors() {
+  const showTournamentEditor =
+    state.tournamentMode === "tournament-list" &&
+    Boolean(state.selectedTournamentId);
+  const showMemberEditor =
+    state.memberMode === "member-list" &&
+    Boolean(state.selectedMemberId);
+
+  elements.tournamentDetailNote.classList.toggle("is-hidden", showTournamentEditor);
+  elements.tournamentDetailHost.classList.toggle("is-hidden", !showTournamentEditor);
+  elements.memberDetailNote.classList.toggle("is-hidden", showMemberEditor);
+  elements.memberDetailHost.classList.toggle("is-hidden", !showMemberEditor);
 }
 
 async function fetchJson(action) {
