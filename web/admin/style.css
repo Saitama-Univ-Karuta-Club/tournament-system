@@ -112,6 +112,7 @@ body {
   border: 1px solid transparent;
   border-radius: 16px;
   padding: 12px 14px;
+  color: var(--ink);
   background: #fff;
   cursor: pointer;
 }
@@ -121,6 +122,8 @@ body {
 }
 .item-title { display: block; font-weight: 700; }
 .item-meta { display: block; margin-top: 4px; color: var(--muted); font-size: .9rem; }
+.item-button.is-active .item-title { color: var(--accent-dark); }
+.item-button.is-active .item-meta { color: var(--muted); }
 .editor-form {
   display: grid;
   gap: 14px;
