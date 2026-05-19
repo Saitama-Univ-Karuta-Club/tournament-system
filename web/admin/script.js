@@ -28,6 +28,7 @@ const elements = {
   tournamentForm: document.getElementById("tournament-form"),
   memberForm: document.getElementById("member-form"),
   resetTournamentButton: document.getElementById("reset-tournament-button"),
+  sendAnnouncementButton: document.getElementById("send-announcement-button"),
   resetMemberButton: document.getElementById("reset-member-button"),
   tournamentId: document.getElementById("tournament-id"),
   tournamentTitle: document.getElementById("tournament-title"),
@@ -80,6 +81,27 @@ elements.secondaryTabs.forEach(function(button) {
 
 elements.resetTournamentButton.addEventListener("click", function() {
   resetTournamentForm();
+});
+
+elements.sendAnnouncementButton.addEventListener("click", async function() {
+  const tournamentId = elements.tournamentId.value.trim();
+
+  if (!tournamentId) {
+    showStatus("LINE通知の前に大会を保存または一覧から選択してください。", "error");
+    return;
+  }
+
+  try {
+    const adminToken = getLineAdminToken();
+    await postJson({
+      action: "send_announcement",
+      admin_token: adminToken,
+      tournament_ids: [tournamentId],
+    });
+    showStatus("LINEグループへ更新通知を送信しました。", "success");
+  } catch (error) {
+    showStatus(error.message || "LINE通知の送信に失敗しました。", "error");
+  }
 });
 
 elements.resetMemberButton.addEventListener("click", function() {
@@ -283,6 +305,27 @@ function buildTournamentSaveMessage(result) {
 
   return "大会情報を保存しました。Google Calendar同期は未完了です: " +
     (sync.message || "設定を確認してください。");
+}
+
+function getLineAdminToken() {
+  const storageKey = "lineAdminToken";
+  const existing = window.localStorage.getItem(storageKey) || "";
+
+  if (existing) {
+    return existing;
+  }
+
+  const entered = window.prompt(
+    "LINE更新通知に admin token が必要な場合は入力してください。不要なら空欄のままで構いません。",
+    ""
+  );
+
+  if (entered === null) {
+    return "";
+  }
+
+  window.localStorage.setItem(storageKey, entered);
+  return entered;
 }
 
 function selectTournamentById(id) {
