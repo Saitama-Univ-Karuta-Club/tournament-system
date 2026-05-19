@@ -64,9 +64,15 @@ elements.secondaryTabs.forEach(function(button) {
     const key = button.dataset.secondaryTab;
     if (key.startsWith("tournament-")) {
       state.tournamentMode = key;
+      if (key === "tournament-create") {
+        resetTournamentForm();
+      }
     }
     if (key.startsWith("member-")) {
       state.memberMode = key;
+      if (key === "member-create") {
+        resetMemberForm();
+      }
     }
     renderTabs();
   });
