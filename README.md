@@ -20,7 +20,9 @@ web/         Public-facing web pages, starting with the entry page
 ## Current Architecture
 
 - `web/entry/`
-  Public entry page intended to be published separately when needed
+  Public entry page
+- `web/board-c7k2m9q4/`
+  Lightweight admin console protected by `ADMIN_CONSOLE_TOKEN`
 - `gas/`
   Backend API, scheduled jobs, and admin-side functionality
 - `docs/`
@@ -29,8 +31,18 @@ web/         Public-facing web pages, starting with the entry page
 ## Current Decisions
 
 - Start with a single monorepo to keep specification, frontend, and GAS code in sync
-- Keep the management side out of simple public GitHub Pages-only access
+- Publish `web/` through GitHub Pages
+- Keep secrets in Apps Script Script Properties, not in Git-managed files
 - Build the MVP in the order described in the specification
+
+## GitHub Pages
+
+The repository is prepared to deploy `web/` through GitHub Pages using GitHub Actions.
+
+Published paths are expected to be:
+
+- `/entry/`
+- `/board-c7k2m9q4/`
 
 ## Documents
 
