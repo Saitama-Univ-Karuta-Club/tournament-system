@@ -1,10 +1,16 @@
 # Web Directory
 
-This directory will contain the member-facing web pages.
+This directory contains the GitHub Pages facing web pages.
 
-Initial focus:
+Operational rules:
 
 - `entry/` for the attendance confirmation page
-- `admin/` for lightweight tournament/member management
+- `board-c7k2m9q4/` for lightweight tournament/member management
+- Do not publish actual production URLs in the repository or public documents
+- Share production URLs only inside the club LINE group or directly with operators
+- Both `entry/` and `board-c7k2m9q4/` include `noindex` metadata
+- `robots.txt` is included to discourage indexing, but this is not access control
+- Keep the admin URL separate from the member-facing URL
+- If needed, use a less guessable admin path at publish time
 
-The management UI is intentionally not planned as a simple public GitHub Pages page.
+The management UI is still public web content from an HTTP perspective, so secrecy relies on limited sharing and non-obvious URLs rather than strong authentication.

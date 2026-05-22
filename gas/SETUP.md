@@ -4,6 +4,7 @@
 
 - `SHEET_ID`
 - `ENTRY_BASE_URL`
+- `DRIVE_FOLDER_ID`
 
 ## Current Endpoints
 

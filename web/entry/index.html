@@ -3,11 +3,14 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="robots" content="noindex, nofollow, noarchive, nosnippet, noimageindex">
+  <meta name="googlebot" content="noindex, nofollow, noarchive, nosnippet, noimageindex">
+  <meta name="referrer" content="same-origin">
   <title>大会参加確認</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="./style.css">
+  <link rel="stylesheet" href="./style.css?v=20260521-6">
 </head>
 <body>
   <main class="page">
@@ -17,49 +20,224 @@
       <p id="page-description" class="hero-description">
         参加希望の大会に回答してください。
       </p>
+      <div class="hero-link-row">
+        <button
+          id="open-overview-button"
+          class="hero-link-button"
+          type="button"
+        >
+          大会一覧
+        </button>
+        <button
+          id="open-annual-schedule-button"
+          class="hero-link-button"
+          type="button"
+        >
+          年間大会予定表
+        </button>
+      </div>
     </section>
 
     <section class="panel">
-      <form id="entry-form" class="entry-form">
-        <label class="field">
-          <span class="field-label">名前</span>
-          <select
-            id="member-name"
-            name="member_name"
-            required
-          >
-            <option value="">選択してください</option>
-          </select>
-        </label>
+      <section id="entry-view">
+        <form id="entry-form" class="entry-form">
+          <label class="field">
+            <span class="field-label">名前</span>
+            <select
+              id="member-name"
+              name="member_name"
+              required
+            >
+              <option value="">選択してください</option>
+            </select>
+          </label>
 
-        <div class="filter-bar" role="group" aria-label="回答表示切り替え">
-          <button type="button" class="filter-button is-active" data-filter="all">全て</button>
-          <button type="button" class="filter-button" data-filter="answered">回答済み</button>
-          <button type="button" class="filter-button" data-filter="unanswered">未回答</button>
+          <div class="support-link-row">
+            <button
+              id="open-member-request-link"
+              class="support-link-button"
+              type="button"
+            >
+              名前がない場合は追加申請
+            </button>
+          </div>
+
+          <div class="filter-bar" role="group" aria-label="回答表示切り替え">
+            <button type="button" class="filter-button is-active" data-filter="unanswered">未回答</button>
+            <button type="button" class="filter-button" data-filter="answered">回答済み</button>
+            <button type="button" class="filter-button" data-filter="all">全て</button>
+          </div>
+
+          <div id="tournament-list" class="tournament-list"></div>
+
+          <div class="actions">
+            <button id="submit-button" type="submit">送信する</button>
+          </div>
+        </form>
+
+        <div id="status-message" class="status-message" aria-live="polite"></div>
+      </section>
+
+      <section id="overview-view" class="overview-page is-hidden" aria-live="polite">
+        <div class="overview-page-header">
+          <button id="close-overview-button" class="overview-back-button" type="button">
+            申込に戻る
+          </button>
+          <h2>大会一覧</h2>
         </div>
+        <div id="tournament-overview-list" class="overview-list"></div>
+      </section>
 
-        <div id="tournament-list" class="tournament-list"></div>
-
-        <div class="actions">
-          <button id="submit-button" type="submit">送信する</button>
+      <section id="annual-schedule-view" class="overview-page is-hidden" aria-live="polite">
+        <div class="overview-page-header">
+          <button id="close-annual-schedule-button" class="overview-back-button" type="button">
+            申込に戻る
+          </button>
+          <h2>年間大会予定表</h2>
         </div>
-      </form>
+        <div class="schedule-embed-card">
+          <iframe
+            id="annual-schedule-frame"
+            class="schedule-embed-frame"
+            title="年間大会予定表"
+            loading="lazy"
+            src="about:blank"
+          ></iframe>
+          <p class="schedule-embed-link">
+            <a
+              id="annual-schedule-link"
+              href="#"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              Google Drive で開く
+            </a>
+          </p>
+        </div>
+      </section>
 
-      <div id="status-message" class="status-message" aria-live="polite"></div>
+      <section id="member-request-view" class="overview-page is-hidden" aria-live="polite">
+        <div class="overview-page-header">
+          <button id="close-member-request-button" class="overview-back-button" type="button">
+            申込に戻る
+          </button>
+          <h2>メンバー追加申請</h2>
+        </div>
+        <div class="subpage-panel">
+          <form id="member-request-form" class="member-request-form">
+            <div class="member-request-grid">
+              <label class="field">
+                <span class="field-label">苗字（漢字）</span>
+                <input id="request-last-name" type="text" required>
+              </label>
+              <label class="field">
+                <span class="field-label">苗字（ふりがな）</span>
+                <input id="request-last-name-kana" type="text" required>
+              </label>
+              <label class="field">
+                <span class="field-label">名前（漢字）</span>
+                <input id="request-first-name" type="text" required>
+              </label>
+              <label class="field">
+                <span class="field-label">名前（ふりがな）</span>
+                <input id="request-first-name-kana" type="text" required>
+              </label>
+              <label class="field">
+                <span class="field-label">段位</span>
+                <select id="request-rank" required>
+                  <option value="6">六段</option>
+                  <option value="5">五段</option>
+                  <option value="4">四段</option>
+                  <option value="3">三段</option>
+                  <option value="2">二段</option>
+                  <option value="1">初段</option>
+                  <option value="0">無段</option>
+                </select>
+              </label>
+              <label class="field">
+                <span class="field-label">出場級</span>
+                <select id="request-grade" required>
+                  <option value="">選択してください</option>
+                  <option value="A">A</option>
+                  <option value="B">B</option>
+                  <option value="C">C</option>
+                  <option value="D">D</option>
+                  <option value="E">E</option>
+                  <option value="F">F</option>
+                  <option value="beginner">初心者</option>
+                </select>
+              </label>
+            </div>
+            <div class="member-request-actions">
+              <button id="submit-member-request-button" type="button">登録を申請する</button>
+            </div>
+          </form>
+          <div id="member-request-status" class="member-request-status" aria-live="polite"></div>
+        </div>
+      </section>
     </section>
   </main>
+
+  <div id="busy-overlay" class="busy-overlay is-hidden" aria-live="assertive" aria-modal="true" role="dialog">
+    <div class="busy-dialog">
+      <div class="busy-spinner" aria-hidden="true"></div>
+      <p id="busy-message" class="busy-message">読み込み中です...</p>
+    </div>
+  </div>
+
+  <div
+    id="result-overlay"
+    class="confirm-overlay is-hidden"
+    aria-modal="true"
+    role="dialog"
+    aria-labelledby="result-title"
+  >
+    <div class="confirm-dialog">
+      <h2 id="result-title" class="confirm-title">処理結果</h2>
+      <p id="result-message" class="confirm-description"></p>
+      <div class="confirm-actions">
+        <button id="result-close-button" class="confirm-button is-primary" type="button">
+          戻る
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <div
+    id="confirm-overlay"
+    class="confirm-overlay is-hidden"
+    aria-modal="true"
+    role="dialog"
+    aria-labelledby="confirm-title"
+  >
+    <div class="confirm-dialog">
+      <h2 id="confirm-title" class="confirm-title">この内容で送信しますか？</h2>
+      <p class="confirm-description">今回送信する大会と回答内容です。</p>
+      <div id="confirm-summary" class="confirm-summary"></div>
+      <div class="confirm-actions">
+        <button id="confirm-cancel-button" class="confirm-button is-secondary" type="button">
+          戻る
+        </button>
+        <button id="confirm-submit-button" class="confirm-button is-primary" type="button">
+          送信する
+        </button>
+      </div>
+    </div>
+  </div>
 
   <template id="tournament-template">
     <article class="tournament-card">
       <div class="card-header">
-        <h2 class="tournament-title"></h2>
+        <div class="title-row">
+          <h2 class="tournament-title"></h2>
+          <p class="response-state"></p>
+        </div>
         <p class="tournament-meta"></p>
-        <p class="response-state"></p>
       </div>
 
       <dl class="tournament-details">
         <div>
-          <dt>日程</dt>
+          <dt>大会日程</dt>
           <dd class="event-date"></dd>
         </div>
         <div>
@@ -67,7 +245,7 @@
           <dd class="grades"></dd>
         </div>
         <div>
-          <dt>サークル内締切</dt>
+          <dt>回答締切</dt>
           <dd class="internal-deadline"></dd>
         </div>
         <div>
@@ -94,11 +272,11 @@
 
       <label class="field">
         <span class="field-label">コメント</span>
-        <textarea rows="3" placeholder="任意"></textarea>
+        <textarea rows="2" placeholder="任意"></textarea>
       </label>
     </article>
   </template>
 
-  <script src="./script.js"></script>
+  <script src="./script.js?v=20260521-6"></script>
 </body>
 </html>
