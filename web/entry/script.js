@@ -129,6 +129,7 @@ async function init() {
     renderMemberOptions(state.members);
     renderTournamentOverview();
     renderSelectedMemberNotice_();
+    syncMemberRequestLinkVisibility_();
     setCurrentView("entry");
     state.filteredTournaments = [];
     renderEmptyState("名前を選ぶと、対象の大会だけ表示されます。");
@@ -275,6 +276,7 @@ async function handleMemberChange() {
     state.draftResponsesByTournament = {};
     state.filteredTournaments = [];
     renderSelectedMemberNotice_();
+    syncMemberRequestLinkVisibility_();
     renderEmptyState("名前を選ぶと、対象の大会だけ表示されます。");
     showStatus("", "");
     return;
@@ -285,6 +287,7 @@ async function handleMemberChange() {
     selectedMember
   );
   renderSelectedMemberNotice_();
+  syncMemberRequestLinkVisibility_();
   setBusyState(true, "既存の回答を読み込んでいます...");
   disableForm();
   showStatus("回答状況を読み込んでいます...", "");
@@ -700,6 +703,17 @@ function renderSelectedMemberNotice_() {
 
   elements.selectedMemberNotice.textContent =
     selectedMember.display_name + "さん 以下の大会が申し込み受付中です。";
+}
+
+function syncMemberRequestLinkVisibility_() {
+  if (!elements.openMemberRequestLink) {
+    return;
+  }
+
+  elements.openMemberRequestLink.classList.toggle(
+    "is-hidden",
+    Boolean(getSelectedMember())
+  );
 }
 
 function getGroupedTournamentDisplayItem_(tournament) {
