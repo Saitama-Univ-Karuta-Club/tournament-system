@@ -1,6 +1,7 @@
 const API_BASE_URL =
   "https://script.google.com/macros/s/AKfycbzlYunO5FHWb75UXJCU8opm9nassYo74nQdlSKg-XXTntea6hEzq87konXxHEfzWsvf/exec";
 
+const TOURNAMENT_GRADE_OPTIONS = ["A", "B", "C", "D", "E", "F", "初心者"];
 const MEMBER_GRADE_OPTIONS = ["A", "B", "C", "D", "E", "F", "beginner"];
 
 const state = {
@@ -457,13 +458,15 @@ function renderTournamentOverview() {
     return;
   }
 
-  if (!state.tournamentResponseOverview.length) {
+  const overviewItems = getGroupedTournamentOverviewItems_();
+
+  if (!overviewItems.length) {
     elements.tournamentOverviewList.innerHTML =
       '<div class="empty-state">申込状況を表示できる大会はまだありません。</div>';
     return;
   }
 
-  elements.tournamentOverviewList.innerHTML = state.tournamentResponseOverview
+  elements.tournamentOverviewList.innerHTML = overviewItems
     .map(function(item) {
       const applicantGroups = Array.isArray(item.applicant_groups) ? item.applicant_groups : [];
       const applicantBody = applicantGroups.length ?
@@ -552,19 +555,21 @@ function renderTournaments(tournaments) {
   tournaments.forEach(function(tournament) {
     const fragment = elements.tournamentTemplate.content.cloneNode(true);
     const card = fragment.querySelector(".tournament-card");
+    const displayTournament = getGroupedTournamentDisplayItem_(tournament);
     const savedResponse = state.savedResponsesByTournament[tournament.tournament_id] || null;
     const draftResponse = state.draftResponsesByTournament[tournament.tournament_id] || null;
 
-    fragment.querySelector(".tournament-title").textContent = tournament.title;
+    fragment.querySelector(".tournament-title").textContent =
+      displayTournament.title || tournament.title;
     fragment.querySelector(".tournament-meta").textContent = "";
     fragment.querySelector(".response-state").textContent =
       savedResponse ? "回答済み" : "未回答";
     fragment.querySelector(".event-date").textContent =
-      tournament.event_date_label || "-";
+      displayTournament.event_date_label || tournament.event_date_label || "-";
     fragment.querySelector(".grades").textContent =
-      tournament.grades || "-";
+      displayTournament.grades || tournament.grades || "-";
     fragment.querySelector(".internal-deadline").textContent =
-      formatDateTime(tournament.internal_deadline);
+      formatDateTime(displayTournament.internal_deadline || tournament.internal_deadline);
 
     const driveLink = fragment.querySelector(".drive-link");
     driveLink.href = tournament.drive_url || "#";
@@ -668,6 +673,166 @@ function renderCurrentTournamentView() {
   if (visibleTournaments.length) {
     showStatus("", "");
   }
+}
+
+function getGroupedTournamentDisplayItem_(tournament) {
+  const items = getGroupedPublicTournamentItems_();
+  const groupKey = buildPublicTournamentGroupKey_(tournament);
+
+  return items.find(function(item) {
+    return item.group_key === groupKey;
+  }) || tournament;
+}
+
+function getGroupedTournamentOverviewItems_() {
+  const groups = {};
+
+  (state.tournamentResponseOverview || []).forEach(function(item) {
+    const groupKey = buildPublicTournamentGroupKey_(item);
+
+    if (!groups[groupKey]) {
+      groups[groupKey] = {
+        group_key: groupKey,
+        title: buildTournamentBaseTitleForGrouping_(item.title, item.grades),
+        event_date_label: item.event_date_label || "",
+        internal_deadline: item.internal_deadline || "",
+        grades: [],
+        applicant_groups: [],
+        applicant_count: 0,
+      };
+    }
+
+    groups[groupKey].grades = sortTournamentGrades_(
+      groups[groupKey].grades.concat(normalizeTournamentGradeValues_(item.grades))
+    );
+    groups[groupKey].applicant_groups = mergeApplicantGroups_(
+      groups[groupKey].applicant_groups,
+      item.applicant_groups
+    );
+    groups[groupKey].applicant_count += Number(item.applicant_count || 0);
+  });
+
+  return Object.keys(groups).map(function(groupKey) {
+    const item = groups[groupKey];
+    item.grades = item.grades.join(",");
+    item.applicant_count = item.applicant_groups.reduce(function(total, group) {
+      return total + (group.names || []).length;
+    }, 0);
+    return item;
+  });
+}
+
+function getGroupedPublicTournamentItems_() {
+  const groups = {};
+
+  (state.tournaments || []).forEach(function(item) {
+    const groupKey = buildPublicTournamentGroupKey_(item);
+
+    if (!groups[groupKey]) {
+      groups[groupKey] = {
+        group_key: groupKey,
+        title: buildTournamentBaseTitleForGrouping_(item.title, item.grades),
+        event_date_label: item.event_date_label || "",
+        internal_deadline: item.internal_deadline || "",
+        grades: [],
+        drive_url: item.drive_url || "",
+      };
+    }
+
+    groups[groupKey].grades = sortTournamentGrades_(
+      groups[groupKey].grades.concat(normalizeTournamentGradeValues_(item.grades))
+    );
+  });
+
+  return Object.keys(groups).map(function(groupKey) {
+    const item = groups[groupKey];
+    item.grades = item.grades.join(",");
+    return item;
+  });
+}
+
+function buildPublicTournamentGroupKey_(item) {
+  return [
+    buildTournamentBaseTitleForGrouping_(item.title, item.grades),
+    String(item.event_date_label || "").trim(),
+    String(item.internal_deadline || "").trim(),
+    String(item.drive_url || "").trim(),
+  ].join("::");
+}
+
+function buildTournamentBaseTitleForGrouping_(title, grades) {
+  const normalizedTitle = String(title || "").trim();
+  const compactGradeLabel = normalizeTournamentGradeValues_(grades)
+    .map(function(grade) {
+      return String(grade || "").replace(/級$/g, "").trim();
+    })
+    .filter(Boolean)
+    .join("");
+
+  if (!compactGradeLabel) {
+    return normalizedTitle;
+  }
+
+  return normalizedTitle
+    .replace(new RegExp(escapeRegExpForGrouping_(compactGradeLabel) + "級$"), "")
+    .replace(new RegExp(escapeRegExpForGrouping_(compactGradeLabel) + "$"), "")
+    .trim();
+}
+
+function normalizeTournamentGradeValues_(value) {
+  if (Array.isArray(value)) {
+    return value
+      .map(function(item) {
+        return String(item || "").trim();
+      })
+      .filter(Boolean);
+  }
+
+  return String(value || "")
+    .replace(/、/g, ",")
+    .split(",")
+    .map(function(item) {
+      return String(item || "").trim();
+    })
+    .filter(function(item) {
+      return item && TOURNAMENT_GRADE_OPTIONS.indexOf(item) !== -1;
+    });
+}
+
+function sortTournamentGrades_(grades) {
+  return uniqueStrings((grades || []).slice()).sort(function(a, b) {
+    return TOURNAMENT_GRADE_OPTIONS.indexOf(a) - TOURNAMENT_GRADE_OPTIONS.indexOf(b);
+  });
+}
+
+function mergeApplicantGroups_(leftGroups, rightGroups) {
+  const grouped = {};
+
+  (leftGroups || []).concat(rightGroups || []).forEach(function(group) {
+    const grade = String(group && group.grade ? group.grade : "").trim() || "未登録";
+    const names = Array.isArray(group && group.names) ? group.names : [];
+
+    if (!grouped[grade]) {
+      grouped[grade] = [];
+    }
+
+    names.forEach(function(name) {
+      if (grouped[grade].indexOf(name) === -1) {
+        grouped[grade].push(name);
+      }
+    });
+  });
+
+  return Object.keys(grouped).sort(function(a, b) {
+    return String(a).localeCompare(String(b), "ja");
+  }).map(function(grade) {
+    return {
+      grade: grade,
+      names: grouped[grade].slice().sort(function(a, b) {
+        return String(a).localeCompare(String(b), "ja");
+      }),
+    };
+  });
 }
 
 function matchesVisibilityFilter(tournamentId) {

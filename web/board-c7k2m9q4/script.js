@@ -324,6 +324,7 @@ elements.entryPageToken.addEventListener("input", function() {
 
 elements.tournamentForm.addEventListener("submit", async function(event) {
   event.preventDefault();
+  const wasEditingInModal = state.isTournamentEditModalOpen;
 
   const selectedManager = getSelectedManager();
 
@@ -352,6 +353,10 @@ elements.tournamentForm.addEventListener("submit", async function(event) {
   };
   const gradeConfigs = buildTournamentGradeConfigsPayload();
 
+  if (wasEditingInModal) {
+    closeTournamentEditModal_(true);
+  }
+
   try {
     setBusyState(true, "大会情報を保存中です...");
     const result = await postJson({
@@ -360,7 +365,7 @@ elements.tournamentForm.addEventListener("submit", async function(event) {
       grade_configs: gradeConfigs,
     });
     await loadAdminData();
-    if (!state.isTournamentEditModalOpen) {
+    if (!wasEditingInModal) {
       state.primaryTab = "tournaments";
       state.tournamentMode = "tournament-create";
       if (result.tournament_ids && result.tournament_ids.length) {
@@ -372,14 +377,23 @@ elements.tournamentForm.addEventListener("submit", async function(event) {
     showStatus(successMessage, "success");
     setBusyState(false);
     showResultOverlay_("保存しました", successMessage, function() {
-      if (!state.isTournamentEditModalOpen) {
+      if (!wasEditingInModal) {
         elements.tournamentTitle.focus();
       }
     });
   } catch (error) {
     showStatus(error.message || "大会情報の保存に失敗しました。", "error");
     setBusyState(false);
-    showResultOverlay_("保存できませんでした", error.message || "大会情報の保存に失敗しました。");
+    showResultOverlay_(
+      "保存できませんでした",
+      error.message || "大会情報の保存に失敗しました。",
+      function() {
+        if (wasEditingInModal) {
+          reopenTournamentEditModal_();
+          elements.tournamentTitle.focus();
+        }
+      }
+    );
   }
 });
 
@@ -579,7 +593,7 @@ function renderTabs() {
 }
 
 function renderTournamentList() {
-  const visibleTournaments = getFilteredTournamentListItems_();
+  const visibleTournaments = getGroupedTournamentListItems_();
 
   if (!visibleTournaments.length) {
     elements.tournamentList.innerHTML = '<p class="empty-state">表示対象の大会がありません。</p>';
@@ -588,11 +602,10 @@ function renderTournamentList() {
 
   elements.tournamentList.innerHTML = visibleTournaments.map(function(item) {
     const statusTag = getTournamentStatusTag_(item.status);
-    const overview = getTournamentOverviewById_(item.tournament_id);
-    const applicantGroups = overview && Array.isArray(overview.applicant_groups) ?
-      overview.applicant_groups :
+    const applicantGroups = Array.isArray(item.applicant_groups) ?
+      item.applicant_groups :
       [];
-    const applicantCount = overview ? Number(overview.applicant_count || 0) : 0;
+    const applicantCount = Number(item.applicant_count || 0);
     const isApplied = String(item.status || "").trim() === "applied";
     const entryUrl = buildTournamentEntryUrl_(item);
     const applicantBody = applicantGroups.length ?
@@ -646,7 +659,8 @@ function renderTournamentList() {
           '<div class="response-overview-actions response-overview-actions-side">' +
             '<button type="button" class="response-toggle-button' +
               (isApplied ? " is-active" : "") +
-              '" data-applied-toggle-id="' + escapeHtml(item.tournament_id || "") +
+              '" data-applied-toggle-ids="' +
+                escapeHtml((item.tournament_ids || []).join(",")) +
               '" aria-pressed="' + escapeHtml(String(isApplied)) + '">' +
               '<span class="response-toggle-track">' +
                 '<span class="response-toggle-thumb"></span>' +
@@ -655,18 +669,19 @@ function renderTournamentList() {
                 escapeHtml(isApplied ? "申込済" : "未申込") +
               "</span>" +
             "</button>" +
-            '<button type="button" class="response-overview-edit-button" data-edit-tournament-id="' +
-              escapeHtml(item.tournament_id || "") + '">情報を編集する</button>' +
+            '<button type="button" class="response-overview-edit-button" data-edit-tournament-ids="' +
+              escapeHtml((item.tournament_ids || []).join(",")) +
+              '">情報を編集する</button>' +
           "</div>" +
         "</div>" +
       "</section>"
     );
   }).join("");
 
-  elements.tournamentList.querySelectorAll("[data-applied-toggle-id]").forEach(function(button) {
+  elements.tournamentList.querySelectorAll("[data-applied-toggle-ids]").forEach(function(button) {
     button.addEventListener("click", async function() {
-      await updateTournamentAppliedStatus_(
-        button.dataset.appliedToggleId,
+      await updateTournamentAppliedStatusForIds_(
+        parseTournamentIds_(button.dataset.appliedToggleIds),
         !button.classList.contains("is-active")
       );
     });
@@ -690,12 +705,14 @@ function renderTournamentList() {
     });
   });
 
-  elements.tournamentList.querySelectorAll("[data-edit-tournament-id]").forEach(function(button) {
+  elements.tournamentList.querySelectorAll("[data-edit-tournament-ids]").forEach(function(button) {
     button.addEventListener("click", function() {
       state.primaryTab = "tournaments";
       state.tournamentMode = "tournament-list";
       renderTabs();
-      openTournamentEditModal_(button.dataset.editTournamentId);
+      openTournamentEditModalForIds_(
+        parseTournamentIds_(button.dataset.editTournamentIds)
+      );
       showStatus("大会情報を編集できます。申込情報は保持されます。", "");
     });
   });
@@ -853,39 +870,92 @@ function selectTournamentById(id) {
     return;
   }
 
-  state.selectedTournamentId = id;
+  populateTournamentFormFromItems_([item]);
+}
+
+function populateTournamentFormFromItems_(items) {
+  const tournaments = (items || []).filter(Boolean).slice().sort(function(a, b) {
+    return TOURNAMENT_GRADE_OPTIONS.indexOf(String(a.grades || "").trim()) -
+      TOURNAMENT_GRADE_OPTIONS.indexOf(String(b.grades || "").trim());
+  });
+
+  if (!tournaments.length) {
+    return;
+  }
+
+  const first = tournaments[0];
+  const commonTrueDeadline = buildDateTimeKey_(
+    toDateInputValue(first.true_deadline),
+    getTimePart_(first.true_deadline)
+  );
+  const commonInternalDeadline = buildDateTimeKey_(
+    toDateInputValue(first.internal_deadline),
+    getTimePart_(first.internal_deadline)
+  );
+
+  state.selectedTournamentId = first.tournament_id || "";
   renderTabs();
   renderTournamentList();
 
-  elements.tournamentId.value = item.tournament_id || "";
-  elements.tournamentTitle.value = item.title || "";
-  elements.eventStartDate.value = toDateInputValue(item.event_start_date);
-  elements.eventEndDate.value = toDateInputValue(item.event_start_date);
-  setSelectedTournamentGrades(item.grades || "");
+  elements.tournamentId.value = tournaments.length === 1 ? (first.tournament_id || "") : "";
+  elements.tournamentTitle.value = first.title || "";
+  elements.eventStartDate.value = toDateInputValue(first.event_start_date);
+  elements.eventEndDate.value = toDateInputValue(first.event_start_date);
+  setSelectedTournamentGrades(tournaments.map(function(item) {
+    return String(item.grades || "").trim();
+  }).filter(Boolean));
   setDateTimeFields_(
     elements.trueDeadlineDate,
     elements.trueDeadlineTime,
-    item.true_deadline
+    first.true_deadline
   );
   setDateTimeFields_(
     elements.internalDeadlineDate,
     elements.internalDeadlineTime,
-    item.internal_deadline
+    first.internal_deadline
   );
   state.internalDeadlineManuallyEdited =
     buildDateTimeKey_(
       elements.internalDeadlineDate.value,
       elements.internalDeadlineTime.value
     ) !== getSuggestedInternalDeadline_();
-  elements.venue.value = item.venue || "";
-  elements.driveUrl.value = item.drive_url || "";
-  elements.entryPageToken.value = item.entry_page_token || "";
-  elements.entryUrl.value = item.entry_url || "";
+  elements.venue.value = first.venue || "";
+  elements.driveUrl.value = first.drive_url || "";
+  elements.entryPageToken.value = first.entry_page_token || "";
+  elements.entryUrl.value = first.entry_url || "";
   syncEntryUrlPlaceholder_();
-  setSelectedManager(item.manager_line_user_id || "", item.manager_name || "");
-  elements.tournamentType.value = getTournamentTypeValue(item);
-  elements.tournamentStatus.value = item.status || "draft";
+  setSelectedManager(first.manager_line_user_id || "", first.manager_name || "");
+  elements.tournamentType.value = getTournamentTypeValue(first);
+  elements.tournamentStatus.value = first.status || "draft";
   state.gradeScheduleOverrides = {};
+
+  tournaments.forEach(function(item) {
+    const grade = String(item.grades || "").trim();
+    const itemTrueDeadline = buildDateTimeKey_(
+      toDateInputValue(item.true_deadline),
+      getTimePart_(item.true_deadline)
+    );
+    const itemInternalDeadline = buildDateTimeKey_(
+      toDateInputValue(item.internal_deadline),
+      getTimePart_(item.internal_deadline)
+    );
+
+    if (!grade) {
+      return;
+    }
+
+    state.gradeScheduleOverrides[grade] = {
+      tournamentId: item.tournament_id || "",
+      useCommon:
+        toDateInputValue(item.event_start_date) === elements.eventStartDate.value &&
+        itemTrueDeadline === commonTrueDeadline &&
+        itemInternalDeadline === commonInternalDeadline,
+      eventStartDate: toDateInputValue(item.event_start_date),
+      trueDeadline: itemTrueDeadline,
+      internalDeadline: itemInternalDeadline,
+    };
+  });
+
   renderGradeScheduleSettings();
 }
 
@@ -1194,11 +1264,7 @@ function getSuggestedInternalDeadline_() {
     return "";
   }
 
-  return shiftDateString(
-    elements.trueDeadlineDate.value,
-    -3,
-    elements.trueDeadlineTime.value
-  );
+  return getSuggestedInternalDeadlineFromDate_(elements.trueDeadlineDate.value);
 }
 
 async function handleBriefFile(file) {
@@ -1248,11 +1314,18 @@ async function handleBriefFile(file) {
     });
 
     elements.driveUrl.value = result.drive_url || "";
-    setBriefUploadStatus("アップロードしました: " + (result.file_name || file.name), "success");
+    setBriefUploadStatus(
+      (result.reused_existing ? "既存ファイルを再利用しました: " : "アップロードしました: ") +
+      (result.file_name || file.name),
+      "success"
+    );
     setBusyState(false);
     showResultOverlay_(
-      "アップロードしました",
-      "要項ファイルをアップロードしました。\n" + (result.file_name || file.name)
+      result.reused_existing ? "既存ファイルを再利用しました" : "アップロードしました",
+      (result.reused_existing ?
+        "同名の要項ファイルがすでに存在したため、そのファイルを再利用しました。\n" :
+        "要項ファイルをアップロードしました。\n") +
+      (result.file_name || file.name)
     );
   } catch (error) {
     setBriefUploadStatus(error.message || "ファイルのアップロードに失敗しました。", "error");
@@ -1318,6 +1391,14 @@ function shiftDateString(value, days, timeValue) {
   }
 
   return buildDateTimeKey_(shiftedDate, timeValue);
+}
+
+function getSuggestedInternalDeadlineFromDate_(trueDeadlineDate) {
+  if (!trueDeadlineDate) {
+    return "";
+  }
+
+  return shiftDateString(trueDeadlineDate, -3, "23:59");
 }
 
 function renderTournamentResponseOverview() {
@@ -1443,6 +1524,167 @@ function getFilteredTournamentListItems_() {
     });
 }
 
+function getGroupedTournamentListItems_() {
+  const groups = {};
+
+  getFilteredTournamentListItems_().forEach(function(item) {
+    const groupKey = buildTournamentListGroupKey_(item);
+    const overview = getTournamentOverviewById_(item.tournament_id);
+
+    if (!groups[groupKey]) {
+      groups[groupKey] = {
+        group_key: groupKey,
+        tournament_id: item.tournament_id || "",
+        tournament_ids: [],
+        title: item.title || "",
+        status: item.status || "",
+        event_start_date: item.event_start_date || "",
+        event_end_date: item.event_end_date || item.event_start_date || "",
+        internal_deadline: item.internal_deadline || "",
+        true_deadline: item.true_deadline || "",
+        grades: [],
+        venue: item.venue || "",
+        drive_url: item.drive_url || "",
+        entry_page_token: item.entry_page_token || "",
+        entry_url: item.entry_url || "",
+        manager_name: item.manager_name || "",
+        manager_line_user_id: item.manager_line_user_id || "",
+        tournament_type: item.tournament_type || "",
+        applicant_groups: [],
+        applicant_count: 0,
+      };
+    }
+
+    groups[groupKey].tournament_ids.push(item.tournament_id || "");
+    groups[groupKey].grades = sortTournamentGrades_(
+      groups[groupKey].grades.concat(normalizeGradeValues(item.grades || ""))
+    );
+    groups[groupKey].status = mergeTournamentStatuses_(
+      groups[groupKey].status,
+      item.status
+    );
+
+    if (overview) {
+      groups[groupKey].applicant_groups = mergeApplicantGroups_(
+        groups[groupKey].applicant_groups,
+        overview.applicant_groups
+      );
+      groups[groupKey].applicant_count += Number(overview.applicant_count || 0);
+    }
+  });
+
+  return Object.keys(groups).map(function(groupKey) {
+    const item = groups[groupKey];
+    item.grades = item.grades.join(",");
+    return item;
+  }).sort(function(a, b) {
+    return compareOverviewDateValues_(a.event_start_date, b.event_start_date) ||
+      compareOverviewDateValues_(a.internal_deadline, b.internal_deadline) ||
+      String(a.title || "").localeCompare(String(b.title || ""), "ja");
+  });
+}
+
+function buildTournamentListGroupKey_(item) {
+  return [
+    buildTournamentBaseTitleForGrouping_(item.title, item.grades),
+    String(item.tournament_type || "").trim(),
+    String(item.venue || "").trim(),
+    String(item.entry_page_token || "").trim(),
+    normalizeDateKey_(item.event_start_date),
+    normalizeDateKey_(item.event_end_date || item.event_start_date),
+    String(item.internal_deadline || "").trim(),
+  ].join("::");
+}
+
+function buildTournamentBaseTitleForGrouping_(title, grades) {
+  const normalizedTitle = String(title || "").trim();
+  const compactGradeLabel = normalizeGradeValues(grades)
+    .map(function(grade) {
+      return String(grade || "").replace(/級$/g, "").trim();
+    })
+    .filter(Boolean)
+    .join("");
+
+  if (!compactGradeLabel) {
+    return normalizedTitle;
+  }
+
+  return normalizedTitle
+    .replace(new RegExp(escapeRegExpForGrouping_(compactGradeLabel) + "級$"), "")
+    .replace(new RegExp(escapeRegExpForGrouping_(compactGradeLabel) + "$"), "")
+    .trim();
+}
+
+function escapeRegExpForGrouping_(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function mergeTournamentStatuses_(leftStatus, rightStatus) {
+  const leftTag = getTournamentStatusTag_(leftStatus).key;
+  const rightTag = getTournamentStatusTag_(rightStatus).key;
+
+  if (!leftStatus) {
+    return rightStatus || "";
+  }
+
+  if (leftTag === rightTag) {
+    return leftStatus;
+  }
+
+  if (leftTag === "closed" && rightTag === "closed") {
+    return "closed";
+  }
+
+  return "active";
+}
+
+function mergeApplicantGroups_(leftGroups, rightGroups) {
+  const groupedNames = {};
+
+  (leftGroups || []).concat(rightGroups || []).forEach(function(group) {
+    const grade = String(group && group.grade ? group.grade : "").trim();
+    const names = Array.isArray(group && group.names) ? group.names : [];
+
+    if (!groupedNames[grade]) {
+      groupedNames[grade] = [];
+    }
+
+    names.forEach(function(name) {
+      if (groupedNames[grade].indexOf(name) === -1) {
+        groupedNames[grade].push(name);
+      }
+    });
+  });
+
+  return Object.keys(groupedNames)
+    .sort(function(a, b) {
+      return String(a).localeCompare(String(b), "ja");
+    })
+    .map(function(grade) {
+      return {
+        grade: grade,
+        names: groupedNames[grade].slice().sort(function(a, b) {
+          return String(a).localeCompare(String(b), "ja");
+        }),
+      };
+    });
+}
+
+function sortTournamentGrades_(grades) {
+  return uniqueStrings((grades || []).filter(Boolean)).sort(function(a, b) {
+    return TOURNAMENT_GRADE_OPTIONS.indexOf(a) - TOURNAMENT_GRADE_OPTIONS.indexOf(b);
+  });
+}
+
+function parseTournamentIds_(value) {
+  return String(value || "")
+    .split(",")
+    .map(function(item) {
+      return String(item || "").trim();
+    })
+    .filter(Boolean);
+}
+
 function getTournamentOverviewById_(tournamentId) {
   return (state.tournamentResponseOverview || []).find(function(item) {
     return item.tournament_id === tournamentId;
@@ -1563,18 +1805,30 @@ function formatOverviewGradeLabel(grade) {
 }
 
 async function updateTournamentAppliedStatus_(tournamentId, isApplied) {
+  return updateTournamentAppliedStatusForIds_([tournamentId], isApplied);
+}
+
+async function updateTournamentAppliedStatusForIds_(tournamentIds, isApplied) {
+  const ids = (tournamentIds || []).filter(Boolean);
   const nextStatus = isApplied ? "applied" : "active";
   const successMessage = isApplied ?
     "大会を申込済にしました。23:00 の完了通知対象になります。" :
     "大会を未申込に戻しました。";
 
+  if (!ids.length) {
+    showStatus("対象の大会が見つかりませんでした。", "error");
+    return;
+  }
+
   try {
     setBusyState(true, "大会の申込状態を更新しています...");
-    await postJson({
-      action: "update_tournament_status",
-      tournament_id: tournamentId,
-      status: nextStatus,
-    });
+    await Promise.all(ids.map(function(tournamentId) {
+      return postJson({
+        action: "update_tournament_status",
+        tournament_id: tournamentId,
+        status: nextStatus,
+      });
+    }));
     await loadAdminData();
     showStatus(successMessage, "success");
     setBusyState(false);
@@ -1859,11 +2113,27 @@ function openMemberEditModal_(memberId) {
 }
 
 function openTournamentEditModal_(tournamentId) {
+  return openTournamentEditModalForIds_([tournamentId]);
+}
+
+function openTournamentEditModalForIds_(tournamentIds) {
+  const ids = (tournamentIds || []).filter(Boolean);
+  const tournaments = ids.map(function(id) {
+    return state.tournaments.find(function(tournament) {
+      return tournament.tournament_id === id;
+    }) || null;
+  }).filter(Boolean);
+
+  if (!tournaments.length) {
+    showStatus("対象の大会が見つかりませんでした。", "error");
+    return;
+  }
+
   state.isTournamentEditModalOpen = true;
   elements.tournamentEditOverlay.classList.remove("is-hidden");
   syncBodyBusyState_();
   syncFormPlacement();
-  selectTournamentById(tournamentId);
+  populateTournamentFormFromItems_(tournaments);
 }
 
 function closeTournamentEditModal_(keepValues) {
@@ -1877,6 +2147,13 @@ function closeTournamentEditModal_(keepValues) {
     renderTabs();
   }
 
+  syncBodyBusyState_();
+}
+
+function reopenTournamentEditModal_() {
+  state.isTournamentEditModalOpen = true;
+  elements.tournamentEditOverlay.classList.remove("is-hidden");
+  syncFormPlacement();
   syncBodyBusyState_();
 }
 
@@ -2009,14 +2286,17 @@ function syncGradeScheduleOverrides_() {
   const next = {};
 
   selectedGrades.forEach(function(grade) {
-    next[grade] = state.gradeScheduleOverrides[grade] || {
-      useCommon: true,
-      eventStartDate: elements.eventStartDate.value,
-      trueDeadline: buildDateTimeKey_(
+    const existing = state.gradeScheduleOverrides[grade] || {};
+
+    next[grade] = {
+      tournamentId: existing.tournamentId || "",
+      useCommon: existing.useCommon !== false,
+      eventStartDate: existing.eventStartDate || elements.eventStartDate.value,
+      trueDeadline: existing.trueDeadline || buildDateTimeKey_(
         elements.trueDeadlineDate.value,
         elements.trueDeadlineTime.value
       ),
-      internalDeadline: buildDateTimeKey_(
+      internalDeadline: existing.internalDeadline || buildDateTimeKey_(
         elements.internalDeadlineDate.value,
         elements.internalDeadlineTime.value
       ),
@@ -2119,21 +2399,15 @@ function renderGradeScheduleSettings() {
         return;
       }
 
-      const previousSuggested = shiftDateString(
-        getDatePart_(config.trueDeadline),
-        -3,
-        getTimePart_(config.trueDeadline)
+      const previousSuggested = getSuggestedInternalDeadlineFromDate_(
+        getDatePart_(config.trueDeadline)
       );
       config.trueDeadline = buildDateTimeKey_(
         input.value,
         getTimePart_(config.trueDeadline)
       );
       if (!config.internalDeadline || config.internalDeadline === previousSuggested) {
-        config.internalDeadline = shiftDateString(
-          input.value,
-          -3,
-          getTimePart_(config.trueDeadline)
-        );
+        config.internalDeadline = getSuggestedInternalDeadlineFromDate_(input.value);
       }
       renderGradeScheduleSettings();
     });
@@ -2146,20 +2420,16 @@ function renderGradeScheduleSettings() {
         return;
       }
 
-      const previousSuggested = shiftDateString(
-        getDatePart_(config.trueDeadline),
-        -3,
-        getTimePart_(config.trueDeadline)
+      const previousSuggested = getSuggestedInternalDeadlineFromDate_(
+        getDatePart_(config.trueDeadline)
       );
       config.trueDeadline = buildDateTimeKey_(
         getDatePart_(config.trueDeadline),
         input.value
       );
       if (!config.internalDeadline || config.internalDeadline === previousSuggested) {
-        config.internalDeadline = shiftDateString(
-          getDatePart_(config.trueDeadline),
-          -3,
-          input.value
+        config.internalDeadline = getSuggestedInternalDeadlineFromDate_(
+          getDatePart_(config.trueDeadline)
         );
       }
       renderGradeScheduleSettings();
@@ -2197,9 +2467,11 @@ function buildTournamentGradeConfigsPayload() {
     const useCommon = config.useCommon !== false;
 
     return {
-      tournament_id: getSelectedTournamentGrades().length === 1 ?
-        elements.tournamentId.value.trim() :
-        "",
+      tournament_id: config.tournamentId || (
+        getSelectedTournamentGrades().length === 1 ?
+          elements.tournamentId.value.trim() :
+          ""
+      ),
       grade: grade,
       event_start_date: useCommon ? elements.eventStartDate.value : config.eventStartDate,
       true_deadline: toApiDateTimeValue(
