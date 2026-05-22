@@ -353,6 +353,7 @@ function getAdminSettings_() {
     line_group_id: String(
       properties.getProperty("LINE_GROUP_ID") || ""
     ).trim(),
+    line_message_templates: getLineMessageTemplates_(),
   };
 }
 
@@ -367,20 +368,39 @@ function getPublicPageSettings_() {
 
 function updateAdminSettings_(input) {
   const properties = PropertiesService.getScriptProperties();
-  const normalized = normalizeAdminSettingsInput_(input || {});
+  const source = input || {};
+  const normalized = normalizeAdminSettingsInput_(source);
 
-  setOrDeleteScriptProperty_(properties, "ANNUAL_SCHEDULE_PREVIEW_URL", normalized.annual_schedule_preview_url);
-  setOrDeleteScriptProperty_(properties, "ANNUAL_SCHEDULE_VIEW_URL", normalized.annual_schedule_view_url);
-  setOrDeleteScriptProperty_(properties, "WEB_BASE_URL", normalized.web_base_url);
-  setOrDeleteScriptProperty_(properties, "ADMIN_PAGE_URL", normalized.admin_page_url);
-  setOrDeleteScriptProperty_(properties, "DEFAULT_ENTRY_PAGE_TOKEN", normalized.default_entry_page_token);
-  setOrDeleteScriptProperty_(properties, "CALENDAR_ID", normalized.calendar_id);
-  setOrDeleteScriptProperty_(properties, "LINE_GROUP_ID", normalized.line_group_id);
-
-  if (normalized.drive_folder_id) {
-    properties.setProperty("DRIVE_FOLDER_ID", normalized.drive_folder_id);
-  } else {
-    properties.deleteProperty("DRIVE_FOLDER_ID");
+  if (hasOwnProperty_(source, "annual_schedule_preview_url")) {
+    setOrDeleteScriptProperty_(properties, "ANNUAL_SCHEDULE_PREVIEW_URL", normalized.annual_schedule_preview_url);
+  }
+  if (hasOwnProperty_(source, "annual_schedule_view_url")) {
+    setOrDeleteScriptProperty_(properties, "ANNUAL_SCHEDULE_VIEW_URL", normalized.annual_schedule_view_url);
+  }
+  if (hasOwnProperty_(source, "web_base_url")) {
+    setOrDeleteScriptProperty_(properties, "WEB_BASE_URL", normalized.web_base_url);
+  }
+  if (hasOwnProperty_(source, "admin_page_url")) {
+    setOrDeleteScriptProperty_(properties, "ADMIN_PAGE_URL", normalized.admin_page_url);
+  }
+  if (hasOwnProperty_(source, "default_entry_page_token")) {
+    setOrDeleteScriptProperty_(properties, "DEFAULT_ENTRY_PAGE_TOKEN", normalized.default_entry_page_token);
+  }
+  if (hasOwnProperty_(source, "calendar_id")) {
+    setOrDeleteScriptProperty_(properties, "CALENDAR_ID", normalized.calendar_id);
+  }
+  if (hasOwnProperty_(source, "line_group_id")) {
+    setOrDeleteScriptProperty_(properties, "LINE_GROUP_ID", normalized.line_group_id);
+  }
+  if (hasOwnProperty_(source, "drive_folder_url")) {
+    if (normalized.drive_folder_id) {
+      properties.setProperty("DRIVE_FOLDER_ID", normalized.drive_folder_id);
+    } else {
+      properties.deleteProperty("DRIVE_FOLDER_ID");
+    }
+  }
+  if (hasOwnProperty_(source, "line_message_templates")) {
+    updateLineMessageTemplates_(properties, normalized.line_message_templates);
   }
 
   return getAdminSettings_();
@@ -396,7 +416,195 @@ function normalizeAdminSettingsInput_(input) {
     default_entry_page_token: String(input.default_entry_page_token || "").trim(),
     calendar_id: String(input.calendar_id || "").trim(),
     line_group_id: String(input.line_group_id || "").trim(),
+    line_message_templates: normalizeLineMessageTemplatesInput_(
+      input.line_message_templates || {}
+    ),
   };
+}
+
+function getLineMessageTemplates_() {
+  const properties = PropertiesService.getScriptProperties();
+  const defaults = getDefaultLineMessageTemplates_();
+  const templates = {};
+  const definitions = getLineMessageTemplateDefinitions_();
+
+  Object.keys(definitions).forEach(function(key) {
+    const propertyKey = definitions[key].property_key;
+    const stored = properties.getProperty(propertyKey);
+
+    templates[key] = stored !== null ? stored : defaults[key];
+  });
+
+  return templates;
+}
+
+function getDefaultLineMessageTemplates_() {
+  return {
+    announcement: [
+      "【大会情報更新】",
+      "大会情報を更新しました。",
+      "参加希望者は、下記の大会一覧を確認してください。",
+      "",
+      "【今回の更新】",
+      "{{TOURNAMENT_LINES}}",
+      "",
+      "【参加回答】",
+      "参加希望者は以下のページから回答してください。",
+      "各日程にサークル内締切を併記しています。",
+      "締切までの回答にご協力をお願いします。",
+      "",
+      "{{ENTRY_URL}}",
+      "",
+      "【要項・案内】",
+      "大会要項や案内文書は以下のDriveから確認してください。",
+      "{{DRIVE_FOLDER_URL}}",
+      "",
+      "※サークル内限定の案内です。URLの外部共有はしないでください。",
+    ].join("\n"),
+    group_reminder: [
+      "＝＝＝＝＝＝＝＝＝＝＝",
+      "【回答締切リマインド】",
+      "＝＝＝＝＝＝＝＝＝＝＝",
+      "",
+      "以下の大会のサークル内締切が2日後に迫っています。",
+      "参加を考えている方は、忘れずに回答してください。",
+      "",
+      "【対象大会】",
+      "{{TOURNAMENT_LINES}}",
+      "",
+      "【回答ページ】",
+      "{{ENTRY_URL}}",
+      "",
+      "【要項・案内】",
+      "{{DRIVE_FOLDER_URL}}",
+      "",
+      "※サークル内限定の案内です。URLの外部共有はしないでください。",
+    ].join("\n"),
+    manager_internal_deadline: [
+      "【申込対応リマインド】",
+      "サークル内締切を過ぎました。",
+      "以下の大会について申込対応をお願いします。",
+      "{{TOURNAMENT_BLOCKS}}",
+      "",
+      "【要項】",
+      "{{DRIVE_FOLDER_URL}}",
+      "",
+      "【管理画面】",
+      "{{ADMIN_PAGE_URL}}",
+      "",
+      "必要に応じて、級や段位を確認してから申込してください。",
+      "申込対応後は、申込完了処理を忘れずに行ってください。",
+    ].join("\n"),
+    manager_true_deadline: [
+      "【最終リマインド】",
+      "本日が主催締切日です。",
+      "以下の大会について、申込漏れがないか確認してください。",
+      "{{TOURNAMENT_BLOCKS}}",
+      "",
+      "【要項】",
+      "{{DRIVE_FOLDER_URL}}",
+      "",
+      "【管理画面】",
+      "{{ADMIN_PAGE_URL}}",
+      "",
+      "申込対応後は、申込完了処理を忘れずに行ってください。",
+    ].join("\n"),
+    applied_notification: [
+      "【申込完了】",
+      "以下の大会について申込が完了しました。",
+      "{{TOURNAMENT_BLOCKS}}",
+    ].join("\n"),
+    member_registration_request: [
+      "【メンバー追加申請】",
+      "新しいメンバー追加申請が届きました。",
+      "",
+      "氏名: {{MEMBER_NAME}}",
+      "ふりがな: {{MEMBER_KANA}}",
+      "段位: {{MEMBER_RANK}}",
+      "級: {{MEMBER_GRADE}}",
+      "",
+      "【管理画面】",
+      "{{ADMIN_PAGE_URL}}",
+      "",
+      "内容を確認し、承認または却下を行ってください。",
+    ].join("\n"),
+    pending_member_summary: [
+      "【未処理のメンバー追加申請】",
+      "未処理のメンバー追加申請があります。",
+      "内容を確認し、承認または却下を行ってください。",
+      "{{MEMBER_BLOCKS}}",
+      "",
+      "【管理画面】",
+      "{{ADMIN_PAGE_URL}}",
+    ].join("\n"),
+  };
+}
+
+function getLineMessageTemplateDefinitions_() {
+  return {
+    announcement: {
+      property_key: "LINE_TEMPLATE_ANNOUNCEMENT",
+    },
+    group_reminder: {
+      property_key: "LINE_TEMPLATE_GROUP_REMINDER",
+    },
+    manager_internal_deadline: {
+      property_key: "LINE_TEMPLATE_MANAGER_INTERNAL_DEADLINE",
+    },
+    manager_true_deadline: {
+      property_key: "LINE_TEMPLATE_MANAGER_TRUE_DEADLINE",
+    },
+    applied_notification: {
+      property_key: "LINE_TEMPLATE_APPLIED_NOTIFICATION",
+    },
+    member_registration_request: {
+      property_key: "LINE_TEMPLATE_MEMBER_REGISTRATION_REQUEST",
+    },
+    pending_member_summary: {
+      property_key: "LINE_TEMPLATE_PENDING_MEMBER_SUMMARY",
+    },
+  };
+}
+
+function normalizeLineMessageTemplatesInput_(input) {
+  const normalized = {};
+  const definitions = getLineMessageTemplateDefinitions_();
+
+  Object.keys(definitions).forEach(function(key) {
+    normalized[key] = normalizeMultilineSetting_(input[key]);
+  });
+
+  return normalized;
+}
+
+function normalizeMultilineSetting_(value) {
+  return String(value || "")
+    .replace(/\r\n/g, "\n")
+    .trim();
+}
+
+function updateLineMessageTemplates_(properties, templates) {
+  const definitions = getLineMessageTemplateDefinitions_();
+
+  Object.keys(definitions).forEach(function(key) {
+    if (!hasOwnProperty_(templates, key)) {
+      return;
+    }
+
+    const propertyKey = definitions[key].property_key;
+    const value = String(templates[key] || "");
+
+    if (value) {
+      properties.setProperty(propertyKey, value);
+      return;
+    }
+
+    properties.deleteProperty(propertyKey);
+  });
+}
+
+function hasOwnProperty_(obj, key) {
+  return Object.prototype.hasOwnProperty.call(obj || {}, key);
 }
 
 function getAnnualScheduleUrls_() {
@@ -1137,22 +1345,13 @@ function notifyManagersAboutMemberRegistration(member) {
 }
 
 function buildMemberRegistrationRequestMessage_(member) {
-  const lines = [
-    "【メンバー追加申請】",
-    "新しいメンバー追加申請が届きました。",
-    "",
-    "氏名: " + (buildMemberFullName_(member) || "-"),
-    "ふりがな: " + (buildMemberDisplayNameKana_(member) || "-"),
-    "段位: " + formatMemberRankLabel_(member.rank),
-    "級: " + formatMemberGradeLabelForLine_(member.grade),
-    "",
-  ];
-
-  appendAdminPageLink_(lines, "");
-  lines.push("");
-  lines.push("内容を確認し、承認または却下を行ってください。");
-
-  return lines.join("\n");
+  return renderLineMessageTemplate_("member_registration_request", {
+    MEMBER_NAME: buildMemberFullName_(member) || "-",
+    MEMBER_KANA: buildMemberDisplayNameKana_(member) || "-",
+    MEMBER_RANK: formatMemberRankLabel_(member.rank),
+    MEMBER_GRADE: formatMemberGradeLabelForLine_(member.grade),
+    ADMIN_PAGE_URL: getAdminPageUrl_(""),
+  });
 }
 
 function sendPendingMemberRegistrationSummary() {
@@ -1227,26 +1426,10 @@ function sendPendingMemberRegistrationSummary() {
 }
 
 function buildPendingMemberRegistrationSummaryMessage_(members) {
-  const sortedMembers = (members || []).slice().sort(function(a, b) {
-    return String(a.member_id || "").localeCompare(String(b.member_id || ""), "ja");
+  return renderLineMessageTemplate_("pending_member_summary", {
+    MEMBER_BLOCKS: buildPendingMemberRegistrationBlocksText_(members),
+    ADMIN_PAGE_URL: getAdminPageUrl_(""),
   });
-  const lines = [
-    "【未処理のメンバー追加申請】",
-    "未処理のメンバー追加申請があります。",
-    "内容を確認し、承認または却下を行ってください。",
-  ];
-
-  sortedMembers.forEach(function(member) {
-    lines.push("");
-    lines.push(buildMemberFullName_(member) || "-");
-    lines.push("ふりがな: " + (buildMemberDisplayNameKana_(member) || "-"));
-    lines.push("段位: " + formatMemberRankLabel_(member.rank));
-    lines.push("級: " + formatMemberGradeLabelForLine_(member.grade));
-  });
-
-  lines.push("");
-  appendAdminPageLink_(lines, "");
-  return lines.join("\n");
 }
 
 function upsertTournamentBatch(commonTournament, gradeConfigs) {
@@ -2154,119 +2337,48 @@ function sendManagerReminder(adminToken, tournamentIds, notificationType) {
 
 function buildAnnouncementMessage(tournaments) {
   const first = tournaments[0];
-  const tournamentLines = buildGroupedTournamentSummaryLines_(tournaments);
   const entryUrl = getTournamentEntryUrlForLine_(first);
-  const lines = [
-    "【大会情報更新】",
-    "大会情報を更新しました。",
-    "参加希望者は、下記の大会一覧を確認してください。",
-    "",
-    "【今回の更新】",
-  ];
-
-  tournamentLines.forEach(function(line) {
-    lines.push(line);
+  return renderLineMessageTemplate_("announcement", {
+    TOURNAMENT_LINES: buildGroupedTournamentSummaryLines_(tournaments).join("\n"),
+    ENTRY_URL: entryUrl,
+    DRIVE_FOLDER_URL: getDriveFolderUrlForLine_(),
   });
-
-  lines.push("");
-  lines.push("【参加回答】");
-  lines.push("参加希望者は以下のページから回答してください。");
-  lines.push("各日程にサークル内締切を併記しています。");
-  lines.push("締切までの回答にご協力をお願いします。");
-  lines.push("");
-  lines.push(entryUrl);
-  lines.push("");
-  lines.push("【要項・案内】");
-  lines.push("大会要項や案内文書は以下のDriveから確認してください。");
-  lines.push(getDriveFolderUrlForLine_());
-  lines.push("");
-  lines.push("※サークル内限定の案内です。URLの外部共有はしないでください。");
-
-  return lines.join("\n");
 }
 
 function buildGroupReminderMessage(tournaments, notificationType) {
   const first = tournaments[0];
-  const tournamentLines = buildGroupedTournamentSummaryLines_(tournaments);
   const entryUrl = getTournamentEntryUrlForLine_(first);
-  const lines = [
-    "＝＝＝＝＝＝＝＝＝＝＝",
-    "【回答締切リマインド】",
-    "＝＝＝＝＝＝＝＝＝＝＝",
-    "",
-    "以下の大会のサークル内締切が2日後に迫っています。",
-    "参加を考えている方は、忘れずに回答してください。",
-    "",
-    "【対象大会】",
-  ];
-
-  tournamentLines.forEach(function(line) {
-    lines.push(line);
+  return renderLineMessageTemplate_("group_reminder", {
+    TOURNAMENT_LINES: buildGroupedTournamentSummaryLines_(tournaments).join("\n"),
+    ENTRY_URL: entryUrl,
+    DRIVE_FOLDER_URL: getDriveFolderUrlForLine_(),
   });
-
-  lines.push("");
-  lines.push("【回答ページ】");
-  lines.push(entryUrl);
-  lines.push("");
-  lines.push("【要項・案内】");
-  lines.push(getDriveFolderUrlForLine_());
-  lines.push("");
-  lines.push("※サークル内限定の案内です。URLの外部共有はしないでください。");
-
-  return lines.join("\n");
 }
 
 function buildManagerInternalDeadlineReminderMessage(tournaments) {
-  const first = tournaments && tournaments[0] ? tournaments[0] : null;
-  const lines = [
-    "【申込対応リマインド】",
-    "サークル内締切を過ぎました。",
-    "以下の大会について申込対応をお願いします。",
-  ];
-
-  appendManagerReminderTournamentBlocks_(lines, tournaments || []);
-  lines.push("");
-  lines.push("【要項】");
-  lines.push(getDriveFolderUrlForLine_());
-  lines.push("");
-  appendAdminPageLink_(
-    lines,
-    first ? getTournamentEntryUrlForLine_(first) : ""
-  );
-  lines.push("");
-  lines.push("必要に応じて、級や段位を確認してから申込してください。");
-  lines.push("申込対応後は、申込完了処理を忘れずに行ってください。");
-
-  return lines.join("\n");
+  return renderLineMessageTemplate_("manager_internal_deadline", {
+    TOURNAMENT_BLOCKS: buildManagerReminderTournamentBlocksText_(tournaments),
+    DRIVE_FOLDER_URL: getDriveFolderUrlForLine_(),
+    ADMIN_PAGE_URL: getAdminPageUrl_(""),
+  });
 }
 
 function buildManagerTrueDeadlineReminderMessage(tournaments) {
-  const first = tournaments && tournaments[0] ? tournaments[0] : null;
-  const lines = [
-    "【最終リマインド】",
-    "本日が主催締切日です。",
-    "以下の大会について、申込漏れがないか確認してください。",
-  ];
-
-  appendManagerReminderTournamentBlocks_(lines, tournaments || []);
-  lines.push("");
-  lines.push("【要項】");
-  lines.push(getDriveFolderUrlForLine_());
-  lines.push("");
-  appendAdminPageLink_(
-    lines,
-    first ? getTournamentEntryUrlForLine_(first) : ""
-  );
-  lines.push("");
-  lines.push("申込対応後は、申込完了処理を忘れずに行ってください。");
-
-  return lines.join("\n");
+  return renderLineMessageTemplate_("manager_true_deadline", {
+    TOURNAMENT_BLOCKS: buildManagerReminderTournamentBlocksText_(tournaments),
+    DRIVE_FOLDER_URL: getDriveFolderUrlForLine_(),
+    ADMIN_PAGE_URL: getAdminPageUrl_(""),
+  });
 }
 
 function buildAppliedNotificationMessage_(tournaments) {
+  return renderLineMessageTemplate_("applied_notification", {
+    TOURNAMENT_BLOCKS: buildAppliedNotificationBlocksText_(tournaments),
+  });
+}
+
+function buildAppliedNotificationBlocksText_(tournaments) {
   const lines = [
-    "【申込完了】",
-    "以下の大会について申込が完了しました。",
   ];
 
   (tournaments || []).forEach(function(tournament) {
@@ -2309,6 +2421,49 @@ function appendManagerReminderTournamentBlocks_(lines, tournaments) {
       );
     });
   });
+}
+
+function buildManagerReminderTournamentBlocksText_(tournaments) {
+  const lines = [];
+  appendManagerReminderTournamentBlocks_(lines, tournaments || []);
+  return lines.join("\n");
+}
+
+function buildPendingMemberRegistrationBlocksText_(members) {
+  const sortedMembers = (members || []).slice().sort(function(a, b) {
+    return String(a.member_id || "").localeCompare(String(b.member_id || ""), "ja");
+  });
+  const lines = [];
+
+  sortedMembers.forEach(function(member) {
+    lines.push("");
+    lines.push(buildMemberFullName_(member) || "-");
+    lines.push("ふりがな: " + (buildMemberDisplayNameKana_(member) || "-"));
+    lines.push("段位: " + formatMemberRankLabel_(member.rank));
+    lines.push("級: " + formatMemberGradeLabelForLine_(member.grade));
+  });
+
+  return lines.join("\n");
+}
+
+function renderLineMessageTemplate_(templateKey, replacements) {
+  const templates = getLineMessageTemplates_();
+  const template = String(templates[templateKey] || "").trim();
+
+  return template ?
+    replaceLineTemplatePlaceholders_(template, replacements) :
+    "";
+}
+
+function replaceLineTemplatePlaceholders_(template, replacements) {
+  let result = String(template || "");
+
+  Object.keys(replacements || {}).forEach(function(key) {
+    const pattern = new RegExp("\\{\\{" + escapeRegExp_(key) + "\\}\\}", "g");
+    result = result.replace(pattern, String(replacements[key] || ""));
+  });
+
+  return result.replace(/\n{3,}/g, "\n\n").trim();
 }
 
 function listTournamentApplicantMembers_(tournamentId) {

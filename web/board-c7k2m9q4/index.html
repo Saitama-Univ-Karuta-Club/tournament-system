@@ -10,7 +10,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="./style.css?v=20260522-1">
+  <link rel="stylesheet" href="./style.css?v=20260523-1">
 </head>
 <body>
   <main class="page">
@@ -138,44 +138,99 @@
         <p>担当者交代や年度切替のときに見直しやすい参照先をここで管理します。</p>
       </div>
 
-      <form id="settings-form" class="editor-form">
-        <label class="field">
-          <span>大会要項保存用 Drive フォルダURL</span>
-          <input id="settings-drive-folder-url" type="url" placeholder="https://drive.google.com/drive/folders/...">
-        </label>
-        <label class="field">
-          <span>年間大会予定表 PDF プレビューURL</span>
-          <input id="settings-annual-schedule-preview-url" type="url" placeholder="https://drive.google.com/file/d/.../preview">
-        </label>
-        <label class="field">
-          <span>年間大会予定表 PDF 公開URL</span>
-          <input id="settings-annual-schedule-view-url" type="url" placeholder="https://drive.google.com/file/d/.../view">
-        </label>
-        <label class="field">
-          <span>Web ベースURL</span>
-          <input id="settings-web-base-url" type="url" placeholder="https://example.com/tournament-system/web">
-        </label>
-        <label class="field">
-          <span>管理画面URL</span>
-          <input id="settings-admin-page-url" type="url" placeholder="空欄なら Web ベースURL から自動生成">
-        </label>
-        <label class="field">
-          <span>既定の参加ページ token</span>
-          <input id="settings-default-entry-page-token" type="text" placeholder="2026-entry">
-        </label>
-        <label class="field">
-          <span>通知先 LINE groupId</span>
-          <input id="settings-line-group-id" type="text" placeholder="LINE_GROUP_ID">
-        </label>
-        <label class="field">
-          <span>同期先 Google Calendar ID</span>
-          <input id="settings-calendar-id" type="text" placeholder="CALENDAR_ID">
-        </label>
-        <div class="actions">
-          <button type="button" id="reset-settings-button" class="secondary-button">現在値に戻す</button>
-          <button type="submit">設定を保存</button>
-        </div>
-      </form>
+      <div class="secondary-tabs" aria-label="設定項目切り替え">
+        <button type="button" class="secondary-tab is-active" data-secondary-tab="settings-general">一般設定</button>
+        <button type="button" class="secondary-tab" data-secondary-tab="settings-line-messages">LINE配信文面</button>
+      </div>
+
+      <div class="subpanel is-active" data-subpanel="settings-general">
+        <form id="settings-form" class="editor-form">
+          <label class="field">
+            <span>大会要項保存用 Drive フォルダURL</span>
+            <input id="settings-drive-folder-url" type="url" placeholder="https://drive.google.com/drive/folders/...">
+          </label>
+          <label class="field">
+            <span>年間大会予定表 PDF プレビューURL</span>
+            <input id="settings-annual-schedule-preview-url" type="url" placeholder="https://drive.google.com/file/d/.../preview">
+          </label>
+          <label class="field">
+            <span>年間大会予定表 PDF 公開URL</span>
+            <input id="settings-annual-schedule-view-url" type="url" placeholder="https://drive.google.com/file/d/.../view">
+          </label>
+          <label class="field">
+            <span>Web ベースURL</span>
+            <input id="settings-web-base-url" type="url" placeholder="https://example.com/tournament-system/web">
+          </label>
+          <label class="field">
+            <span>管理画面URL</span>
+            <input id="settings-admin-page-url" type="url" placeholder="空欄なら Web ベースURL から自動生成">
+          </label>
+          <label class="field">
+            <span>既定の参加ページ token</span>
+            <input id="settings-default-entry-page-token" type="text" placeholder="2026-entry">
+          </label>
+          <label class="field">
+            <span>通知先 LINE groupId</span>
+            <input id="settings-line-group-id" type="text" placeholder="LINE_GROUP_ID">
+          </label>
+          <label class="field">
+            <span>同期先 Google Calendar ID</span>
+            <input id="settings-calendar-id" type="text" placeholder="CALENDAR_ID">
+          </label>
+          <div class="actions">
+            <button type="button" id="reset-settings-button" class="secondary-button">現在値に戻す</button>
+            <button type="submit">設定を保存</button>
+          </div>
+        </form>
+      </div>
+
+      <div class="subpanel" data-subpanel="settings-line-messages">
+        <form id="line-message-settings-form" class="editor-form">
+          <div class="form-section-header">
+            <h3>LINE配信文面</h3>
+            <p>未入力にすると既定文面を使います。`{{...}}` の差し込み項目は送信時に自動で置き換わります。</p>
+          </div>
+          <label class="field">
+            <span>大会情報更新通知</span>
+            <textarea id="line-template-announcement" rows="12" placeholder="【大会情報更新】..."></textarea>
+            <span class="field-note">使える差し込み: `{{TOURNAMENT_LINES}}`, `{{ENTRY_URL}}`, `{{DRIVE_FOLDER_URL}}`</span>
+          </label>
+          <label class="field">
+            <span>回答締切リマインド</span>
+            <textarea id="line-template-group-reminder" rows="10" placeholder="【回答締切リマインド】..."></textarea>
+            <span class="field-note">使える差し込み: `{{TOURNAMENT_LINES}}`, `{{ENTRY_URL}}`, `{{DRIVE_FOLDER_URL}}`</span>
+          </label>
+          <label class="field">
+            <span>担当者向け 申込対応リマインド</span>
+            <textarea id="line-template-manager-internal-deadline" rows="12" placeholder="【申込対応リマインド】..."></textarea>
+            <span class="field-note">使える差し込み: `{{TOURNAMENT_BLOCKS}}`, `{{DRIVE_FOLDER_URL}}`, `{{ADMIN_PAGE_URL}}`</span>
+          </label>
+          <label class="field">
+            <span>担当者向け 最終リマインド</span>
+            <textarea id="line-template-manager-true-deadline" rows="11" placeholder="【最終リマインド】..."></textarea>
+            <span class="field-note">使える差し込み: `{{TOURNAMENT_BLOCKS}}`, `{{DRIVE_FOLDER_URL}}`, `{{ADMIN_PAGE_URL}}`</span>
+          </label>
+          <label class="field">
+            <span>申込完了通知</span>
+            <textarea id="line-template-applied-notification" rows="10" placeholder="【申込完了】..."></textarea>
+            <span class="field-note">使える差し込み: `{{TOURNAMENT_BLOCKS}}`</span>
+          </label>
+          <label class="field">
+            <span>メンバー追加申請通知</span>
+            <textarea id="line-template-member-registration-request" rows="10" placeholder="【メンバー追加申請】..."></textarea>
+            <span class="field-note">使える差し込み: `{{MEMBER_NAME}}`, `{{MEMBER_KANA}}`, `{{MEMBER_RANK}}`, `{{MEMBER_GRADE}}`, `{{ADMIN_PAGE_URL}}`</span>
+          </label>
+          <label class="field">
+            <span>未処理メンバー追加申請まとめ通知</span>
+            <textarea id="line-template-pending-member-summary" rows="12" placeholder="【未処理のメンバー追加申請】..."></textarea>
+            <span class="field-note">使える差し込み: `{{MEMBER_BLOCKS}}`, `{{ADMIN_PAGE_URL}}`</span>
+          </label>
+          <div class="actions">
+            <button type="button" id="reset-line-message-settings-button" class="secondary-button">現在値に戻す</button>
+            <button type="submit">文面を保存</button>
+          </div>
+        </form>
+      </div>
     </section>
 
     <div id="status-message" class="status-message" aria-live="polite"></div>
@@ -513,6 +568,6 @@
     </div>
   </form>
 
-  <script src="./script.js?v=20260522-1"></script>
+  <script src="./script.js?v=20260523-1"></script>
 </body>
 </html>
