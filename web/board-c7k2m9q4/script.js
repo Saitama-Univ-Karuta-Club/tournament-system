@@ -1536,7 +1536,7 @@ function getGroupedTournamentListItems_() {
         group_key: groupKey,
         tournament_id: item.tournament_id || "",
         tournament_ids: [],
-        title: item.title || "",
+        title: buildTournamentDisplayTitleForGrouping_(item.title, []),
         status: item.status || "",
         event_start_date: item.event_start_date || "",
         event_end_date: item.event_end_date || item.event_start_date || "",
@@ -1576,6 +1576,7 @@ function getGroupedTournamentListItems_() {
   return Object.keys(groups).map(function(groupKey) {
     const item = groups[groupKey];
     item.grades = item.grades.join(",");
+    item.title = buildTournamentDisplayTitleForGrouping_(item.title, item.grades);
     return item;
   }).sort(function(a, b) {
     return compareOverviewDateValues_(a.event_start_date, b.event_start_date) ||
@@ -1613,6 +1614,30 @@ function buildTournamentBaseTitleForGrouping_(title, grades) {
     .replace(new RegExp(escapeRegExpForGrouping_(compactGradeLabel) + "級$"), "")
     .replace(new RegExp(escapeRegExpForGrouping_(compactGradeLabel) + "$"), "")
     .trim();
+}
+
+function buildTournamentDisplayTitleForGrouping_(title, grades) {
+  const baseTitle = buildTournamentBaseTitleForGrouping_(title, grades);
+  const compactGradeLabel = buildTournamentDisplayGradeLabelForGrouping_(grades);
+
+  return compactGradeLabel ? baseTitle + compactGradeLabel : baseTitle;
+}
+
+function buildTournamentDisplayGradeLabelForGrouping_(grades) {
+  const normalizedGrades = normalizeGradeValues(grades).filter(function(grade) {
+    const normalized = String(grade || "").trim();
+    return normalized && normalized !== "初心者";
+  });
+
+  if (!normalizedGrades.length) {
+    return "";
+  }
+
+  return sortTournamentGrades_(normalizedGrades)
+    .map(function(grade) {
+      return String(grade || "").replace(/級$/g, "").trim();
+    })
+    .join("");
 }
 
 function escapeRegExpForGrouping_(value) {
