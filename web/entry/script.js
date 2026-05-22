@@ -165,7 +165,7 @@ elements.submitMemberRequestButton.addEventListener("click", async function() {
     setBusyState(true, "メンバー追加申請を送信しています...");
     await submitMemberRequest(payload);
     elements.memberRequestForm.reset();
-    elements.requestRank.value = "0";
+    elements.requestRank.value = "";
     setBusyState(false);
     setMemberRequestStatus(
       "登録申請を受け付けました。承認されると名前一覧に表示されます。",
