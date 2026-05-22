@@ -2211,6 +2211,7 @@ function buildGroupReminderMessage(tournaments, notificationType) {
 }
 
 function buildManagerInternalDeadlineReminderMessage(tournaments) {
+  const first = tournaments && tournaments[0] ? tournaments[0] : null;
   const lines = [
     "【申込対応リマインド】",
     "サークル内締切を過ぎました。",
@@ -2222,7 +2223,10 @@ function buildManagerInternalDeadlineReminderMessage(tournaments) {
   lines.push("【要項】");
   lines.push(getDriveFolderUrlForLine_());
   lines.push("");
-  appendAdminPageLink_(lines, tournaments && tournaments[0] ? tournaments[0].entry_url : "");
+  appendAdminPageLink_(
+    lines,
+    first ? getTournamentEntryUrlForLine_(first) : ""
+  );
   lines.push("");
   lines.push("必要に応じて、級や段位を確認してから申込してください。");
   lines.push("申込対応後は、申込完了処理を忘れずに行ってください。");
@@ -2231,6 +2235,7 @@ function buildManagerInternalDeadlineReminderMessage(tournaments) {
 }
 
 function buildManagerTrueDeadlineReminderMessage(tournaments) {
+  const first = tournaments && tournaments[0] ? tournaments[0] : null;
   const lines = [
     "【最終リマインド】",
     "本日が主催締切日です。",
@@ -2242,7 +2247,10 @@ function buildManagerTrueDeadlineReminderMessage(tournaments) {
   lines.push("【要項】");
   lines.push(getDriveFolderUrlForLine_());
   lines.push("");
-  appendAdminPageLink_(lines, tournaments && tournaments[0] ? tournaments[0].entry_url : "");
+  appendAdminPageLink_(
+    lines,
+    first ? getTournamentEntryUrlForLine_(first) : ""
+  );
   lines.push("");
   lines.push("申込対応後は、申込完了処理を忘れずに行ってください。");
 
