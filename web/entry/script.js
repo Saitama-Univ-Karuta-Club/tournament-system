@@ -1,28 +1,105 @@
 const API_BASE_URL =
   "https://script.google.com/macros/s/AKfycbzlYunO5FHWb75UXJCU8opm9nassYo74nQdlSKg-XXTntea6hEzq87konXxHEfzWsvf/exec";
 
+const MEMBER_GRADE_OPTIONS = ["A", "B", "C", "D", "E", "F", "beginner"];
+
 const state = {
   pageToken: "",
   members: [],
-  responsesByTournament: {},
+  settings: {},
+  savedResponsesByTournament: {},
+  draftResponsesByTournament: {},
   tournaments: [],
+  tournamentResponseOverview: [],
   filteredTournaments: [],
-  visibilityFilter: "all",
+  visibilityFilter: "unanswered",
+  currentView: "entry",
+  isBusy: false,
+  submitConfirmResolver: null,
+  resultOverlayOnClose: null,
 };
 
 const elements = {
   form: document.getElementById("entry-form"),
+  memberRequestForm: document.getElementById("member-request-form"),
   memberName: document.getElementById("member-name"),
   pageTitle: document.getElementById("page-title"),
   pageDescription: document.getElementById("page-description"),
+  entryView: document.getElementById("entry-view"),
+  overviewView: document.getElementById("overview-view"),
+  annualScheduleView: document.getElementById("annual-schedule-view"),
+  annualScheduleFrame: document.getElementById("annual-schedule-frame"),
+  annualScheduleLink: document.getElementById("annual-schedule-link"),
+  memberRequestView: document.getElementById("member-request-view"),
+  openOverviewButton: document.getElementById("open-overview-button"),
+  openAnnualScheduleButton: document.getElementById("open-annual-schedule-button"),
+  openMemberRequestLink: document.getElementById("open-member-request-link"),
+  closeOverviewButton: document.getElementById("close-overview-button"),
+  closeAnnualScheduleButton: document.getElementById("close-annual-schedule-button"),
+  closeMemberRequestButton: document.getElementById("close-member-request-button"),
+  requestLastName: document.getElementById("request-last-name"),
+  requestLastNameKana: document.getElementById("request-last-name-kana"),
+  requestFirstName: document.getElementById("request-first-name"),
+  requestFirstNameKana: document.getElementById("request-first-name-kana"),
+  requestRank: document.getElementById("request-rank"),
+  requestGrade: document.getElementById("request-grade"),
+  memberRequestStatus: document.getElementById("member-request-status"),
+  submitMemberRequestButton: document.getElementById("submit-member-request-button"),
   tournamentList: document.getElementById("tournament-list"),
+  tournamentOverviewList: document.getElementById("tournament-overview-list"),
   statusMessage: document.getElementById("status-message"),
   submitButton: document.getElementById("submit-button"),
   tournamentTemplate: document.getElementById("tournament-template"),
   filterButtons: document.querySelectorAll(".filter-button"),
+  busyOverlay: document.getElementById("busy-overlay"),
+  busyMessage: document.getElementById("busy-message"),
+  resultOverlay: document.getElementById("result-overlay"),
+  resultTitle: document.getElementById("result-title"),
+  resultMessage: document.getElementById("result-message"),
+  resultCloseButton: document.getElementById("result-close-button"),
+  confirmOverlay: document.getElementById("confirm-overlay"),
+  confirmSummary: document.getElementById("confirm-summary"),
+  confirmCancelButton: document.getElementById("confirm-cancel-button"),
+  confirmSubmitButton: document.getElementById("confirm-submit-button"),
 };
 
 document.addEventListener("DOMContentLoaded", init);
+
+elements.openOverviewButton.addEventListener("click", function() {
+  setCurrentView("overview");
+});
+
+elements.openAnnualScheduleButton.addEventListener("click", function() {
+  setCurrentView("annual-schedule");
+});
+
+elements.openMemberRequestLink.addEventListener("click", function() {
+  setCurrentView("member-request");
+});
+
+elements.closeOverviewButton.addEventListener("click", function() {
+  setCurrentView("entry");
+});
+
+elements.closeAnnualScheduleButton.addEventListener("click", function() {
+  setCurrentView("entry");
+});
+
+elements.closeMemberRequestButton.addEventListener("click", function() {
+  setCurrentView("entry");
+});
+
+elements.confirmCancelButton.addEventListener("click", function() {
+  resolveSubmitConfirm(false);
+});
+
+elements.confirmSubmitButton.addEventListener("click", function() {
+  resolveSubmitConfirm(true);
+});
+
+elements.resultCloseButton.addEventListener("click", function() {
+  closeResultOverlay_();
+});
 
 async function init() {
   const url = new URL(window.location.href);
@@ -36,25 +113,81 @@ async function init() {
     return;
   }
 
+  setBusyState(true, "大会情報を読み込んでいます...");
   showStatus("大会情報を読み込んでいます...", "");
   disableForm();
 
   try {
     const data = await fetchPublicTournaments(pageToken);
+    state.settings = data.settings || {};
     state.members = data.members || [];
     state.tournaments = data.tournaments || [];
+    state.tournamentResponseOverview = data.tournament_response_overview || [];
     renderPage(data.page || {});
     renderMemberOptions(state.members);
+    renderTournamentOverview();
+    setCurrentView("entry");
     state.filteredTournaments = [];
     renderEmptyState("名前を選ぶと、対象の大会だけ表示されます。");
-    showStatus("名前を選択してください。", "");
+    showStatus("", "");
     enableForm();
   } catch (error) {
     renderEmptyState("大会情報を取得できませんでした。");
     showStatus(error.message || "読み込みに失敗しました。", "error");
     disableForm();
+  } finally {
+    setBusyState(false);
   }
 }
+
+elements.submitMemberRequestButton.addEventListener("click", async function() {
+  const requestInputs = elements.memberRequestForm.querySelectorAll("input, select");
+  const isValid = Array.from(requestInputs).every(function(input) {
+    return input.reportValidity();
+  });
+
+  if (!isValid) {
+    return;
+  }
+
+  const payload = {
+    last_name: elements.requestLastName.value.trim(),
+    last_name_kana: elements.requestLastNameKana.value.trim(),
+    first_name: elements.requestFirstName.value.trim(),
+    first_name_kana: elements.requestFirstNameKana.value.trim(),
+    rank: elements.requestRank.value,
+    grade: elements.requestGrade.value,
+  };
+
+  setMemberRequestStatus("", "");
+
+  try {
+    setBusyState(true, "メンバー追加申請を送信しています...");
+    await submitMemberRequest(payload);
+    elements.memberRequestForm.reset();
+    elements.requestRank.value = "0";
+    setBusyState(false);
+    setMemberRequestStatus(
+      "登録申請を受け付けました。承認されると名前一覧に表示されます。",
+      "success"
+    );
+    showResultOverlay_(
+      "申請しました",
+      buildMemberRequestResultMessage_(payload),
+      function() {
+        setCurrentView("member-request");
+        elements.requestLastName.focus();
+      }
+    );
+  } catch (error) {
+    setMemberRequestStatus(error.message || "登録申請に失敗しました。", "error");
+    setBusyState(false);
+    showResultOverlay_(
+      "申請できませんでした",
+      error.message || "登録申請に失敗しました。"
+    );
+  }
+});
 
 elements.form.addEventListener("submit", async function(event) {
   event.preventDefault();
@@ -73,7 +206,15 @@ elements.form.addEventListener("submit", async function(event) {
     return;
   }
 
+  const confirmed = await openSubmitConfirmDialog(responses);
+
+  if (!confirmed) {
+    showStatus("送信をキャンセルしました。", "");
+    return;
+  }
+
   disableForm();
+  setBusyState(true, "回答を保存しています...");
   showStatus("回答を送信しています...", "");
 
   try {
@@ -82,15 +223,24 @@ elements.form.addEventListener("submit", async function(event) {
       member_name: memberName,
       responses: responses,
     });
+    let resultMessage = result.updated_count + " 件の回答を保存しました。";
 
-    showStatus(
-      result.updated_count + " 件の回答を保存しました。",
-      "success"
-    );
+    try {
+      await refreshResponsesAndOverview(memberName);
+    } catch (refreshError) {
+      resultMessage =
+        result.updated_count +
+        " 件の回答を保存しました。画面の再読込に失敗したため、必要なら再読込してください。";
+    }
+    setBusyState(false);
+    enableForm();
+    showStatus(resultMessage, "success");
+    showResultOverlay_("送信しました", resultMessage);
   } catch (error) {
     showStatus(error.message || "送信に失敗しました。", "error");
-  } finally {
+    setBusyState(false);
     enableForm();
+    showResultOverlay_("送信できませんでした", error.message || "送信に失敗しました。");
   }
 });
 
@@ -118,10 +268,11 @@ async function handleMemberChange() {
   const selectedMember = getSelectedMember();
 
   if (!selectedMember) {
-    state.responsesByTournament = {};
+    state.savedResponsesByTournament = {};
+    state.draftResponsesByTournament = {};
     state.filteredTournaments = [];
     renderEmptyState("名前を選ぶと、対象の大会だけ表示されます。");
-    showStatus("名前を選択してください。", "");
+    showStatus("", "");
     return;
   }
 
@@ -129,16 +280,25 @@ async function handleMemberChange() {
     state.tournaments,
     selectedMember
   );
+  setBusyState(true, "既存の回答を読み込んでいます...");
+  disableForm();
   showStatus("回答状況を読み込んでいます...", "");
 
   try {
-    state.responsesByTournament = await fetchMemberResponses(
+    state.savedResponsesByTournament = await fetchMemberResponses(
       state.pageToken,
       selectedMember.display_name
     );
+    state.draftResponsesByTournament = cloneResponseMap_(
+      state.savedResponsesByTournament
+    );
   } catch (error) {
-    state.responsesByTournament = {};
+    state.savedResponsesByTournament = {};
+    state.draftResponsesByTournament = {};
     showStatus(error.message || "既存回答の取得に失敗しました。", "error");
+  } finally {
+    setBusyState(false);
+    enableForm();
   }
 
   renderCurrentTournamentView();
@@ -152,7 +312,7 @@ async function fetchPublicTournaments(pageToken) {
   const response = await fetch(url.toString(), {
     method: "GET",
   });
-  const data = await response.json();
+  const data = await readJsonResponse(response, "大会情報の取得");
 
   if (!data.ok) {
     throw new Error(data.error || "大会情報の取得に失敗しました。");
@@ -170,7 +330,7 @@ async function fetchMemberResponses(pageToken, memberName) {
   const response = await fetch(url.toString(), {
     method: "GET",
   });
-  const data = await response.json();
+  const data = await readJsonResponse(response, "既存回答の取得");
 
   if (!data.ok) {
     throw new Error(data.error || "既存回答の取得に失敗しました。");
@@ -199,13 +359,56 @@ async function submitResponses(payload) {
       responses: payload.responses,
     }),
   });
-  const data = await response.json();
+  const data = await readJsonResponse(response, "回答の保存");
 
   if (!data.ok) {
     throw new Error(data.error || "回答の保存に失敗しました。");
   }
 
   return data;
+}
+
+async function submitMemberRequest(member) {
+  const response = await fetch(API_BASE_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "text/plain;charset=utf-8",
+    },
+    body: JSON.stringify({
+      action: "request_member_registration",
+      member: member,
+    }),
+  });
+  const data = await readJsonResponse(response, "メンバー追加申請");
+
+  if (!data.ok) {
+    throw new Error(data.error || "メンバー追加申請に失敗しました。");
+  }
+
+  return data;
+}
+
+async function readJsonResponse(response, actionLabel) {
+  const text = await response.text();
+
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    const trimmed = String(text || "").trim();
+
+    if (/^<!DOCTYPE html/i.test(trimmed) || /^<html/i.test(trimmed)) {
+      throw new Error(
+        actionLabel +
+        "先の Apps Script が JSON ではなく HTML を返しました。Webアプリの再デプロイ、公開権限、API URL を確認してください。"
+      );
+    }
+
+    throw new Error(
+      actionLabel +
+      "先の応答を解釈できませんでした。先頭: " +
+      trimmed.slice(0, 120)
+    );
+  }
 }
 
 function renderPage(page) {
@@ -215,25 +418,127 @@ function renderPage(page) {
 
   if (page.description) {
     elements.pageDescription.textContent = page.description;
+    elements.pageDescription.classList.remove("is-hidden");
+  } else {
+    elements.pageDescription.textContent = "";
+    elements.pageDescription.classList.add("is-hidden");
   }
+
+  applyPublicSettings_();
+}
+
+function setCurrentView(viewName) {
+  if (
+    viewName !== "overview" &&
+    viewName !== "annual-schedule" &&
+    viewName !== "member-request"
+  ) {
+    state.currentView = "entry";
+  } else {
+    state.currentView = viewName;
+  }
+
+  const isEntry = state.currentView === "entry";
+  const isOverview = state.currentView === "overview";
+  const isAnnualSchedule = state.currentView === "annual-schedule";
+  const isMemberRequest = state.currentView === "member-request";
+
+  elements.entryView.classList.toggle("is-hidden", !isEntry);
+  elements.overviewView.classList.toggle("is-hidden", !isOverview);
+  elements.annualScheduleView.classList.toggle("is-hidden", !isAnnualSchedule);
+  elements.memberRequestView.classList.toggle("is-hidden", !isMemberRequest);
+  elements.openOverviewButton.classList.toggle("is-hidden", !isEntry);
+  elements.openAnnualScheduleButton.classList.toggle("is-hidden", !isEntry);
+  elements.openMemberRequestLink.classList.toggle("is-hidden", !isEntry);
+}
+
+function renderTournamentOverview() {
+  if (!elements.tournamentOverviewList) {
+    return;
+  }
+
+  if (!state.tournamentResponseOverview.length) {
+    elements.tournamentOverviewList.innerHTML =
+      '<div class="empty-state">申込状況を表示できる大会はまだありません。</div>';
+    return;
+  }
+
+  elements.tournamentOverviewList.innerHTML = state.tournamentResponseOverview
+    .map(function(item) {
+      const applicantGroups = Array.isArray(item.applicant_groups) ? item.applicant_groups : [];
+      const applicantBody = applicantGroups.length ?
+        applicantGroups.map(function(group) {
+          return (
+            '<div class="overview-grade-row">' +
+              '<div class="overview-grade-label">' +
+                escapeHtml(formatOverviewGradeLabel(group.grade)) +
+              "</div>" +
+              '<div class="overview-grade-names">' +
+                escapeHtml((group.names || []).join("、")) +
+              "</div>" +
+            "</div>"
+          );
+        }).join("") :
+        '<p class="overview-empty">まだ参加希望者はいません。</p>';
+
+      return (
+        '<section class="overview-card">' +
+          '<div class="overview-card-header">' +
+            '<h3>' + escapeHtml(item.title || "無題") + "</h3>" +
+            '<span class="overview-count">' + escapeHtml(String(item.applicant_count || 0)) + "名</span>" +
+          "</div>" +
+          '<div class="overview-meta">' +
+            '<span>大会日: ' + escapeHtml(item.event_date_label || "-") + "</span>" +
+            '<span>締切: ' + escapeHtml(formatDateTime(item.internal_deadline)) + "</span>" +
+            '<span>開催級: ' + escapeHtml(item.grades || "級制限なし") + "</span>" +
+          "</div>" +
+          '<div class="overview-body">' + applicantBody + "</div>" +
+        "</section>"
+      );
+    })
+    .join("");
 }
 
 function renderMemberOptions(members) {
   elements.memberName.innerHTML = "";
+  const sortedMembers = (members || []).slice().sort(function(a, b) {
+    const gradeDiff =
+      getMemberGradeSortIndex_(a.grade) - getMemberGradeSortIndex_(b.grade);
+
+    if (gradeDiff !== 0) {
+      return gradeDiff;
+    }
+
+    return String(a.display_name || "").localeCompare(
+      String(b.display_name || ""),
+      "ja"
+    );
+  });
 
   const placeholder = document.createElement("option");
   placeholder.value = "";
   placeholder.textContent = "選択してください";
   elements.memberName.appendChild(placeholder);
 
-  members.forEach(function(member) {
+  sortedMembers.forEach(function(member) {
     const option = document.createElement("option");
     option.value = member.display_name;
-    option.textContent = member.grade ?
-      member.display_name + " (" + member.grade + ")" :
-      member.display_name;
+    option.textContent = member.display_name || "";
     elements.memberName.appendChild(option);
   });
+}
+
+function applyPublicSettings_() {
+  const previewUrl = String(state.settings.annual_schedule_preview_url || "").trim();
+  const viewUrl = String(state.settings.annual_schedule_view_url || "").trim();
+
+  if (elements.annualScheduleFrame) {
+    elements.annualScheduleFrame.src = previewUrl || "about:blank";
+  }
+
+  if (elements.annualScheduleLink) {
+    elements.annualScheduleLink.href = viewUrl || "#";
+  }
 }
 
 function renderTournaments(tournaments) {
@@ -247,11 +552,11 @@ function renderTournaments(tournaments) {
   tournaments.forEach(function(tournament) {
     const fragment = elements.tournamentTemplate.content.cloneNode(true);
     const card = fragment.querySelector(".tournament-card");
-    const savedResponse = state.responsesByTournament[tournament.tournament_id] || null;
+    const savedResponse = state.savedResponsesByTournament[tournament.tournament_id] || null;
+    const draftResponse = state.draftResponsesByTournament[tournament.tournament_id] || null;
 
     fragment.querySelector(".tournament-title").textContent = tournament.title;
-    fragment.querySelector(".tournament-meta").textContent =
-      "締切までの回答にご協力ください";
+    fragment.querySelector(".tournament-meta").textContent = "";
     fragment.querySelector(".response-state").textContent =
       savedResponse ? "回答済み" : "未回答";
     fragment.querySelector(".event-date").textContent =
@@ -272,32 +577,33 @@ function renderTournaments(tournaments) {
     radioInputs.forEach(function(input) {
       input.name = "response-" + tournament.tournament_id;
       input.dataset.tournamentId = tournament.tournament_id;
-      if (savedResponse && savedResponse.response === input.value) {
+      if (draftResponse && draftResponse.response === input.value) {
         input.checked = true;
       }
     });
 
     const textarea = fragment.querySelector("textarea");
     textarea.dataset.tournamentId = tournament.tournament_id;
-    textarea.value = savedResponse ? savedResponse.comment || "" : "";
+    textarea.value = draftResponse ? draftResponse.comment || "" : "";
 
     card.dataset.tournamentId = tournament.tournament_id;
+    updateResponseOptionStyles_(card);
     elements.tournamentList.appendChild(fragment);
   });
 }
 
 function collectResponses() {
   return state.filteredTournaments.reduce(function(result, tournament) {
-    const savedResponse = state.responsesByTournament[tournament.tournament_id];
+    const draftResponse = state.draftResponsesByTournament[tournament.tournament_id];
 
-    if (!savedResponse || !savedResponse.response) {
+    if (!draftResponse || !draftResponse.response) {
       return result;
     }
 
     result.push({
       tournament_id: tournament.tournament_id,
-      response: savedResponse.response,
-      comment: savedResponse.comment || "",
+      response: draftResponse.response,
+      comment: draftResponse.comment || "",
     });
 
     return result;
@@ -366,8 +672,8 @@ function renderCurrentTournamentView() {
 
 function matchesVisibilityFilter(tournamentId) {
   const hasResponse = Boolean(
-    state.responsesByTournament[tournamentId] &&
-    state.responsesByTournament[tournamentId].response
+    state.savedResponsesByTournament[tournamentId] &&
+    state.savedResponsesByTournament[tournamentId].response
   );
 
   if (state.visibilityFilter === "answered") {
@@ -397,7 +703,7 @@ function syncTournamentDraft(target) {
     return;
   }
 
-  const current = state.responsesByTournament[tournamentId] || {
+  const current = state.draftResponsesByTournament[tournamentId] || {
     response: "",
     comment: "",
   };
@@ -410,10 +716,10 @@ function syncTournamentDraft(target) {
     current.comment = target.value.trim();
   }
 
-  state.responsesByTournament[tournamentId] = current;
+  state.draftResponsesByTournament[tournamentId] = current;
 
-  if (state.visibilityFilter !== "all") {
-    renderCurrentTournamentView();
+  if (target.type === "radio") {
+    updateResponseOptionStyles_(target.closest(".tournament-card"));
   }
 }
 
@@ -435,15 +741,30 @@ function showStatus(message, type) {
   }
 }
 
+function setMemberRequestStatus(message, type) {
+  elements.memberRequestStatus.textContent = message;
+  elements.memberRequestStatus.className = "member-request-status";
+
+  if (type === "success") {
+    elements.memberRequestStatus.classList.add("is-success");
+  }
+
+  if (type === "error") {
+    elements.memberRequestStatus.classList.add("is-error");
+  }
+}
+
 function disableForm() {
   elements.memberName.disabled = true;
   elements.submitButton.disabled = true;
+  elements.submitMemberRequestButton.disabled = true;
   toggleTournamentInputs(true);
 }
 
 function enableForm() {
   elements.memberName.disabled = false;
   elements.submitButton.disabled = false;
+  elements.submitMemberRequestButton.disabled = false;
   toggleTournamentInputs(false);
 }
 
@@ -453,6 +774,167 @@ function toggleTournamentInputs(disabled) {
     if (input.id !== "member-name" && input.id !== "submit-button") {
       input.disabled = disabled;
     }
+  });
+}
+
+function setBusyState(isBusy, message) {
+  state.isBusy = isBusy;
+  syncBodyBusyState_();
+  elements.busyOverlay.classList.toggle("is-hidden", !isBusy);
+  elements.busyMessage.textContent = message || "読み込み中です...";
+}
+
+async function refreshResponsesAndOverview(memberName) {
+  const selectedMemberName = memberName || elements.memberName.value.trim();
+
+  if (!selectedMemberName) {
+    return;
+  }
+
+  const publicData = await fetchPublicTournaments(state.pageToken);
+  state.tournaments = publicData.tournaments || [];
+  state.tournamentResponseOverview = publicData.tournament_response_overview || [];
+  renderTournamentOverview();
+
+  const selectedMember = getSelectedMember();
+  if (selectedMember) {
+    state.filteredTournaments = filterTournamentsForMember(
+      state.tournaments,
+      selectedMember
+    );
+  }
+
+  state.savedResponsesByTournament = await fetchMemberResponses(
+    state.pageToken,
+    selectedMemberName
+  );
+  state.draftResponsesByTournament = cloneResponseMap_(
+    state.savedResponsesByTournament
+  );
+  renderCurrentTournamentView();
+}
+
+function openSubmitConfirmDialog(responses) {
+  const summaryHtml = responses.map(function(response) {
+    const tournament = findTournamentById_(response.tournament_id);
+    return (
+      '<div class="confirm-summary-row">' +
+        '<span class="confirm-summary-title">' +
+          escapeHtml(tournament ? tournament.title || "無題" : response.tournament_id) +
+        "</span>" +
+        '<span class="confirm-summary-response">' +
+          escapeHtml(formatResponseLabel_(response.response)) +
+        "</span>" +
+      "</div>"
+    );
+  }).join("");
+
+  elements.confirmSummary.innerHTML = summaryHtml;
+  elements.confirmOverlay.classList.remove("is-hidden");
+  syncBodyBusyState_();
+
+  return new Promise(function(resolve) {
+    state.submitConfirmResolver = resolve;
+  });
+}
+
+function resolveSubmitConfirm(confirmed) {
+  if (!state.submitConfirmResolver) {
+    return;
+  }
+
+  elements.confirmOverlay.classList.add("is-hidden");
+  syncBodyBusyState_();
+  const resolver = state.submitConfirmResolver;
+  state.submitConfirmResolver = null;
+  resolver(Boolean(confirmed));
+}
+
+function showResultOverlay_(title, message, onClose) {
+  elements.resultTitle.textContent = title || "処理結果";
+  elements.resultMessage.textContent = message || "";
+  state.resultOverlayOnClose = typeof onClose === "function" ? onClose : null;
+  elements.resultOverlay.classList.remove("is-hidden");
+  syncBodyBusyState_();
+}
+
+function closeResultOverlay_() {
+  const onClose = state.resultOverlayOnClose;
+  state.resultOverlayOnClose = null;
+  elements.resultOverlay.classList.add("is-hidden");
+  syncBodyBusyState_();
+
+  if (typeof onClose === "function") {
+    onClose();
+  }
+}
+
+function syncBodyBusyState_() {
+  document.body.classList.toggle(
+    "is-busy",
+    Boolean(state.isBusy) ||
+    isOverlayOpen_(elements.confirmOverlay) ||
+    isOverlayOpen_(elements.resultOverlay)
+  );
+}
+
+function isOverlayOpen_(element) {
+  return Boolean(element) && !element.classList.contains("is-hidden");
+}
+
+function findTournamentById_(tournamentId) {
+  return state.tournaments.find(function(tournament) {
+    return tournament.tournament_id === tournamentId;
+  }) || null;
+}
+
+function formatResponseLabel_(response) {
+  if (response === "yes") {
+    return "参加";
+  }
+
+  if (response === "maybe") {
+    return "未定";
+  }
+
+  if (response === "no") {
+    return "不参加";
+  }
+
+  return response || "";
+}
+
+function buildMemberRequestResultMessage_(payload) {
+  const memberName = [
+    String(payload.last_name || "").trim(),
+    String(payload.first_name || "").trim(),
+  ].join("");
+
+  return memberName ?
+    memberName + " の追加申請を受け付けました。" :
+    "メンバー追加申請を受け付けました。";
+}
+
+function cloneResponseMap_(source) {
+  return Object.keys(source || {}).reduce(function(result, key) {
+    result[key] = {
+      response: source[key].response || "",
+      comment: source[key].comment || "",
+      updated_at: source[key].updated_at || "",
+    };
+    return result;
+  }, {});
+}
+
+function updateResponseOptionStyles_(card) {
+  if (!card) {
+    return;
+  }
+
+  const options = card.querySelectorAll(".response-option");
+  options.forEach(function(option) {
+    const input = option.querySelector('input[type="radio"]');
+    option.classList.toggle("is-selected", Boolean(input && input.checked));
   });
 }
 
@@ -476,11 +958,36 @@ function formatDateTime(value) {
 }
 
 function normalizeGradeLabel(value) {
-  return String(value || "")
+  const normalized = String(value || "")
     .trim()
     .replace(/\s+/g, "")
     .replace(/級$/, "")
     .toUpperCase();
+
+  if (normalized === "BEGINNER" || normalized === "初心者") {
+    return "BEGINNER";
+  }
+
+  return normalized;
+}
+
+function getMemberGradeSortIndex_(grade) {
+  const normalized = normalizeMemberGradeValue_(grade);
+  const index = MEMBER_GRADE_OPTIONS.indexOf(normalized);
+  return index === -1 ? MEMBER_GRADE_OPTIONS.length : index;
+}
+
+function normalizeMemberGradeValue_(grade) {
+  const normalized = String(grade || "").trim();
+  return normalized === "初心者" ? "beginner" : normalized;
+}
+
+function formatOverviewGradeLabel(grade) {
+  if (!grade || grade === "未登録") {
+    return "未登録";
+  }
+
+  return String(grade).endsWith("級") ? String(grade) : String(grade) + "級";
 }
 
 function escapeHtml(text) {

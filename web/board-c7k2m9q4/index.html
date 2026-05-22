@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="robots" content="noindex, nofollow, noarchive, nosnippet, noimageindex">
+  <meta name="googlebot" content="noindex, nofollow, noarchive, nosnippet, noimageindex">
+  <meta name="referrer" content="same-origin">
+  <title>管理画面</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="./style.css?v=20260521-6">
+</head>
+<body>
+  <main class="page">
+    <header class="hero">
+      <p class="eyebrow">Admin Console</p>
+      <h1>大会情報とメンバー情報の管理</h1>
+      <p class="hero-description">最初に対象を選び、その後で新規入力か登録済み一覧かを切り替えて操作します。</p>
+    </header>
+
+    <nav class="primary-tabs" aria-label="管理対象切り替え">
+      <button type="button" class="primary-tab is-active" data-primary-tab="tournaments">大会</button>
+      <button type="button" class="primary-tab" data-primary-tab="members">メンバー</button>
+      <button type="button" class="primary-tab" data-primary-tab="settings">設定</button>
+    </nav>
+
+    <section class="panel" data-panel="tournaments">
+      <div class="section-header">
+        <h2>大会管理</h2>
+      </div>
+
+      <div class="secondary-tabs" aria-label="大会操作切り替え">
+        <button type="button" class="secondary-tab is-active" data-secondary-tab="tournament-create">新規入力</button>
+        <button type="button" class="secondary-tab" data-secondary-tab="tournament-list">登録済み一覧</button>
+      </div>
+
+      <div class="subpanel is-active" data-subpanel="tournament-create">
+        <div id="tournament-create-host" class="form-host"></div>
+      </div>
+
+      <div class="subpanel" data-subpanel="tournament-list">
+        <div class="response-overview-panel" aria-live="polite">
+          <div class="response-panel-header response-panel-header-with-controls">
+            <div>
+              <h3>登録済み一覧</h3>
+              <p>タグで絞り込みながら、申込状況の確認と大会編集をまとめて行えます。</p>
+            </div>
+            <div class="response-panel-controls">
+              <div class="status-filter-group" aria-label="登録済み大会の表示切り替え">
+                <label class="status-filter-chip">
+                  <input type="checkbox" data-tournament-list-filter="open" checked>
+                  <span>受付中</span>
+                </label>
+              <label class="status-filter-chip">
+                <input type="checkbox" data-tournament-list-filter="applied">
+                  <span>申込済</span>
+                </label>
+                <label class="status-filter-chip">
+                  <input type="checkbox" data-tournament-list-filter="closed">
+                  <span>終了</span>
+                </label>
+              </div>
+              <label class="response-sort-field">
+                <span>並び順</span>
+                <select id="tournament-response-sort">
+                  <option value="internal_deadline">締切順</option>
+                  <option value="event_start_date">大会日時順</option>
+                </select>
+              </label>
+            </div>
+          </div>
+          <div id="tournament-list" class="response-overview-list"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel is-hidden" data-panel="members">
+      <div class="section-header">
+        <h2>メンバー管理</h2>
+      </div>
+
+      <section id="pending-member-panel" class="response-overview-panel pending-member-panel is-hidden" aria-live="polite">
+        <div class="response-panel-header response-panel-header-with-controls">
+          <div>
+            <h3>申請中メンバー</h3>
+            <p>公開ページから届いた申請をここで承認・却下できます。</p>
+          </div>
+          <span id="pending-member-count" class="response-overview-count">0件</span>
+        </div>
+        <div id="pending-member-list" class="response-overview-list"></div>
+      </section>
+
+      <div class="secondary-tabs" aria-label="メンバー操作切り替え">
+        <button type="button" class="secondary-tab is-active" data-secondary-tab="member-create">新規入力</button>
+        <button type="button" class="secondary-tab" data-secondary-tab="member-list">登録済み一覧</button>
+      </div>
+
+      <div class="subpanel is-active" data-subpanel="member-create">
+        <div id="member-create-host" class="form-host"></div>
+      </div>
+
+      <div class="subpanel" data-subpanel="member-list">
+        <section class="response-overview-panel" aria-live="polite">
+          <div class="response-panel-header response-panel-header-with-controls">
+            <div>
+              <h3>登録済みメンバー</h3>
+              <p>タグで絞り込みながら、各メンバーを編集できます。</p>
+            </div>
+            <div class="status-filter-group" aria-label="登録済みメンバーの表示切り替え">
+              <label class="status-filter-chip">
+                <input type="checkbox" data-member-list-filter="active" checked>
+                <span>active</span>
+              </label>
+              <label class="status-filter-chip">
+                <input type="checkbox" data-member-list-filter="inactive">
+                <span>inactive</span>
+              </label>
+              <label class="status-filter-chip">
+                <input type="checkbox" data-member-list-filter="pending">
+                <span>pending</span>
+              </label>
+              <label class="status-filter-chip">
+                <input type="checkbox" data-member-list-filter="rejected">
+                <span>rejected</span>
+              </label>
+            </div>
+          </div>
+          <div id="member-list" class="response-overview-list"></div>
+        </section>
+      </div>
+    </section>
+
+    <section class="panel is-hidden" data-panel="settings">
+      <div class="section-header">
+        <h2>設定</h2>
+        <p>担当者交代や年度切替のときに見直しやすい参照先をここで管理します。</p>
+      </div>
+
+      <form id="settings-form" class="editor-form">
+        <label class="field">
+          <span>大会要項保存用 Drive フォルダURL</span>
+          <input id="settings-drive-folder-url" type="url" placeholder="https://drive.google.com/drive/folders/...">
+        </label>
+        <label class="field">
+          <span>年間大会予定表 PDF プレビューURL</span>
+          <input id="settings-annual-schedule-preview-url" type="url" placeholder="https://drive.google.com/file/d/.../preview">
+        </label>
+        <label class="field">
+          <span>年間大会予定表 PDF 公開URL</span>
+          <input id="settings-annual-schedule-view-url" type="url" placeholder="https://drive.google.com/file/d/.../view">
+        </label>
+        <label class="field">
+          <span>Web ベースURL</span>
+          <input id="settings-web-base-url" type="url" placeholder="https://example.com/tournament-system/web">
+        </label>
+        <label class="field">
+          <span>管理画面URL</span>
+          <input id="settings-admin-page-url" type="url" placeholder="空欄なら Web ベースURL から自動生成">
+        </label>
+        <label class="field">
+          <span>既定の参加ページ token</span>
+          <input id="settings-default-entry-page-token" type="text" placeholder="2026-entry">
+        </label>
+        <label class="field">
+          <span>通知先 LINE groupId</span>
+          <input id="settings-line-group-id" type="text" placeholder="LINE_GROUP_ID">
+        </label>
+        <label class="field">
+          <span>同期先 Google Calendar ID</span>
+          <input id="settings-calendar-id" type="text" placeholder="CALENDAR_ID">
+        </label>
+        <div class="actions">
+          <button type="button" id="reset-settings-button" class="secondary-button">現在値に戻す</button>
+          <button type="submit">設定を保存</button>
+        </div>
+      </form>
+    </section>
+
+    <div id="status-message" class="status-message" aria-live="polite"></div>
+  </main>
+
+  <div id="busy-overlay" class="busy-overlay is-hidden" aria-live="assertive" aria-modal="true" role="dialog">
+    <div class="busy-dialog">
+      <div class="busy-spinner" aria-hidden="true"></div>
+      <p id="busy-message" class="busy-message">保存中です...</p>
+    </div>
+  </div>
+
+  <div
+    id="auth-overlay"
+    class="confirm-overlay"
+    aria-modal="true"
+    role="dialog"
+    aria-labelledby="auth-title"
+  >
+    <div class="confirm-dialog auth-dialog">
+      <h2 id="auth-title" class="confirm-title">認証</h2>
+      <form id="auth-form" class="editor-form auth-form">
+        <label class="field">
+          <span>管理者用トークンを入力してください。</span>
+          <input
+            id="auth-token-input"
+            type="password"
+            autocomplete="current-password"
+            placeholder="トークンを入力"
+            required
+          >
+        </label>
+        <p id="auth-message" class="status-message auth-message"></p>
+        <div id="auth-busy-indicator" class="auth-busy-indicator is-hidden" aria-live="polite">
+          <div class="busy-spinner auth-busy-spinner" aria-hidden="true"></div>
+          <p id="auth-busy-message" class="auth-busy-message">認証とデータを読み込んでいます...</p>
+        </div>
+        <div class="actions">
+          <button id="auth-submit-button" type="submit">認証</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div
+    id="result-overlay"
+    class="confirm-overlay is-hidden"
+    aria-modal="true"
+    role="dialog"
+    aria-labelledby="result-title"
+  >
+    <div class="confirm-dialog">
+      <h2 id="result-title" class="confirm-title">処理結果</h2>
+      <p id="result-message" class="confirm-description"></p>
+      <div class="confirm-actions">
+        <button id="result-close-button" class="confirm-button is-primary" type="button">
+          戻る
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <div
+    id="tournament-edit-overlay"
+    class="confirm-overlay is-hidden"
+    aria-modal="true"
+    role="dialog"
+    aria-labelledby="tournament-edit-title"
+  >
+    <div class="confirm-dialog tournament-edit-dialog">
+      <div class="member-edit-header">
+        <div>
+          <h2 id="tournament-edit-title" class="confirm-title">大会情報を編集</h2>
+          <p class="confirm-description">内容を変更して保存すると、一覧にもすぐ反映されます。</p>
+        </div>
+        <button id="tournament-edit-close-button" class="member-edit-close-button" type="button" aria-label="閉じる">
+          閉じる
+        </button>
+      </div>
+      <div id="tournament-edit-host" class="form-host"></div>
+      <div class="actions tournament-edit-footer">
+        <button type="button" id="tournament-edit-cancel-button" class="secondary-button">閉じる</button>
+      </div>
+    </div>
+  </div>
+
+  <div
+    id="member-edit-overlay"
+    class="confirm-overlay is-hidden"
+    aria-modal="true"
+    role="dialog"
+    aria-labelledby="member-edit-title"
+  >
+    <div class="confirm-dialog member-edit-dialog">
+      <div class="member-edit-header">
+        <div>
+          <h2 id="member-edit-title" class="confirm-title">メンバー情報を編集</h2>
+          <p class="confirm-description">内容を変更して保存すると、一覧にもすぐ反映されます。</p>
+        </div>
+        <button id="member-edit-close-button" class="member-edit-close-button" type="button" aria-label="閉じる">
+          閉じる
+        </button>
+      </div>
+      <form id="member-edit-form" class="editor-form member-edit-form">
+        <input type="hidden" id="member-edit-id">
+        <label class="field">
+          <span>苗字（漢字）</span>
+          <input id="member-edit-last-name" type="text" required>
+        </label>
+        <label class="field">
+          <span>苗字（ふりがな）</span>
+          <input id="member-edit-last-name-kana" type="text" required>
+        </label>
+        <label class="field">
+          <span>名前（漢字）</span>
+          <input id="member-edit-first-name" type="text" required>
+        </label>
+        <label class="field">
+          <span>名前（ふりがな）</span>
+          <input id="member-edit-first-name-kana" type="text" required>
+        </label>
+        <label class="field">
+          <span>段位</span>
+          <select id="member-edit-rank" required>
+            <option value="6">六段</option>
+            <option value="5">五段</option>
+            <option value="4">四段</option>
+            <option value="3">三段</option>
+            <option value="2">二段</option>
+            <option value="1">初段</option>
+            <option value="0">無段</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>級</span>
+          <select id="member-edit-grade" required>
+            <option value="">選択してください</option>
+            <option value="A">A</option>
+            <option value="B">B</option>
+            <option value="C">C</option>
+            <option value="D">D</option>
+            <option value="E">E</option>
+            <option value="F">F</option>
+            <option value="beginner">初心者</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>ステータス</span>
+          <select id="member-edit-status">
+            <option value="pending">pending</option>
+            <option value="active">active</option>
+            <option value="inactive">inactive</option>
+            <option value="rejected">rejected</option>
+          </select>
+        </label>
+        <div class="actions">
+          <button type="button" id="member-edit-cancel-button" class="secondary-button">キャンセル</button>
+          <button type="submit">変更を保存</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <form id="tournament-form" class="editor-form" hidden>
+    <input type="hidden" id="tournament-id">
+    <section class="form-section">
+      <div class="form-section-header">
+        <h3>必須事項</h3>
+        <p>普段の大会登録はこの項目だけで進められます。</p>
+      </div>
+
+      <label class="field">
+        <span>大会名</span>
+        <input id="tournament-title" type="text" required>
+      </label>
+      <label class="field">
+        <span>開催日時</span>
+        <input id="event-start-date" type="date" required>
+      </label>
+      <input id="event-end-date" type="hidden">
+      <label class="field">
+        <span>開催級</span>
+        <input id="grades" type="hidden">
+        <div id="grades-selector" class="chip-selector" role="group" aria-label="開催級選択"></div>
+        <p class="field-note">
+          複数級をまとめて選択できます。詳細設定で級ごとの日程や締切を調整すると、保存時には級ごとに別大会として登録します。
+        </p>
+      </label>
+      <label class="field">
+        <span>主催締切</span>
+        <div class="field-inline">
+          <input id="true-deadline-date" type="date" required>
+          <input id="true-deadline-time" type="time" value="23:59" required>
+        </div>
+      </label>
+      <div class="field">
+        <span>要項ファイル</span>
+        <div id="brief-upload-dropzone" class="upload-dropzone" tabindex="0" role="button" aria-label="要項ファイルをアップロード">
+          <input id="brief-upload-input" type="file" accept="application/pdf" hidden>
+          <strong>PDF をここへドラッグ&ドロップ</strong>
+          <p>クリックしてファイルを選択することもできます。</p>
+          <p id="brief-upload-status" class="upload-status">アップロード後、要項URLへ自動反映します。</p>
+        </div>
+      </div>
+      <label class="field">
+        <span>申込担当者</span>
+        <select id="manager-name" required>
+          <option value="">担当者を選択してください</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>大会種別</span>
+        <select id="tournament-type" required>
+          <option value="">種別を選択してください</option>
+          <option value="official">公認大会</option>
+          <option value="support">後援大会</option>
+          <option value="event">イベント大会</option>
+        </select>
+      </label>
+    </section>
+
+    <details class="settings-panel">
+      <summary>詳細設定</summary>
+      <div class="settings-panel-body">
+        <div class="field-note">
+          サークル内締切は、未調整なら主催締切の3日前を自動設定します。級別設定を開くと、特定の級だけ日程や締切を個別に変更できます。
+        </div>
+        <label class="field">
+          <span>サークル内締切</span>
+          <div class="field-inline">
+            <input id="internal-deadline-date" type="date" required>
+            <input id="internal-deadline-time" type="time" value="23:59" required>
+          </div>
+        </label>
+        <div class="field">
+          <span>級別日程・締切設定</span>
+          <div id="grade-schedule-settings" class="grade-schedule-settings"></div>
+        </div>
+        <label class="field">
+          <span>会場</span>
+          <input id="venue" type="text">
+        </label>
+        <label class="field">
+          <span>要項URL</span>
+          <input id="drive-url" type="url">
+        </label>
+        <label class="field">
+          <span>参加ページ token</span>
+          <input id="entry-page-token" type="text" placeholder="2026-entry">
+        </label>
+        <label class="field">
+          <span>参加ページ URL</span>
+          <input id="entry-url" type="url">
+        </label>
+        <label class="field">
+          <span>担当者 LINE user ID</span>
+          <input id="manager-line-user-id" type="text" readonly>
+        </label>
+        <label class="field">
+          <span>ステータス</span>
+          <select id="tournament-status">
+            <option value="active">active</option>
+            <option value="draft">draft</option>
+            <option value="applied">applied</option>
+            <option value="closed">closed</option>
+            <option value="canceled">canceled</option>
+          </select>
+        </label>
+      </div>
+    </details>
+    <div class="actions">
+      <button type="button" id="reset-tournament-button" class="secondary-button">入力をリセット</button>
+      <button type="button" id="send-announcement-button" class="secondary-button">LINEへ更新通知</button>
+      <button type="submit">大会を保存</button>
+    </div>
+  </form>
+
+  <form id="member-form" class="editor-form" hidden>
+    <input type="hidden" id="member-id">
+    <label class="field">
+      <span>苗字（漢字）</span>
+      <input id="member-last-name" type="text" required>
+    </label>
+    <label class="field">
+      <span>苗字（ふりがな）</span>
+      <input id="member-last-name-kana" type="text" required>
+    </label>
+    <label class="field">
+      <span>名前（漢字）</span>
+      <input id="member-first-name" type="text" required>
+    </label>
+    <label class="field">
+      <span>名前（ふりがな）</span>
+      <input id="member-first-name-kana" type="text" required>
+    </label>
+    <label class="field">
+      <span>段位</span>
+      <select id="member-rank" required>
+        <option value="6">六段</option>
+        <option value="5">五段</option>
+        <option value="4">四段</option>
+        <option value="3">三段</option>
+        <option value="2">二段</option>
+        <option value="1">初段</option>
+        <option value="0">無段</option>
+      </select>
+    </label>
+    <label class="field">
+      <span>級</span>
+      <select id="member-grade" required>
+        <option value="">選択してください</option>
+        <option value="A">A</option>
+        <option value="B">B</option>
+        <option value="C">C</option>
+        <option value="D">D</option>
+        <option value="E">E</option>
+        <option value="F">F</option>
+        <option value="beginner">初心者</option>
+      </select>
+    </label>
+    <label class="field">
+      <span>ステータス</span>
+      <select id="member-status">
+        <option value="pending">pending</option>
+        <option value="active">active</option>
+        <option value="inactive">inactive</option>
+        <option value="rejected">rejected</option>
+      </select>
+    </label>
+    <div class="actions">
+      <button type="button" id="reset-member-button" class="secondary-button">入力をリセット</button>
+      <button type="submit">メンバーを保存</button>
+    </div>
+  </form>
+
+  <script src="./script.js?v=20260521-10"></script>
+</body>
+</html>
