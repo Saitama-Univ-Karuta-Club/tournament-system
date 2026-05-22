@@ -32,6 +32,7 @@ const elements = {
   annualScheduleView: document.getElementById("annual-schedule-view"),
   annualScheduleFrame: document.getElementById("annual-schedule-frame"),
   annualScheduleLink: document.getElementById("annual-schedule-link"),
+  openDriveFolderLink: document.getElementById("open-drive-folder-link"),
   memberRequestView: document.getElementById("member-request-view"),
   openOverviewButton: document.getElementById("open-overview-button"),
   openAnnualScheduleButton: document.getElementById("open-annual-schedule-button"),
@@ -457,6 +458,15 @@ function setCurrentView(viewName) {
   elements.memberRequestView.classList.toggle("is-hidden", !isMemberRequest);
   elements.openOverviewButton.classList.toggle("is-hidden", !isEntry);
   elements.openAnnualScheduleButton.classList.toggle("is-hidden", !isEntry);
+  if (elements.openDriveFolderLink) {
+    const hasDriveFolderUrl = Boolean(
+      String(state.settings.drive_folder_url || "").trim()
+    );
+    elements.openDriveFolderLink.classList.toggle(
+      "is-hidden",
+      !isEntry || !hasDriveFolderUrl
+    );
+  }
   elements.openMemberRequestLink.classList.toggle("is-hidden", !isEntry);
 }
 
@@ -539,6 +549,7 @@ function renderMemberOptions(members) {
 }
 
 function applyPublicSettings_() {
+  const driveFolderUrl = String(state.settings.drive_folder_url || "").trim();
   const previewUrl = String(state.settings.annual_schedule_preview_url || "").trim();
   const viewUrl = String(state.settings.annual_schedule_view_url || "").trim();
 
@@ -548,6 +559,10 @@ function applyPublicSettings_() {
 
   if (elements.annualScheduleLink) {
     elements.annualScheduleLink.href = viewUrl || "#";
+  }
+
+  if (elements.openDriveFolderLink) {
+    elements.openDriveFolderLink.href = driveFolderUrl || "#";
   }
 }
 
