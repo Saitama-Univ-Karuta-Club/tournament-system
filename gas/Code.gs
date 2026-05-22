@@ -2634,22 +2634,44 @@ function getAdminPageUrl_(referenceUrl) {
   ).trim();
 
   if (explicitUrl) {
-    return explicitUrl;
+    return stripAdminTokenFromUrl_(explicitUrl);
   }
 
   const baseUrl = String(
     properties.getProperty("WEB_BASE_URL") || inferBaseUrlFromEntryUrl_(referenceUrl)
   ).trim();
-  const adminToken = String(
-    properties.getProperty("ADMIN_CONSOLE_TOKEN") || ""
-  ).trim();
 
-  if (!baseUrl || !adminToken) {
+  if (!baseUrl) {
     return "-";
   }
 
-  return baseUrl.replace(/\/+$/g, "") +
-    "/board-c7k2m9q4/?admin_token=" + encodeURIComponent(adminToken);
+  return baseUrl.replace(/\/+$/g, "") + "/board-c7k2m9q4/";
+}
+
+function stripAdminTokenFromUrl_(url) {
+  const normalized = String(url || "").trim();
+
+  if (!normalized) {
+    return "";
+  }
+
+  const hashIndex = normalized.indexOf("#");
+  const hash = hashIndex >= 0 ? normalized.slice(hashIndex) : "";
+  const baseWithQuery = hashIndex >= 0 ? normalized.slice(0, hashIndex) : normalized;
+  const parts = baseWithQuery.split("?");
+  const base = parts[0];
+  const query = parts.length > 1 ? parts.slice(1).join("?") : "";
+
+  if (!query) {
+    return normalized;
+  }
+
+  const filteredPairs = query.split("&").filter(function(pair) {
+    const key = pair.split("=")[0];
+    return key && decodeURIComponent(key) !== "admin_token";
+  });
+
+  return base + (filteredPairs.length ? "?" + filteredPairs.join("&") : "") + hash;
 }
 
 function inferBaseUrlFromEntryUrl_(entryUrl) {
