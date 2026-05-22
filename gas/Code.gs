@@ -359,6 +359,7 @@ function getAdminSettings_() {
 function getPublicPageSettings_() {
   const settings = getAdminSettings_();
   return {
+    drive_folder_url: settings.drive_folder_url || "",
     annual_schedule_preview_url: settings.annual_schedule_preview_url || "",
     annual_schedule_view_url: settings.annual_schedule_view_url || "",
   };
