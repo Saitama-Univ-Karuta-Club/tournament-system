@@ -1575,7 +1575,7 @@ function buildCalendarEventDescription(tournament) {
     "開催級: " + (tournament.grades || "級制限なし"),
     "会場: " + (tournament.venue || "-"),
     "要項URL: " + (tournament.drive_url || "-"),
-    "参加意思確認URL: " + (tournament.entry_url || "-"),
+    "参加意思確認URL: " + getTournamentEntryUrlForLine_(tournament),
   ];
 
   return lines.join("\n");
@@ -1584,7 +1584,7 @@ function buildCalendarEventDescription(tournament) {
 function buildInternalDeadlineDescription(tournament) {
   return [
     "この日までに参加意思確認ページへ回答。",
-    "参加意思確認URL: " + (tournament.entry_url || "-"),
+    "参加意思確認URL: " + getTournamentEntryUrlForLine_(tournament),
   ].join("\n");
 }
 
@@ -2149,6 +2149,7 @@ function sendManagerReminder(adminToken, tournamentIds, notificationType) {
 function buildAnnouncementMessage(tournaments) {
   const first = tournaments[0];
   const tournamentLines = buildGroupedTournamentSummaryLines_(tournaments);
+  const entryUrl = getTournamentEntryUrlForLine_(first);
   const lines = [
     "【大会情報更新】",
     "大会情報を更新しました。",
@@ -2167,7 +2168,7 @@ function buildAnnouncementMessage(tournaments) {
   lines.push("各日程にサークル内締切を併記しています。");
   lines.push("締切までの回答にご協力をお願いします。");
   lines.push("");
-  lines.push(first.entry_url || "-");
+  lines.push(entryUrl);
   lines.push("");
   lines.push("【要項・案内】");
   lines.push("大会要項や案内文書は以下のDriveから確認してください。");
@@ -2181,6 +2182,7 @@ function buildAnnouncementMessage(tournaments) {
 function buildGroupReminderMessage(tournaments, notificationType) {
   const first = tournaments[0];
   const tournamentLines = buildGroupedTournamentSummaryLines_(tournaments);
+  const entryUrl = getTournamentEntryUrlForLine_(first);
   const lines = [
     "＝＝＝＝＝＝＝＝＝＝＝",
     "【回答締切リマインド】",
@@ -2198,7 +2200,7 @@ function buildGroupReminderMessage(tournaments, notificationType) {
 
   lines.push("");
   lines.push("【回答ページ】");
-  lines.push(first.entry_url || "-");
+  lines.push(entryUrl);
   lines.push("");
   lines.push("【要項・案内】");
   lines.push(getDriveFolderUrlForLine_());
@@ -2591,6 +2593,33 @@ function getDriveFolderUrlForLine_() {
   } catch (error) {
     return "-";
   }
+}
+
+function getTournamentEntryUrlForLine_(tournament) {
+  const fallbackUrl = String(
+    tournament && tournament.entry_url ? tournament.entry_url : ""
+  ).trim();
+  const entryPageToken = String(
+    tournament && tournament.entry_page_token ? tournament.entry_page_token : ""
+  ).trim();
+  const generatedUrl = buildEntryPageUrlForLine_(entryPageToken, fallbackUrl);
+
+  return generatedUrl || fallbackUrl || "-";
+}
+
+function buildEntryPageUrlForLine_(entryPageToken, referenceUrl) {
+  const normalizedToken = String(entryPageToken || "").trim();
+  const properties = PropertiesService.getScriptProperties();
+  const baseUrl = String(
+    properties.getProperty("WEB_BASE_URL") || inferBaseUrlFromEntryUrl_(referenceUrl)
+  ).trim();
+
+  if (!normalizedToken || !baseUrl) {
+    return "";
+  }
+
+  return baseUrl.replace(/\/+$/g, "") +
+    "/entry/?page_token=" + encodeURIComponent(normalizedToken);
 }
 
 function appendAdminPageLink_(lines, referenceUrl) {
