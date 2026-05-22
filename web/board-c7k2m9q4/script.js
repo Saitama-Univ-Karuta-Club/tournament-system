@@ -2238,6 +2238,21 @@ function normalizeGradeValues(value) {
     });
 }
 
+function uniqueStrings(values) {
+  const seen = {};
+
+  return (values || []).filter(function(value) {
+    const normalized = String(value || "").trim();
+
+    if (!normalized || seen[normalized]) {
+      return false;
+    }
+
+    seen[normalized] = true;
+    return true;
+  });
+}
+
 function renderTournamentGradeSelector() {
   elements.gradesSelector.innerHTML = TOURNAMENT_GRADE_OPTIONS.map(function(grade) {
     return (
