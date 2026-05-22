@@ -24,6 +24,7 @@ const elements = {
   form: document.getElementById("entry-form"),
   memberRequestForm: document.getElementById("member-request-form"),
   memberName: document.getElementById("member-name"),
+  selectedMemberNotice: document.getElementById("selected-member-notice"),
   pageTitle: document.getElementById("page-title"),
   pageDescription: document.getElementById("page-description"),
   entryView: document.getElementById("entry-view"),
@@ -127,6 +128,7 @@ async function init() {
     renderPage(data.page || {});
     renderMemberOptions(state.members);
     renderTournamentOverview();
+    renderSelectedMemberNotice_();
     setCurrentView("entry");
     state.filteredTournaments = [];
     renderEmptyState("名前を選ぶと、対象の大会だけ表示されます。");
@@ -272,6 +274,7 @@ async function handleMemberChange() {
     state.savedResponsesByTournament = {};
     state.draftResponsesByTournament = {};
     state.filteredTournaments = [];
+    renderSelectedMemberNotice_();
     renderEmptyState("名前を選ぶと、対象の大会だけ表示されます。");
     showStatus("", "");
     return;
@@ -281,6 +284,7 @@ async function handleMemberChange() {
     state.tournaments,
     selectedMember
   );
+  renderSelectedMemberNotice_();
   setBusyState(true, "既存の回答を読み込んでいます...");
   disableForm();
   showStatus("回答状況を読み込んでいます...", "");
@@ -655,6 +659,7 @@ function renderCurrentTournamentView() {
     return matchesVisibilityFilter(tournament.tournament_id);
   });
 
+  renderSelectedMemberNotice_();
   renderTournaments(visibleTournaments);
 
   if (!state.filteredTournaments.length) {
@@ -673,6 +678,28 @@ function renderCurrentTournamentView() {
   if (visibleTournaments.length) {
     showStatus("", "");
   }
+}
+
+function renderSelectedMemberNotice_() {
+  if (!elements.selectedMemberNotice) {
+    return;
+  }
+
+  const selectedMember = getSelectedMember();
+
+  if (!selectedMember) {
+    elements.selectedMemberNotice.textContent = "";
+    return;
+  }
+
+  if (!state.filteredTournaments.length) {
+    elements.selectedMemberNotice.textContent =
+      selectedMember.display_name + "さんが申し込みできる大会は現在ありません。";
+    return;
+  }
+
+  elements.selectedMemberNotice.textContent =
+    selectedMember.display_name + "さん 以下の大会が申し込み受付中です。";
 }
 
 function getGroupedTournamentDisplayItem_(tournament) {
