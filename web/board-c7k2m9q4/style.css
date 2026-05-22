@@ -301,7 +301,7 @@ body {
   justify-content: start;
   align-items: center;
 }
-input, select {
+input, select, textarea {
   width: 100%;
   border: 1px solid var(--line);
   border-radius: 14px;
@@ -309,13 +309,18 @@ input, select {
   font: inherit;
   background: #fff;
 }
+textarea {
+  resize: vertical;
+  min-height: 8em;
+  line-height: 1.7;
+}
 input[type="date"] {
   width: min(100%, 13.5em);
 }
 input[type="time"] {
   width: min(100%, 8.5em);
 }
-input:focus, select:focus {
+input:focus, select:focus, textarea:focus {
   outline: 2px solid rgba(141, 59, 34, .18);
   border-color: var(--accent);
 }
