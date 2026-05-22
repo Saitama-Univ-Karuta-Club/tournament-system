@@ -779,6 +779,10 @@ function buildTournamentBaseTitleForGrouping_(title, grades) {
     .trim();
 }
 
+function escapeRegExpForGrouping_(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function normalizeTournamentGradeValues_(value) {
   if (Array.isArray(value)) {
     return value
