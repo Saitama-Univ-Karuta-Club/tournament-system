@@ -497,7 +497,8 @@ textarea {
   line-height: 1.7;
 }
 
-button[type="submit"] {
+button[type="submit"],
+.primary-action-button {
   border: 0;
   border-radius: 999px;
   padding: 14px 24px;
@@ -508,7 +509,8 @@ button[type="submit"] {
   cursor: pointer;
 }
 
-button[type="submit"]:disabled {
+button[type="submit"]:disabled,
+.primary-action-button:disabled {
   opacity: 0.55;
   cursor: wait;
 }
@@ -710,7 +712,8 @@ button[type="submit"]:disabled {
     gap: 4px;
   }
 
-  button[type="submit"] {
+  button[type="submit"],
+  .primary-action-button {
     width: 100%;
   }
 
