@@ -852,6 +852,21 @@ function matchesVisibilityFilter(tournamentId) {
   return true;
 }
 
+function uniqueStrings(values) {
+  const seen = {};
+
+  return (values || []).filter(function(value) {
+    const normalized = String(value || "").trim();
+
+    if (!normalized || seen[normalized]) {
+      return false;
+    }
+
+    seen[normalized] = true;
+    return true;
+  });
+}
+
 function updateFilterButtons() {
   elements.filterButtons.forEach(function(button) {
     button.classList.toggle(
