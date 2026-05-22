@@ -212,6 +212,7 @@ function doPost(e) {
         drive_url: result.drive_url,
         file_id: result.file_id,
         file_name: result.file_name,
+        reused_existing: result.reused_existing === true,
       });
     }
 
@@ -1249,8 +1250,12 @@ function buildPendingMemberRegistrationSummaryMessage_(members) {
 
 function upsertTournamentBatch(commonTournament, gradeConfigs) {
   validateTournamentBatchRequest_(commonTournament, gradeConfigs);
+  const normalizedGradeConfigs = assignTournamentIdsToGradeConfigs_(
+    commonTournament,
+    gradeConfigs
+  );
 
-  const results = gradeConfigs.map(function(gradeConfig) {
+  const results = normalizedGradeConfigs.map(function(gradeConfig) {
     return upsertTournament(buildTournamentFromGradeConfig_(
       commonTournament,
       gradeConfig
@@ -2730,19 +2735,40 @@ function uploadBriefFile(fileName, mimeType, contentBase64, tournament) {
   validateBriefUploadTournament_(tournament);
 
   const targetFileName = buildBriefFileName_(tournament, fileName, mimeType);
+  const folder = getBriefUploadFolder_();
+  const existingFile = findFileByNameInFolder_(folder, targetFileName);
+
+  if (existingFile) {
+    return {
+      drive_url: existingFile.getUrl(),
+      file_id: existingFile.getId(),
+      file_name: existingFile.getName(),
+      reused_existing: true,
+    };
+  }
+
   const blob = Utilities.newBlob(
     Utilities.base64Decode(contentBase64),
     mimeType,
     targetFileName
   );
-  const folder = getBriefUploadFolder_();
   const file = folder.createFile(blob);
 
   return {
     drive_url: file.getUrl(),
     file_id: file.getId(),
     file_name: file.getName(),
+    reused_existing: false,
   };
+}
+
+function findFileByNameInFolder_(folder, fileName) {
+  if (!folder || !fileName) {
+    return null;
+  }
+
+  const files = folder.getFilesByName(fileName);
+  return files.hasNext() ? files.next() : null;
 }
 
 function listNotificationLogs() {
@@ -3268,6 +3294,64 @@ function buildTournamentFromGradeConfig_(commonTournament, gradeConfig) {
   tournament.internal_deadline = gradeConfig.internal_deadline;
 
   return tournament;
+}
+
+function assignTournamentIdsToGradeConfigs_(commonTournament, gradeConfigs) {
+  const items = (gradeConfigs || []).map(function(gradeConfig) {
+    return cloneObject(gradeConfig);
+  });
+  const needsGeneratedId = items.some(function(gradeConfig) {
+    return !String(gradeConfig.tournament_id || "").trim();
+  });
+
+  if (!needsGeneratedId) {
+    return items;
+  }
+
+  const parentTournamentId = buildBatchTournamentParentId_(
+    commonTournament,
+    items
+  );
+
+  return items.map(function(gradeConfig) {
+    if (String(gradeConfig.tournament_id || "").trim()) {
+      return gradeConfig;
+    }
+
+    gradeConfig.tournament_id = parentTournamentId + "_" +
+      buildTournamentGradeIdSuffix_(gradeConfig.grade);
+    return gradeConfig;
+  });
+}
+
+function buildBatchTournamentParentId_(commonTournament, gradeConfigs) {
+  const explicitId = String(commonTournament.tournament_id || "").trim();
+
+  if (explicitId) {
+    return stripTournamentGradeSuffix_(explicitId);
+  }
+
+  const firstGradeConfig = (gradeConfigs || [])[0] || {};
+  return generateTournamentId(
+    firstGradeConfig.event_start_date || commonTournament.event_start_date
+  );
+}
+
+function buildTournamentGradeIdSuffix_(grade) {
+  const normalized = String(grade || "").trim().toUpperCase();
+
+  if (!normalized || normalized === "BEGINNER" || normalized === "初心者") {
+    return "BEGINNER";
+  }
+
+  return normalized.replace(/[^A-Z0-9]+/g, "_");
+}
+
+function stripTournamentGradeSuffix_(tournamentId) {
+  const normalized = String(tournamentId || "").trim();
+  const match = normalized.match(/^(T\d{4}-\d{2}-\d{2}_[A-Z0-9]+)_[A-Z0-9_]+$/);
+
+  return match ? match[1] : normalized;
 }
 
 function validateSingleTournamentGrade_(grades) {
