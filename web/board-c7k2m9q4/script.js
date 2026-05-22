@@ -957,7 +957,7 @@ function resetTournamentForm() {
 function resetMemberForm() {
   elements.memberForm.reset();
   elements.memberStatus.value = "active";
-  elements.memberRank.value = "0";
+  elements.memberRank.value = "";
   elements.memberGrade.value = "";
   renderMemberList();
 }
@@ -1851,7 +1851,7 @@ function openMemberEditModal_(memberId) {
   elements.memberEditLastNameKana.value = item.last_name_kana || "";
   elements.memberEditFirstName.value = item.first_name || "";
   elements.memberEditFirstNameKana.value = item.first_name_kana || "";
-  elements.memberEditRank.value = String(item.rank || "0");
+  elements.memberEditRank.value = String(item.rank || "");
   elements.memberEditGrade.value = normalizeMemberGradeValue_(item.grade);
   elements.memberEditStatus.value = item.status || "active";
   elements.memberEditOverlay.classList.remove("is-hidden");
