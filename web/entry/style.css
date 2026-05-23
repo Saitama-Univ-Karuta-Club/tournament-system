@@ -127,6 +127,19 @@ textarea {
   background: #fff;
 }
 
+.assist-select {
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  border: 0;
+  white-space: nowrap;
+}
+
 .support-link-row {
   display: flex;
   justify-content: flex-start;
@@ -306,6 +319,30 @@ textarea:focus {
   font-size: 0.92rem;
 }
 
+.choice-chip-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.choice-chip {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 10px 14px;
+  font: inherit;
+  font-weight: 700;
+  color: var(--muted);
+  background: #fff;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.choice-chip.is-selected {
+  color: #fff;
+  background: var(--accent-dark);
+  border-color: var(--accent-dark);
+}
+
 .response-option {
   position: relative;
   display: inline-flex;
@@ -318,6 +355,7 @@ textarea:focus {
   border-radius: 999px;
   background: #fff;
   cursor: pointer;
+  touch-action: manipulation;
   color: var(--muted);
   transition:
     background-color 0.18s ease,
@@ -700,15 +738,23 @@ button[type="submit"]:disabled,
     gap: 8px;
   }
 
-  .response-option {
-    width: calc(50% - 8px);
-    justify-content: center;
-    margin-right: 8px;
+  .response-group {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
   }
 
-  .response-option:last-child {
+  .response-option {
     width: 100%;
-    margin-right: 0;
+    min-width: 0;
+    justify-content: center;
+    margin: 0;
+  }
+
+  .response-option span {
+    white-space: normal;
+    text-align: center;
+    line-height: 1.4;
   }
 
   .actions {
