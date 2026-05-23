@@ -607,7 +607,6 @@ function renderTournamentList() {
       [];
     const applicantCount = Number(item.applicant_count || 0);
     const isApplied = String(item.status || "").trim() === "applied";
-    const entryUrl = buildTournamentEntryUrl_(item);
     const applicantBody = applicantGroups.length ?
       applicantGroups.map(function(group) {
         return (
@@ -641,17 +640,6 @@ function renderTournamentList() {
           '<span>締切日: ' + escapeHtml(formatDateTimeLabel_(item.internal_deadline)) + "</span>" +
           '<span>開催級: ' + escapeHtml(item.grades || "級制限なし") + "</span>" +
         "</div>" +
-        '<div class="response-overview-entry-link">' +
-          '<a class="response-overview-entry-link-value" href="' +
-            escapeHtml(entryUrl || "#") +
-            '" target="_blank" rel="noopener noreferrer">' +
-            escapeHtml(entryUrl || "参加画面URLを生成できません。") +
-          "</a>" +
-          '<button type="button" class="response-overview-copy-button" data-copy-entry-url="' +
-            escapeHtml(entryUrl || "") + '"' +
-            (entryUrl ? "" : " disabled") +
-          '>URLをコピー</button>' +
-        "</div>" +
         '<div class="response-overview-content">' +
           '<div class="response-overview-body">' +
             applicantBody +
@@ -684,24 +672,6 @@ function renderTournamentList() {
         parseTournamentIds_(button.dataset.appliedToggleIds),
         !button.classList.contains("is-active")
       );
-    });
-  });
-
-  elements.tournamentList.querySelectorAll("[data-copy-entry-url]").forEach(function(button) {
-    button.addEventListener("click", async function() {
-      const url = String(button.dataset.copyEntryUrl || "").trim();
-
-      if (!url) {
-        showStatus("参加画面URLを生成できませんでした。", "error");
-        return;
-      }
-
-      try {
-        await copyTextToClipboard_(url);
-        showStatus("参加画面URLをコピーしました。", "success");
-      } catch (error) {
-        showStatus(error.message || "URLのコピーに失敗しました。", "error");
-      }
     });
   });
 
