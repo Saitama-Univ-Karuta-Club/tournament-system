@@ -3,6 +3,24 @@ const API_BASE_URL =
 
 const TOURNAMENT_GRADE_OPTIONS = ["A", "B", "C", "D", "E", "F", "初心者"];
 const MEMBER_GRADE_OPTIONS = ["A", "B", "C", "D", "E", "F", "beginner"];
+const MEMBER_REQUEST_RANK_OPTIONS = [
+  { value: "6", label: "六段" },
+  { value: "5", label: "五段" },
+  { value: "4", label: "四段" },
+  { value: "3", label: "三段" },
+  { value: "2", label: "二段" },
+  { value: "1", label: "初段" },
+  { value: "0", label: "無段" },
+];
+const MEMBER_REQUEST_GRADE_OPTIONS = [
+  { value: "A", label: "A級" },
+  { value: "B", label: "B級" },
+  { value: "C", label: "C級" },
+  { value: "D", label: "D級" },
+  { value: "E", label: "E級" },
+  { value: "F", label: "F級" },
+  { value: "beginner", label: "初心者" },
+];
 
 const state = {
   pageToken: "",
@@ -46,6 +64,8 @@ const elements = {
   requestFirstNameKana: document.getElementById("request-first-name-kana"),
   requestRank: document.getElementById("request-rank"),
   requestGrade: document.getElementById("request-grade"),
+  requestRankChips: document.getElementById("request-rank-chips"),
+  requestGradeChips: document.getElementById("request-grade-chips"),
   memberRequestStatus: document.getElementById("member-request-status"),
   submitMemberRequestButton: document.getElementById("submit-member-request-button"),
   tournamentList: document.getElementById("tournament-list"),
@@ -119,6 +139,7 @@ async function init() {
   setBusyState(true, "大会情報を読み込んでいます...");
   showStatus("大会情報を読み込んでいます...", "");
   disableForm();
+  renderMemberRequestChoiceChips_();
 
   try {
     const data = await fetchPublicTournaments(pageToken);
@@ -146,12 +167,27 @@ async function init() {
 }
 
 elements.submitMemberRequestButton.addEventListener("click", async function() {
-  const requestInputs = elements.memberRequestForm.querySelectorAll("input, select");
+  const requestInputs = [
+    elements.requestLastName,
+    elements.requestLastNameKana,
+    elements.requestFirstName,
+    elements.requestFirstNameKana,
+  ];
   const isValid = Array.from(requestInputs).every(function(input) {
     return input.reportValidity();
   });
 
   if (!isValid) {
+    return;
+  }
+
+  if (!elements.requestRank.value) {
+    setMemberRequestStatus("段位を選択してください。", "error");
+    return;
+  }
+
+  if (!elements.requestGrade.value) {
+    setMemberRequestStatus("出場級を選択してください。", "error");
     return;
   }
 
@@ -170,7 +206,8 @@ elements.submitMemberRequestButton.addEventListener("click", async function() {
     setBusyState(true, "メンバー追加申請を送信しています...");
     await submitMemberRequest(payload);
     elements.memberRequestForm.reset();
-    elements.requestRank.value = "";
+    syncMemberRequestChoiceValue_("rank", "");
+    syncMemberRequestChoiceValue_("grade", "");
     setBusyState(false);
     setMemberRequestStatus(
       "登録申請を受け付けました。承認されると名前一覧に表示されます。",
@@ -1209,7 +1246,7 @@ function formatDateTime(value) {
     return "-";
   }
 
-  const date = new Date(value);
+  const date = parseDateValue_(value);
   if (Number.isNaN(date.getTime())) {
     return String(value);
   }
@@ -1221,6 +1258,95 @@ function formatDateTime(value) {
     minute: "2-digit",
     hour12: false,
   }).format(date);
+}
+
+function parseDateValue_(value) {
+  if (Object.prototype.toString.call(value) === "[object Date]") {
+    return new Date(value.getTime());
+  }
+
+  const text = String(value || "").trim();
+  if (!text) {
+    return new Date("");
+  }
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) {
+    const parts = text.split("-");
+    return new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]));
+  }
+
+  return new Date(text);
+}
+
+function renderMemberRequestChoiceChips_() {
+  renderChoiceChipGroup_(
+    elements.requestRankChips,
+    "rank",
+    MEMBER_REQUEST_RANK_OPTIONS
+  );
+  renderChoiceChipGroup_(
+    elements.requestGradeChips,
+    "grade",
+    MEMBER_REQUEST_GRADE_OPTIONS
+  );
+}
+
+function renderChoiceChipGroup_(container, type, options) {
+  if (!container) {
+    return;
+  }
+
+  container.innerHTML = (options || []).map(function(option) {
+    return (
+      '<button type="button" class="choice-chip" data-choice-type="' +
+      escapeHtml(type) + '" data-choice-value="' + escapeHtml(option.value) + '">' +
+      escapeHtml(option.label) +
+      "</button>"
+    );
+  }).join("");
+
+  container.querySelectorAll(".choice-chip").forEach(function(button) {
+    button.addEventListener("click", function() {
+      syncMemberRequestChoiceValue_(
+        button.dataset.choiceType || "",
+        button.dataset.choiceValue || ""
+      );
+    });
+  });
+
+  syncChoiceChipSelection_(type);
+}
+
+function syncMemberRequestChoiceValue_(type, value) {
+  if (type === "rank" && elements.requestRank) {
+    elements.requestRank.value = value || "";
+  }
+
+  if (type === "grade" && elements.requestGrade) {
+    elements.requestGrade.value = value || "";
+  }
+
+  syncChoiceChipSelection_(type);
+}
+
+function syncChoiceChipSelection_(type) {
+  const container = type === "rank" ?
+    elements.requestRankChips :
+    elements.requestGradeChips;
+  const currentValue = type === "rank" ?
+    String(elements.requestRank.value || "") :
+    String(elements.requestGrade.value || "");
+
+  if (!container) {
+    return;
+  }
+
+  container.querySelectorAll(".choice-chip").forEach(function(button) {
+    button.classList.toggle(
+      "is-selected",
+      String(button.dataset.choiceValue || "") === currentValue
+    );
+  });
 }
 
 function normalizeGradeLabel(value) {

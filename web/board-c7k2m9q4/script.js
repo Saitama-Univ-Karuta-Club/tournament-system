@@ -900,7 +900,9 @@ function populateTournamentFormFromItems_(items) {
   elements.tournamentId.value = tournaments.length === 1 ? (first.tournament_id || "") : "";
   elements.tournamentTitle.value = first.title || "";
   elements.eventStartDate.value = toDateInputValue(first.event_start_date);
-  elements.eventEndDate.value = toDateInputValue(first.event_start_date);
+  elements.eventEndDate.value = toDateInputValue(
+    first.event_end_date || first.event_start_date
+  );
   setSelectedTournamentGrades(tournaments.map(function(item) {
     return String(item.grades || "").trim();
   }).filter(Boolean));
@@ -1240,7 +1242,7 @@ function toApiDateTimeValue(dateValue, timeValue) {
 }
 
 function toDateInputValue(value) {
-  return String(value || "").slice(0, 10);
+  return normalizeDateKey_(value);
 }
 
 function toDateTimeLocalValue(value) {
@@ -1764,6 +1766,10 @@ function normalizeDateKey_(value) {
     return "";
   }
 
+  if (Object.prototype.toString.call(value) === "[object Date]") {
+    return buildDateKeyFromDate_(value);
+  }
+
   const text = String(value).trim();
 
   if (/^\d{4}-\d{2}-\d{2}$/.test(text)) {
@@ -1774,7 +1780,20 @@ function normalizeDateKey_(value) {
     return text.slice(0, 4) + "-" + text.slice(4, 6) + "-" + text.slice(6, 8);
   }
 
+  const parsed = new Date(text);
+  if (!isNaN(parsed.getTime())) {
+    return buildDateKeyFromDate_(parsed);
+  }
+
   return text.slice(0, 10);
+}
+
+function buildDateKeyFromDate_(date) {
+  return [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, "0"),
+    String(date.getDate()).padStart(2, "0"),
+  ].join("-");
 }
 
 function formatDateLabel_(dateString) {
