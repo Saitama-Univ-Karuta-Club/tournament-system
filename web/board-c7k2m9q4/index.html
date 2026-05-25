@@ -10,7 +10,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="./style.css?v=20260523-1">
+  <link rel="stylesheet" href="./style.css?v=20260525-1">
 </head>
 <body>
   <main class="page">
@@ -139,12 +139,18 @@
       </div>
 
       <div class="secondary-tabs" aria-label="設定項目切り替え">
-        <button type="button" class="secondary-tab is-active" data-secondary-tab="settings-general">一般設定</button>
+        <button type="button" class="secondary-tab is-active" data-secondary-tab="settings-links">リンク・外部サービス</button>
+        <button type="button" class="secondary-tab" data-secondary-tab="settings-line-bot">LINE bot設定</button>
         <button type="button" class="secondary-tab" data-secondary-tab="settings-line-messages">LINE配信文面</button>
+        <button type="button" class="secondary-tab" data-secondary-tab="settings-admin-ops">管理者操作</button>
       </div>
 
-      <div class="subpanel is-active" data-subpanel="settings-general">
+      <div class="subpanel is-active" data-subpanel="settings-links">
         <form id="settings-form" class="editor-form">
+          <div class="form-section-header">
+            <h3>リンク・外部サービス</h3>
+            <p>公開ページや Drive、Calendar など、画面表示と外部サービス連携に使う参照先を管理します。</p>
+          </div>
           <label class="field">
             <span>大会要項保存用 Drive フォルダURL</span>
             <input id="settings-drive-folder-url" type="url" placeholder="https://drive.google.com/drive/folders/...">
@@ -170,16 +176,52 @@
             <input id="settings-default-entry-page-token" type="text" placeholder="2026-entry">
           </label>
           <label class="field">
-            <span>通知先 LINE groupId</span>
-            <input id="settings-line-group-id" type="text" placeholder="LINE_GROUP_ID">
-          </label>
-          <label class="field">
             <span>同期先 Google Calendar ID</span>
             <input id="settings-calendar-id" type="text" placeholder="CALENDAR_ID">
           </label>
           <div class="actions">
             <button type="button" id="reset-settings-button" class="secondary-button">現在値に戻す</button>
             <button type="submit">設定を保存</button>
+          </div>
+        </form>
+      </div>
+
+      <div class="subpanel" data-subpanel="settings-line-bot">
+        <form id="line-bot-settings-form" class="editor-form">
+          <div class="form-section-header">
+            <h3>LINE bot設定</h3>
+            <p>通知先と定期配信の時刻を管理します。時刻を変更した後は、下の管理者操作からトリガーを再作成してください。</p>
+          </div>
+          <label class="field">
+            <span>通知先 LINE groupId</span>
+            <input id="settings-line-group-id" type="text" placeholder="LINE_GROUP_ID">
+            <span class="field-note">LINEグループで `/groupid` を送ると登録できます。</span>
+          </label>
+          <div class="settings-card-grid">
+            <label class="field settings-card">
+              <span>大会情報更新通知</span>
+              <input id="settings-daily-announcement-time" type="time" step="900">
+              <span class="field-note">新しく登録・更新された大会情報をグループへまとめて送る時刻です。</span>
+            </label>
+            <label class="field settings-card">
+              <span>締切リマインド</span>
+              <input id="settings-tournament-reminder-time" type="time" step="900">
+              <span class="field-note">サークル内締切2日前、担当者向け締切通知、主催締切日通知を確認する時刻です。</span>
+            </label>
+            <label class="field settings-card">
+              <span>メンバー申請まとめ通知</span>
+              <input id="settings-pending-member-summary-time" type="time" step="900">
+              <span class="field-note">未処理のメンバー追加申請を担当者へ知らせる時刻です。</span>
+            </label>
+            <label class="field settings-card">
+              <span>夜間自動処理</span>
+              <input id="settings-nightly-automation-time" type="time" step="900">
+              <span class="field-note">大会ステータス更新と申込完了通知の確認を行う時刻です。</span>
+            </label>
+          </div>
+          <div class="actions">
+            <button type="button" id="reset-line-bot-settings-button" class="secondary-button">現在値に戻す</button>
+            <button type="submit">LINE bot設定を保存</button>
           </div>
         </form>
       </div>
@@ -230,6 +272,27 @@
             <button type="submit">文面を保存</button>
           </div>
         </form>
+      </div>
+
+      <div class="subpanel" data-subpanel="settings-admin-ops">
+        <div class="editor-form">
+          <div class="form-section-header">
+            <h3>管理者操作</h3>
+            <p>設定変更後の反映や、運用確認で使う操作をまとめています。</p>
+          </div>
+          <div class="settings-card-grid">
+            <section class="settings-card">
+              <h4>設定を再読み込み</h4>
+              <p class="field-note">Apps Script 側の最新設定と登録データを管理画面へ読み込み直します。</p>
+              <button type="button" id="reload-admin-settings-button" class="secondary-button">再読み込み</button>
+            </section>
+            <section class="settings-card">
+              <h4>定期トリガーを再作成</h4>
+              <p class="field-note">大会情報通知、締切リマインド、メンバー申請まとめ、夜間自動処理のトリガーを現在の時刻設定で作り直します。</p>
+              <button type="button" id="install-scheduled-triggers-button">トリガーを再作成</button>
+            </section>
+          </div>
+        </div>
       </div>
     </section>
 
@@ -568,6 +631,6 @@
     </div>
   </form>
 
-  <script src="./script.js?v=20260523-1"></script>
+  <script src="./script.js?v=20260525-1"></script>
 </body>
 </html>

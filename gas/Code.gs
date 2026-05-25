@@ -270,6 +270,14 @@ function doPost(e) {
       });
     }
 
+    if (action === "install_scheduled_triggers") {
+      validateAdminToken(body.admin_token || "");
+      return jsonOutput({
+        ok: true,
+        triggers: installScheduledTriggersFromAdmin_(),
+      });
+    }
+
     return jsonOutput({
       ok: false,
       error: "Unknown action",
@@ -353,6 +361,26 @@ function getAdminSettings_() {
     line_group_id: String(
       properties.getProperty("LINE_GROUP_ID") || ""
     ).trim(),
+    daily_announcement_time: getScriptTimeSetting_(
+      properties,
+      "DAILY_ANNOUNCEMENT_TIME",
+      "17:00"
+    ),
+    tournament_reminder_time: getScriptTimeSetting_(
+      properties,
+      "TOURNAMENT_REMINDER_TIME",
+      "10:00"
+    ),
+    pending_member_summary_time: getScriptTimeSetting_(
+      properties,
+      "PENDING_MEMBER_SUMMARY_TIME",
+      "07:00"
+    ),
+    nightly_automation_time: getScriptTimeSetting_(
+      properties,
+      "NIGHTLY_AUTOMATION_TIME",
+      "23:59"
+    ),
     line_message_templates: getLineMessageTemplates_(),
   };
 }
@@ -392,6 +420,18 @@ function updateAdminSettings_(input) {
   if (hasOwnProperty_(source, "line_group_id")) {
     setOrDeleteScriptProperty_(properties, "LINE_GROUP_ID", normalized.line_group_id);
   }
+  if (hasOwnProperty_(source, "daily_announcement_time")) {
+    setOrDeleteScriptProperty_(properties, "DAILY_ANNOUNCEMENT_TIME", normalized.daily_announcement_time);
+  }
+  if (hasOwnProperty_(source, "tournament_reminder_time")) {
+    setOrDeleteScriptProperty_(properties, "TOURNAMENT_REMINDER_TIME", normalized.tournament_reminder_time);
+  }
+  if (hasOwnProperty_(source, "pending_member_summary_time")) {
+    setOrDeleteScriptProperty_(properties, "PENDING_MEMBER_SUMMARY_TIME", normalized.pending_member_summary_time);
+  }
+  if (hasOwnProperty_(source, "nightly_automation_time")) {
+    setOrDeleteScriptProperty_(properties, "NIGHTLY_AUTOMATION_TIME", normalized.nightly_automation_time);
+  }
   if (hasOwnProperty_(source, "drive_folder_url")) {
     if (normalized.drive_folder_id) {
       properties.setProperty("DRIVE_FOLDER_ID", normalized.drive_folder_id);
@@ -416,6 +456,22 @@ function normalizeAdminSettingsInput_(input) {
     default_entry_page_token: String(input.default_entry_page_token || "").trim(),
     calendar_id: String(input.calendar_id || "").trim(),
     line_group_id: String(input.line_group_id || "").trim(),
+    daily_announcement_time: normalizeTimeSetting_(
+      input.daily_announcement_time,
+      "17:00"
+    ),
+    tournament_reminder_time: normalizeTimeSetting_(
+      input.tournament_reminder_time,
+      "10:00"
+    ),
+    pending_member_summary_time: normalizeTimeSetting_(
+      input.pending_member_summary_time,
+      "07:00"
+    ),
+    nightly_automation_time: normalizeTimeSetting_(
+      input.nightly_automation_time,
+      "23:59"
+    ),
     line_message_templates: normalizeLineMessageTemplatesInput_(
       input.line_message_templates || {}
     ),
@@ -605,6 +661,40 @@ function updateLineMessageTemplates_(properties, templates) {
 
 function hasOwnProperty_(obj, key) {
   return Object.prototype.hasOwnProperty.call(obj || {}, key);
+}
+
+function getScriptTimeSetting_(properties, key, fallback) {
+  return normalizeTimeSetting_(properties.getProperty(key), fallback);
+}
+
+function normalizeTimeSetting_(value, fallback) {
+  const normalized = String(value || "").trim();
+  const defaultValue = String(fallback || "00:00").trim();
+  const match = normalized.match(/^([01]\d|2[0-3]):([0-5]\d)$/);
+
+  if (!normalized) {
+    return defaultValue;
+  }
+
+  if (!match) {
+    throw new Error("時刻は HH:mm 形式で入力してください: " + normalized);
+  }
+
+  return match[1] + ":" + match[2];
+}
+
+function getTimeSettingParts_(key, fallback) {
+  const time = getScriptTimeSetting_(
+    PropertiesService.getScriptProperties(),
+    key,
+    fallback
+  );
+  const parts = time.split(":");
+
+  return {
+    hour: Number(parts[0]),
+    minute: Number(parts[1]),
+  };
 }
 
 function getAnnualScheduleUrls_() {
@@ -4183,14 +4273,25 @@ function syncAllTournamentCalendars() {
   return results;
 }
 
+function installScheduledTriggersFromAdmin_() {
+  return {
+    daily_announcement: installDailyAnnouncementTrigger(),
+    pending_member_registration_summary:
+      installPendingMemberRegistrationSummaryTrigger(),
+    applied_notification: installAppliedNotificationTrigger(),
+    tournament_reminder: installTournamentReminderTrigger(),
+  };
+}
+
 function installDailyAnnouncementTrigger() {
   deleteTriggersByHandler_("sendScheduledDailyAnnouncements");
+  const time = getTimeSettingParts_("DAILY_ANNOUNCEMENT_TIME", "17:00");
 
   const trigger = ScriptApp.newTrigger("sendScheduledDailyAnnouncements")
     .timeBased()
     .everyDays(1)
-    .atHour(17)
-    .nearMinute(0)
+    .atHour(time.hour)
+    .nearMinute(time.minute)
     .create();
 
   Logger.log(trigger.getUniqueId());
@@ -4199,12 +4300,13 @@ function installDailyAnnouncementTrigger() {
 
 function installPendingMemberRegistrationSummaryTrigger() {
   deleteTriggersByHandler_("sendPendingMemberRegistrationSummary");
+  const time = getTimeSettingParts_("PENDING_MEMBER_SUMMARY_TIME", "07:00");
 
   const trigger = ScriptApp.newTrigger("sendPendingMemberRegistrationSummary")
     .timeBased()
     .everyDays(1)
-    .atHour(7)
-    .nearMinute(0)
+    .atHour(time.hour)
+    .nearMinute(time.minute)
     .create();
 
   Logger.log(trigger.getUniqueId());
@@ -4214,12 +4316,13 @@ function installPendingMemberRegistrationSummaryTrigger() {
 function installAppliedNotificationTrigger() {
   deleteTriggersByHandler_("sendScheduledAppliedNotifications");
   deleteTriggersByHandler_("runNightlyTournamentAutomation");
+  const time = getTimeSettingParts_("NIGHTLY_AUTOMATION_TIME", "23:59");
 
   const trigger = ScriptApp.newTrigger("runNightlyTournamentAutomation")
     .timeBased()
     .everyDays(1)
-    .atHour(23)
-    .nearMinute(59)
+    .atHour(time.hour)
+    .nearMinute(time.minute)
     .create();
 
   Logger.log(trigger.getUniqueId());
@@ -4228,12 +4331,13 @@ function installAppliedNotificationTrigger() {
 
 function installTournamentReminderTrigger() {
   deleteTriggersByHandler_("sendScheduledTournamentReminders");
+  const time = getTimeSettingParts_("TOURNAMENT_REMINDER_TIME", "10:00");
 
   const trigger = ScriptApp.newTrigger("sendScheduledTournamentReminders")
     .timeBased()
     .everyDays(1)
-    .atHour(10)
-    .nearMinute(0)
+    .atHour(time.hour)
+    .nearMinute(time.minute)
     .create();
 
   Logger.log(trigger.getUniqueId());
