@@ -1332,7 +1332,7 @@ Google Apps Scriptの時間主導トリガーで、毎日または毎時間実�
 以下の組み合わせが既に存在する場合、再送信しない。
 
 ```text
-tournament_id + notification_type
+tournament_id + notification_type + sent_to_type
 ```
 
 ### 12.3 大会情報一斉通知トリガー
@@ -1345,6 +1345,23 @@ tournament_id + notification_type
 - 実行時刻: 毎日 17 時台
 
 `installDailyAnnouncementTrigger()` は既存の同名トリガーを削除してから再作成する。
+
+### 12.4 自動リマインドトリガー
+
+実装済みの自動リマインドトリガーは以下の運用とする。
+
+- ハンドラ関数: `sendScheduledTournamentReminders`
+- 作成関数: `installTournamentReminderTrigger()`
+- 削除関数: `deleteTournamentReminderTrigger()`
+- 実行時刻: 毎日 10 時台
+
+このトリガーでは以下を自動送信する。
+
+- サークル向け: サークル内締切の 2 日前リマインド
+- 担当者向け: サークル内締切翌日の申込対応リマインド
+- 担当者向け: 主催締切当日の最終リマインド
+
+`installTournamentReminderTrigger()` は既存の同名トリガーを削除してから再作成する。
 
 ---
 
@@ -1618,7 +1635,22 @@ deleteDailyAnnouncementTrigger()
 installDailyAnnouncementTrigger()
 ```
 
-### 21.5 GitHub Pages 側の更新
+### 21.5 自動リマインドトリガー設定
+
+Apps Script エディタから一度だけ以下を実行する。
+
+```text
+installTournamentReminderTrigger()
+```
+
+トリガーを作り直したいときは以下を使う。
+
+```text
+deleteTournamentReminderTrigger()
+installTournamentReminderTrigger()
+```
+
+### 21.6 GitHub Pages 側の更新
 
 管理画面や参加者画面の見た目を変更した場合、`index.html` の CSS / JS のクエリバージョンを上げてキャッシュを避ける。
 
