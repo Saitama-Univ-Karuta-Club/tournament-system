@@ -230,6 +230,18 @@ function doPost(e) {
       });
     }
 
+    if (action === "send_scheduled_daily_announcements") {
+      validateAdminToken(body.admin_token || "");
+      const result = sendScheduledDailyAnnouncements();
+      return jsonOutput({
+        ok: true,
+        sent: result.sent,
+        reason: result.reason || "",
+        group_id: result.group_id || "",
+        tournament_ids: result.tournament_ids || [],
+      });
+    }
+
     if (action === "send_group_reminder") {
       validateAdminToken(body.admin_token || "");
       const result = sendGroupReminder(

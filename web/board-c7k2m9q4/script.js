@@ -128,8 +128,10 @@ const elements = {
   resetSettingsButton: document.getElementById("reset-settings-button"),
   resetLineBotSettingsButton: document.getElementById("reset-line-bot-settings-button"),
   resetLineMessageSettingsButton: document.getElementById("reset-line-message-settings-button"),
+  saveAndSendAnnouncementButton: document.getElementById("save-and-send-announcement-button"),
   reloadAdminSettingsButton: document.getElementById("reload-admin-settings-button"),
   installScheduledTriggersButton: document.getElementById("install-scheduled-triggers-button"),
+  linePlaceholderButtons: document.querySelectorAll("[data-line-placeholder]"),
   settingsDriveFolderUrl: document.getElementById("settings-drive-folder-url"),
   settingsAnnualSchedulePreviewUrl: document.getElementById("settings-annual-schedule-preview-url"),
   settingsAnnualScheduleViewUrl: document.getElementById("settings-annual-schedule-view-url"),
@@ -247,6 +249,12 @@ elements.resetLineBotSettingsButton.addEventListener("click", function() {
 
 elements.resetLineMessageSettingsButton.addEventListener("click", function() {
   populateLineMessageSettingsForm_();
+});
+
+elements.linePlaceholderButtons.forEach(function(button) {
+  button.addEventListener("click", function() {
+    insertLinePlaceholder_(button.dataset.linePlaceholder || "");
+  });
 });
 
 elements.reloadAdminSettingsButton.addEventListener("click", async function() {
@@ -616,24 +624,9 @@ elements.lineBotSettingsForm.addEventListener("submit", async function(event) {
 elements.lineMessageSettingsForm.addEventListener("submit", async function(event) {
   event.preventDefault();
 
-  const payload = {
-    line_message_templates: {
-      announcement: elements.lineTemplateAnnouncement.value.trim(),
-      group_reminder: elements.lineTemplateGroupReminder.value.trim(),
-      manager_internal_deadline: elements.lineTemplateManagerInternalDeadline.value.trim(),
-      manager_true_deadline: elements.lineTemplateManagerTrueDeadline.value.trim(),
-      applied_notification: elements.lineTemplateAppliedNotification.value.trim(),
-      member_registration_request: elements.lineTemplateMemberRegistrationRequest.value.trim(),
-      pending_member_summary: elements.lineTemplatePendingMemberSummary.value.trim(),
-    },
-  };
-
   try {
     setBusyState(true, "LINE配信文面を保存中です...");
-    await postJson({
-      action: "update_admin_settings",
-      settings: payload,
-    });
+    await saveLineMessageTemplates_();
     await loadAdminData();
     state.primaryTab = "settings";
     state.settingsMode = "settings-line-messages";
@@ -647,6 +640,42 @@ elements.lineMessageSettingsForm.addEventListener("submit", async function(event
     showStatus(error.message || "LINE配信文面の保存に失敗しました。", "error");
     setBusyState(false);
     showResultOverlay_("保存できませんでした", error.message || "LINE配信文面の保存に失敗しました。");
+  }
+});
+
+elements.saveAndSendAnnouncementButton.addEventListener("click", async function() {
+  try {
+    setBusyState(true, "LINE配信文面を保存して更新通知を送信しています...");
+    await saveLineMessageTemplates_();
+    const result = await postJson({
+      action: "send_scheduled_daily_announcements",
+    });
+    await loadAdminData();
+    state.primaryTab = "settings";
+    state.settingsMode = "settings-line-messages";
+    renderTabs();
+
+    if (result.sent) {
+      const count = (result.tournament_ids || []).length;
+      showStatus("LINE配信文面を保存し、大会情報更新通知を送信しました。", "success");
+      setBusyState(false);
+      showResultOverlay_(
+        "送信しました",
+        "LINE配信文面を保存し、大会情報更新通知を送信しました。対象大会: " + count + "件"
+      );
+      return;
+    }
+
+    showStatus("LINE配信文面を保存しました。送信対象の大会はありませんでした。", "success");
+    setBusyState(false);
+    showResultOverlay_(
+      "保存しました",
+      "LINE配信文面を保存しました。送信対象の大会はありませんでした。"
+    );
+  } catch (error) {
+    showStatus(error.message || "LINE配信文面の保存または送信に失敗しました。", "error");
+    setBusyState(false);
+    showResultOverlay_("処理できませんでした", error.message || "LINE配信文面の保存または送信に失敗しました。");
   }
 });
 
@@ -1185,6 +1214,65 @@ function populateLineMessageSettingsForm_() {
     templates.member_registration_request || "";
   elements.lineTemplatePendingMemberSummary.value =
     templates.pending_member_summary || "";
+}
+
+async function saveLineMessageTemplates_() {
+  return postJson({
+    action: "update_admin_settings",
+    settings: {
+      line_message_templates: {
+        announcement: elements.lineTemplateAnnouncement.value.trim(),
+        group_reminder: elements.lineTemplateGroupReminder.value.trim(),
+        manager_internal_deadline: elements.lineTemplateManagerInternalDeadline.value.trim(),
+        manager_true_deadline: elements.lineTemplateManagerTrueDeadline.value.trim(),
+        applied_notification: elements.lineTemplateAppliedNotification.value.trim(),
+        member_registration_request: elements.lineTemplateMemberRegistrationRequest.value.trim(),
+        pending_member_summary: elements.lineTemplatePendingMemberSummary.value.trim(),
+      },
+    },
+  });
+}
+
+function insertLinePlaceholder_(placeholder) {
+  if (!placeholder) {
+    return;
+  }
+
+  const target = getActiveLineTemplateTextarea_();
+  const start = target.selectionStart || 0;
+  const end = target.selectionEnd || 0;
+  const before = target.value.slice(0, start);
+  const after = target.value.slice(end);
+  const prefix = before && !/\s$/.test(before) ? "\n" : "";
+  const suffix = after && !/^\s/.test(after) ? "\n" : "";
+  const inserted = prefix + placeholder + suffix;
+
+  target.value = before + inserted + after;
+  target.focus();
+  target.setSelectionRange(start + inserted.length, start + inserted.length);
+}
+
+function getActiveLineTemplateTextarea_() {
+  const textareas = getLineTemplateTextareas_();
+  const active = document.activeElement;
+
+  if (textareas.indexOf(active) !== -1) {
+    return active;
+  }
+
+  return elements.lineTemplateAnnouncement;
+}
+
+function getLineTemplateTextareas_() {
+  return [
+    elements.lineTemplateAnnouncement,
+    elements.lineTemplateGroupReminder,
+    elements.lineTemplateManagerInternalDeadline,
+    elements.lineTemplateManagerTrueDeadline,
+    elements.lineTemplateAppliedNotification,
+    elements.lineTemplateMemberRegistrationRequest,
+    elements.lineTemplatePendingMemberSummary,
+  ].filter(Boolean);
 }
 
 function applyTournamentDefaultsIfNeeded_() {
