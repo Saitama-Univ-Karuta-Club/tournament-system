@@ -1353,7 +1353,7 @@ tournament_id + notification_type + sent_to_type
 - ハンドラ関数: `sendScheduledTournamentReminders`
 - 作成関数: `installTournamentReminderTrigger()`
 - 削除関数: `deleteTournamentReminderTrigger()`
-- 実行時刻: 毎日 8 時台
+- 実行時刻: 毎日 10 時台
 
 このトリガーでは以下を自動送信する。
 

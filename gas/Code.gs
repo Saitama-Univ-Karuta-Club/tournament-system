@@ -4077,7 +4077,7 @@ function installTournamentReminderTrigger() {
   const trigger = ScriptApp.newTrigger("sendScheduledTournamentReminders")
     .timeBased()
     .everyDays(1)
-    .atHour(8)
+    .atHour(10)
     .nearMinute(0)
     .create();
 
