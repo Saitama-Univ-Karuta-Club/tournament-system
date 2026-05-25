@@ -212,6 +212,37 @@ body {
 .settings-card .field-note {
   margin: 0 0 12px;
 }
+.template-helper-panel {
+  display: grid;
+  gap: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 14px;
+  background: #fffaf3;
+}
+.template-helper-panel h4 {
+  margin: 0 0 4px;
+  color: var(--accent-dark);
+}
+.template-token-list {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.token-button {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 7px 10px;
+  font: inherit;
+  font-size: .9rem;
+  font-weight: 700;
+  color: var(--accent-dark);
+  background: #fff;
+  cursor: pointer;
+}
+.token-button:hover {
+  border-color: var(--accent-dark);
+}
 .grade-schedule-settings {
   display: grid;
   gap: 12px;

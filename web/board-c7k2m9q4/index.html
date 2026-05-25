@@ -10,7 +10,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="./style.css?v=20260525-1">
+  <link rel="stylesheet" href="./style.css?v=20260525-2">
 </head>
 <body>
   <main class="page">
@@ -230,8 +230,23 @@
         <form id="line-message-settings-form" class="editor-form">
           <div class="form-section-header">
             <h3>LINE配信文面</h3>
-            <p>未入力にすると既定文面を使います。`{{...}}` の差し込み項目は送信時に自動で置き換わります。</p>
+            <p>現在登録されている文面を表示しています。大会名やURLなどの可変部分は `{{...}}` の差し込み項目として残してください。</p>
           </div>
+          <section class="template-helper-panel" aria-label="差し込み項目">
+            <div>
+              <h4>差し込み項目</h4>
+              <p class="field-note">ボタンを押すと、選択中の文面へ差し込み項目を追加できます。</p>
+            </div>
+            <div class="template-token-list">
+              <button type="button" class="token-button" data-line-placeholder="{{TOURNAMENT_LINES}}">{{TOURNAMENT_LINES}}</button>
+              <button type="button" class="token-button" data-line-placeholder="{{TOURNAMENT_BLOCKS}}">{{TOURNAMENT_BLOCKS}}</button>
+              <button type="button" class="token-button" data-line-placeholder="{{ENTRY_URL}}">{{ENTRY_URL}}</button>
+              <button type="button" class="token-button" data-line-placeholder="{{DRIVE_FOLDER_URL}}">{{DRIVE_FOLDER_URL}}</button>
+              <button type="button" class="token-button" data-line-placeholder="{{ADMIN_PAGE_URL}}">{{ADMIN_PAGE_URL}}</button>
+              <button type="button" class="token-button" data-line-placeholder="{{MEMBER_NAME}}">{{MEMBER_NAME}}</button>
+              <button type="button" class="token-button" data-line-placeholder="{{MEMBER_BLOCKS}}">{{MEMBER_BLOCKS}}</button>
+            </div>
+          </section>
           <label class="field">
             <span>大会情報更新通知</span>
             <textarea id="line-template-announcement" rows="12" placeholder="【大会情報更新】..."></textarea>
@@ -269,7 +284,8 @@
           </label>
           <div class="actions">
             <button type="button" id="reset-line-message-settings-button" class="secondary-button">現在値に戻す</button>
-            <button type="submit">文面を保存</button>
+            <button type="button" id="save-and-send-announcement-button" class="secondary-button">保存して更新通知を送信</button>
+            <button type="submit">文面を更新</button>
           </div>
         </form>
       </div>
@@ -631,6 +647,6 @@
     </div>
   </form>
 
-  <script src="./script.js?v=20260525-1"></script>
+  <script src="./script.js?v=20260525-2"></script>
 </body>
 </html>
