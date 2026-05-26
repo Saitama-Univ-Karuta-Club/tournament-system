@@ -29,6 +29,7 @@ const state = {
   isTournamentEditModalOpen: false,
   editingMemberId: "",
   primaryTab: "tournaments",
+  settingsMode: "settings-links",
   tournamentMode: "tournament-create",
   memberMode: "member-create",
   isBusy: false,
@@ -122,7 +123,15 @@ const elements = {
   memberEditGrade: document.getElementById("member-edit-grade"),
   memberEditStatus: document.getElementById("member-edit-status"),
   settingsForm: document.getElementById("settings-form"),
+  lineBotSettingsForm: document.getElementById("line-bot-settings-form"),
+  lineMessageSettingsForm: document.getElementById("line-message-settings-form"),
   resetSettingsButton: document.getElementById("reset-settings-button"),
+  resetLineBotSettingsButton: document.getElementById("reset-line-bot-settings-button"),
+  resetLineMessageSettingsButton: document.getElementById("reset-line-message-settings-button"),
+  saveAndSendAnnouncementButton: document.getElementById("save-and-send-announcement-button"),
+  reloadAdminSettingsButton: document.getElementById("reload-admin-settings-button"),
+  installScheduledTriggersButton: document.getElementById("install-scheduled-triggers-button"),
+  linePlaceholderButtons: document.querySelectorAll("[data-line-placeholder]"),
   settingsDriveFolderUrl: document.getElementById("settings-drive-folder-url"),
   settingsAnnualSchedulePreviewUrl: document.getElementById("settings-annual-schedule-preview-url"),
   settingsAnnualScheduleViewUrl: document.getElementById("settings-annual-schedule-view-url"),
@@ -131,6 +140,17 @@ const elements = {
   settingsDefaultEntryPageToken: document.getElementById("settings-default-entry-page-token"),
   settingsLineGroupId: document.getElementById("settings-line-group-id"),
   settingsCalendarId: document.getElementById("settings-calendar-id"),
+  settingsDailyAnnouncementTime: document.getElementById("settings-daily-announcement-time"),
+  settingsTournamentReminderTime: document.getElementById("settings-tournament-reminder-time"),
+  settingsPendingMemberSummaryTime: document.getElementById("settings-pending-member-summary-time"),
+  settingsNightlyAutomationTime: document.getElementById("settings-nightly-automation-time"),
+  lineTemplateAnnouncement: document.getElementById("line-template-announcement"),
+  lineTemplateGroupReminder: document.getElementById("line-template-group-reminder"),
+  lineTemplateManagerInternalDeadline: document.getElementById("line-template-manager-internal-deadline"),
+  lineTemplateManagerTrueDeadline: document.getElementById("line-template-manager-true-deadline"),
+  lineTemplateAppliedNotification: document.getElementById("line-template-applied-notification"),
+  lineTemplateMemberRegistrationRequest: document.getElementById("line-template-member-registration-request"),
+  lineTemplatePendingMemberSummary: document.getElementById("line-template-pending-member-summary"),
 };
 
 document.addEventListener("DOMContentLoaded", init);
@@ -156,6 +176,9 @@ elements.secondaryTabs.forEach(function(button) {
       if (key === "member-create") {
         resetMemberForm();
       }
+    }
+    if (key.startsWith("settings-")) {
+      state.settingsMode = key;
     }
     renderTabs();
   });
@@ -218,6 +241,60 @@ elements.resetMemberButton.addEventListener("click", function() {
 
 elements.resetSettingsButton.addEventListener("click", function() {
   populateSettingsForm();
+});
+
+elements.resetLineBotSettingsButton.addEventListener("click", function() {
+  populateLineBotSettingsForm_();
+});
+
+elements.resetLineMessageSettingsButton.addEventListener("click", function() {
+  populateLineMessageSettingsForm_();
+});
+
+elements.linePlaceholderButtons.forEach(function(button) {
+  button.addEventListener("click", function() {
+    insertLinePlaceholder_(button.dataset.linePlaceholder || "");
+  });
+});
+
+elements.reloadAdminSettingsButton.addEventListener("click", async function() {
+  try {
+    setBusyState(true, "設定を再読み込みしています...");
+    await loadAdminData();
+    state.primaryTab = "settings";
+    state.settingsMode = "settings-admin-ops";
+    renderTabs();
+    showStatus("設定を再読み込みしました。", "success");
+    setBusyState(false);
+    showResultOverlay_("再読み込みしました", "Apps Script 側の最新設定を読み込みました。");
+  } catch (error) {
+    showStatus(error.message || "設定の再読み込みに失敗しました。", "error");
+    setBusyState(false);
+    showResultOverlay_("再読み込みできませんでした", error.message || "設定の再読み込みに失敗しました。");
+  }
+});
+
+elements.installScheduledTriggersButton.addEventListener("click", async function() {
+  try {
+    setBusyState(true, "定期トリガーを再作成しています...");
+    const result = await postJson({
+      action: "install_scheduled_triggers",
+    });
+    await loadAdminData();
+    state.primaryTab = "settings";
+    state.settingsMode = "settings-admin-ops";
+    renderTabs();
+    showStatus("定期トリガーを再作成しました。", "success");
+    setBusyState(false);
+    showResultOverlay_(
+      "再作成しました",
+      buildScheduledTriggerResultMessage_(result.triggers || {})
+    );
+  } catch (error) {
+    showStatus(error.message || "定期トリガーの再作成に失敗しました。", "error");
+    setBusyState(false);
+    showResultOverlay_("再作成できませんでした", error.message || "定期トリガーの再作成に失敗しました。");
+  }
 });
 
 elements.authForm.addEventListener("submit", async function(event) {
@@ -487,7 +564,6 @@ elements.settingsForm.addEventListener("submit", async function(event) {
     web_base_url: elements.settingsWebBaseUrl.value.trim(),
     admin_page_url: elements.settingsAdminPageUrl.value.trim(),
     default_entry_page_token: elements.settingsDefaultEntryPageToken.value.trim(),
-    line_group_id: elements.settingsLineGroupId.value.trim(),
     calendar_id: elements.settingsCalendarId.value.trim(),
   };
 
@@ -509,6 +585,97 @@ elements.settingsForm.addEventListener("submit", async function(event) {
     showStatus(error.message || "設定の保存に失敗しました。", "error");
     setBusyState(false);
     showResultOverlay_("保存できませんでした", error.message || "設定の保存に失敗しました。");
+  }
+});
+
+elements.lineBotSettingsForm.addEventListener("submit", async function(event) {
+  event.preventDefault();
+
+  const payload = {
+    line_group_id: elements.settingsLineGroupId.value.trim(),
+    daily_announcement_time: elements.settingsDailyAnnouncementTime.value.trim(),
+    tournament_reminder_time: elements.settingsTournamentReminderTime.value.trim(),
+    pending_member_summary_time: elements.settingsPendingMemberSummaryTime.value.trim(),
+    nightly_automation_time: elements.settingsNightlyAutomationTime.value.trim(),
+  };
+
+  try {
+    setBusyState(true, "LINE bot設定を保存中です...");
+    await postJson({
+      action: "update_admin_settings",
+      settings: payload,
+    });
+    await loadAdminData();
+    state.primaryTab = "settings";
+    state.settingsMode = "settings-line-bot";
+    renderTabs();
+    showStatus("LINE bot設定を保存しました。", "success");
+    setBusyState(false);
+    showResultOverlay_("保存しました", "LINE bot設定を保存しました。トリガー時刻を変えた場合は、管理者操作から定期トリガーを再作成してください。", function() {
+      elements.settingsLineGroupId.focus();
+    });
+  } catch (error) {
+    showStatus(error.message || "LINE bot設定の保存に失敗しました。", "error");
+    setBusyState(false);
+    showResultOverlay_("保存できませんでした", error.message || "LINE bot設定の保存に失敗しました。");
+  }
+});
+
+elements.lineMessageSettingsForm.addEventListener("submit", async function(event) {
+  event.preventDefault();
+
+  try {
+    setBusyState(true, "LINE配信文面を保存中です...");
+    await saveLineMessageTemplates_();
+    await loadAdminData();
+    state.primaryTab = "settings";
+    state.settingsMode = "settings-line-messages";
+    renderTabs();
+    showStatus("LINE配信文面を保存しました。", "success");
+    setBusyState(false);
+    showResultOverlay_("保存しました", "LINE配信文面を保存しました。", function() {
+      elements.lineTemplateAnnouncement.focus();
+    });
+  } catch (error) {
+    showStatus(error.message || "LINE配信文面の保存に失敗しました。", "error");
+    setBusyState(false);
+    showResultOverlay_("保存できませんでした", error.message || "LINE配信文面の保存に失敗しました。");
+  }
+});
+
+elements.saveAndSendAnnouncementButton.addEventListener("click", async function() {
+  try {
+    setBusyState(true, "LINE配信文面を保存して更新通知を送信しています...");
+    await saveLineMessageTemplates_();
+    const result = await postJson({
+      action: "send_scheduled_daily_announcements",
+    });
+    await loadAdminData();
+    state.primaryTab = "settings";
+    state.settingsMode = "settings-line-messages";
+    renderTabs();
+
+    if (result.sent) {
+      const count = (result.tournament_ids || []).length;
+      showStatus("LINE配信文面を保存し、大会情報更新通知を送信しました。", "success");
+      setBusyState(false);
+      showResultOverlay_(
+        "送信しました",
+        "LINE配信文面を保存し、大会情報更新通知を送信しました。対象大会: " + count + "件"
+      );
+      return;
+    }
+
+    showStatus("LINE配信文面を保存しました。送信対象の大会はありませんでした。", "success");
+    setBusyState(false);
+    showResultOverlay_(
+      "保存しました",
+      "LINE配信文面を保存しました。送信対象の大会はありませんでした。"
+    );
+  } catch (error) {
+    showStatus(error.message || "LINE配信文面の保存または送信に失敗しました。", "error");
+    setBusyState(false);
+    showResultOverlay_("処理できませんでした", error.message || "LINE配信文面の保存または送信に失敗しました。");
   }
 });
 
@@ -576,7 +743,8 @@ function renderTabs() {
     const target = button.dataset.secondaryTab;
     const isActive =
       target === state.tournamentMode ||
-      target === state.memberMode;
+      target === state.memberMode ||
+      target === state.settingsMode;
     button.classList.toggle("is-active", isActive);
   });
 
@@ -584,7 +752,8 @@ function renderTabs() {
     const target = panel.dataset.subpanel;
     const isActive =
       target === state.tournamentMode ||
-      target === state.memberMode;
+      target === state.memberMode ||
+      target === state.settingsMode;
     panel.classList.toggle("is-active", isActive);
   });
 
@@ -1014,8 +1183,96 @@ function populateSettingsForm() {
   elements.settingsAdminPageUrl.value = state.settings.admin_page_url || "";
   elements.settingsDefaultEntryPageToken.value =
     getDefaultEntryPageToken_();
-  elements.settingsLineGroupId.value = state.settings.line_group_id || "";
   elements.settingsCalendarId.value = state.settings.calendar_id || "";
+  populateLineBotSettingsForm_();
+  populateLineMessageSettingsForm_();
+}
+
+function populateLineBotSettingsForm_() {
+  elements.settingsLineGroupId.value = state.settings.line_group_id || "";
+  elements.settingsDailyAnnouncementTime.value =
+    state.settings.daily_announcement_time || "17:00";
+  elements.settingsTournamentReminderTime.value =
+    state.settings.tournament_reminder_time || "10:00";
+  elements.settingsPendingMemberSummaryTime.value =
+    state.settings.pending_member_summary_time || "07:00";
+  elements.settingsNightlyAutomationTime.value =
+    state.settings.nightly_automation_time || "23:59";
+}
+
+function populateLineMessageSettingsForm_() {
+  const templates = state.settings.line_message_templates || {};
+  elements.lineTemplateAnnouncement.value = templates.announcement || "";
+  elements.lineTemplateGroupReminder.value = templates.group_reminder || "";
+  elements.lineTemplateManagerInternalDeadline.value =
+    templates.manager_internal_deadline || "";
+  elements.lineTemplateManagerTrueDeadline.value =
+    templates.manager_true_deadline || "";
+  elements.lineTemplateAppliedNotification.value =
+    templates.applied_notification || "";
+  elements.lineTemplateMemberRegistrationRequest.value =
+    templates.member_registration_request || "";
+  elements.lineTemplatePendingMemberSummary.value =
+    templates.pending_member_summary || "";
+}
+
+async function saveLineMessageTemplates_() {
+  return postJson({
+    action: "update_admin_settings",
+    settings: {
+      line_message_templates: {
+        announcement: elements.lineTemplateAnnouncement.value.trim(),
+        group_reminder: elements.lineTemplateGroupReminder.value.trim(),
+        manager_internal_deadline: elements.lineTemplateManagerInternalDeadline.value.trim(),
+        manager_true_deadline: elements.lineTemplateManagerTrueDeadline.value.trim(),
+        applied_notification: elements.lineTemplateAppliedNotification.value.trim(),
+        member_registration_request: elements.lineTemplateMemberRegistrationRequest.value.trim(),
+        pending_member_summary: elements.lineTemplatePendingMemberSummary.value.trim(),
+      },
+    },
+  });
+}
+
+function insertLinePlaceholder_(placeholder) {
+  if (!placeholder) {
+    return;
+  }
+
+  const target = getActiveLineTemplateTextarea_();
+  const start = target.selectionStart || 0;
+  const end = target.selectionEnd || 0;
+  const before = target.value.slice(0, start);
+  const after = target.value.slice(end);
+  const prefix = before && !/\s$/.test(before) ? "\n" : "";
+  const suffix = after && !/^\s/.test(after) ? "\n" : "";
+  const inserted = prefix + placeholder + suffix;
+
+  target.value = before + inserted + after;
+  target.focus();
+  target.setSelectionRange(start + inserted.length, start + inserted.length);
+}
+
+function getActiveLineTemplateTextarea_() {
+  const textareas = getLineTemplateTextareas_();
+  const active = document.activeElement;
+
+  if (textareas.indexOf(active) !== -1) {
+    return active;
+  }
+
+  return elements.lineTemplateAnnouncement;
+}
+
+function getLineTemplateTextareas_() {
+  return [
+    elements.lineTemplateAnnouncement,
+    elements.lineTemplateGroupReminder,
+    elements.lineTemplateManagerInternalDeadline,
+    elements.lineTemplateManagerTrueDeadline,
+    elements.lineTemplateAppliedNotification,
+    elements.lineTemplateMemberRegistrationRequest,
+    elements.lineTemplatePendingMemberSummary,
+  ].filter(Boolean);
 }
 
 function applyTournamentDefaultsIfNeeded_() {
@@ -1061,6 +1318,19 @@ function buildEntryPageUrl_(entryPageToken) {
 
   return webBaseUrl.replace(/\/+$/g, "") +
     "/entry/?page_token=" + encodeURIComponent(normalizedToken);
+}
+
+function buildScheduledTriggerResultMessage_(triggers) {
+  const items = [
+    ["大会情報更新通知", triggers.daily_announcement],
+    ["メンバー申請まとめ通知", triggers.pending_member_registration_summary],
+    ["夜間自動処理", triggers.applied_notification],
+    ["締切リマインド", triggers.tournament_reminder],
+  ];
+
+  return items.map(function(item) {
+    return item[0] + ": " + (item[1] || "作成済み");
+  }).join("\n");
 }
 
 function buildTournamentEntryUrl_(item) {

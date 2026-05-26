@@ -194,6 +194,55 @@ body {
   gap: 14px;
   padding: 0 16px 16px;
 }
+.settings-card-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+.settings-card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 14px;
+  background: #fffaf3;
+}
+.settings-card h4 {
+  margin: 0 0 8px;
+  color: var(--accent-dark);
+}
+.settings-card .field-note {
+  margin: 0 0 12px;
+}
+.template-helper-panel {
+  display: grid;
+  gap: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 14px;
+  background: #fffaf3;
+}
+.template-helper-panel h4 {
+  margin: 0 0 4px;
+  color: var(--accent-dark);
+}
+.template-token-list {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.token-button {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 7px 10px;
+  font: inherit;
+  font-size: .9rem;
+  font-weight: 700;
+  color: var(--accent-dark);
+  background: #fff;
+  cursor: pointer;
+}
+.token-button:hover {
+  border-color: var(--accent-dark);
+}
 .grade-schedule-settings {
   display: grid;
   gap: 12px;
@@ -301,7 +350,7 @@ body {
   justify-content: start;
   align-items: center;
 }
-input, select {
+input, select, textarea {
   width: 100%;
   border: 1px solid var(--line);
   border-radius: 14px;
@@ -309,13 +358,18 @@ input, select {
   font: inherit;
   background: #fff;
 }
+textarea {
+  resize: vertical;
+  min-height: 8em;
+  line-height: 1.7;
+}
 input[type="date"] {
   width: min(100%, 13.5em);
 }
 input[type="time"] {
   width: min(100%, 8.5em);
 }
-input:focus, select:focus {
+input:focus, select:focus, textarea:focus {
   outline: 2px solid rgba(141, 59, 34, .18);
   border-color: var(--accent);
 }
@@ -805,6 +859,7 @@ button {
 }
 @media (max-width: 960px) {
   .admin-grid { grid-template-columns: 1fr; }
+  .settings-card-grid { grid-template-columns: 1fr; }
   .field-inline {
     flex-wrap: wrap;
   }

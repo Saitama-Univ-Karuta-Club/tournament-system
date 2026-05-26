@@ -1650,7 +1650,36 @@ deleteTournamentReminderTrigger()
 installTournamentReminderTrigger()
 ```
 
-### 21.6 GitHub Pages 側の更新
+### 21.6 管理画面の設定タブ
+
+管理画面の設定は以下のタブに分ける。
+
+- リンク・外部サービス: Drive、年間大会予定表、Web URL、参加ページ token、Calendar ID
+- LINE bot設定: LINE groupId、定期通知時刻
+- LINE配信文面: 更新通知、締切リマインド、担当者通知、申込完了通知、メンバー申請通知
+- 管理者操作: 設定再読み込み、定期トリガー再作成
+
+LINE bot設定で通知時刻を変更した場合、管理者操作から定期トリガーを再作成する。
+
+LINE配信文面では、現在登録されている文面を textarea に表示し、未登録の場合は既定文面を表示する。
+大会一覧やURLなど、送信時に動的に決まる部分は以下の差し込み項目を残して編集する。
+
+```text
+{{TOURNAMENT_LINES}}
+{{TOURNAMENT_BLOCKS}}
+{{ENTRY_URL}}
+{{DRIVE_FOLDER_URL}}
+{{ADMIN_PAGE_URL}}
+{{MEMBER_NAME}}
+{{MEMBER_KANA}}
+{{MEMBER_RANK}}
+{{MEMBER_GRADE}}
+{{MEMBER_BLOCKS}}
+```
+
+文面更新後すぐに大会情報更新通知を送る場合は、管理画面の `保存して更新通知を送信` を使う。
+
+### 21.7 GitHub Pages 側の更新
 
 管理画面や参加者画面の見た目を変更した場合、`index.html` の CSS / JS のクエリバージョンを上げてキャッシュを避ける。
 
