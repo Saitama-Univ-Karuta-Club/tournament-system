@@ -1671,6 +1671,9 @@ LINE配信文面では、現在登録されている文面を textarea に表示
 {{DRIVE_FOLDER_URL}}
 {{ADMIN_PAGE_URL}}
 {{MEMBER_NAME}}
+{{MEMBER_KANA}}
+{{MEMBER_RANK}}
+{{MEMBER_GRADE}}
 {{MEMBER_BLOCKS}}
 ```
 
