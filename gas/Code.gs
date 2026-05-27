@@ -327,6 +327,14 @@ function handleSingleLineEvent(event) {
     return;
   }
 
+  if (text === "/testgroupid") {
+    replyLineMessage(event.replyToken, [{
+      type: "text",
+      text: registerLineTestGroup(event),
+    }]);
+    return;
+  }
+
   if (text === "/担当者登録") {
     replyLineMessage(event.replyToken, [{
       type: "text",
@@ -372,6 +380,9 @@ function getAdminSettings_() {
     ).trim(),
     line_group_id: String(
       properties.getProperty("LINE_GROUP_ID") || ""
+    ).trim(),
+    line_test_group_id: String(
+      properties.getProperty("LINE_TEST_GROUP_ID") || ""
     ).trim(),
     daily_announcement_time: getScriptTimeSetting_(
       properties,
@@ -432,6 +443,9 @@ function updateAdminSettings_(input) {
   if (hasOwnProperty_(source, "line_group_id")) {
     setOrDeleteScriptProperty_(properties, "LINE_GROUP_ID", normalized.line_group_id);
   }
+  if (hasOwnProperty_(source, "line_test_group_id")) {
+    setOrDeleteScriptProperty_(properties, "LINE_TEST_GROUP_ID", normalized.line_test_group_id);
+  }
   if (hasOwnProperty_(source, "daily_announcement_time")) {
     setOrDeleteScriptProperty_(properties, "DAILY_ANNOUNCEMENT_TIME", normalized.daily_announcement_time);
   }
@@ -468,6 +482,7 @@ function normalizeAdminSettingsInput_(input) {
     default_entry_page_token: String(input.default_entry_page_token || "").trim(),
     calendar_id: String(input.calendar_id || "").trim(),
     line_group_id: String(input.line_group_id || "").trim(),
+    line_test_group_id: String(input.line_test_group_id || "").trim(),
     daily_announcement_time: normalizeTimeSetting_(
       input.daily_announcement_time,
       "17:00"
@@ -1897,6 +1912,18 @@ function registerLineGroup(event) {
 
   PropertiesService.getScriptProperties().setProperty("LINE_GROUP_ID", groupId);
   return "groupId を登録しました。\n" + groupId;
+}
+
+function registerLineTestGroup(event) {
+  const source = event && event.source ? event.source : {};
+  const groupId = source.groupId || "";
+
+  if (!groupId) {
+    return "このコマンドはLINEグループ内で実行してください。";
+  }
+
+  PropertiesService.getScriptProperties().setProperty("LINE_TEST_GROUP_ID", groupId);
+  return "テスト用 groupId を登録しました。\n" + groupId;
 }
 
 function registerManagerFromLine(event) {
