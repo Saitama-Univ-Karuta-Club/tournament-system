@@ -129,6 +129,7 @@ const elements = {
   resetLineBotSettingsButton: document.getElementById("reset-line-bot-settings-button"),
   resetLineMessageSettingsButton: document.getElementById("reset-line-message-settings-button"),
   saveAndSendAnnouncementButton: document.getElementById("save-and-send-announcement-button"),
+  sendLineTemplateTestButton: document.getElementById("send-line-template-test-button"),
   reloadAdminSettingsButton: document.getElementById("reload-admin-settings-button"),
   installScheduledTriggersButton: document.getElementById("install-scheduled-triggers-button"),
   linePlaceholderButtons: document.querySelectorAll("[data-line-placeholder]"),
@@ -152,6 +153,7 @@ const elements = {
   lineTemplateAppliedNotification: document.getElementById("line-template-applied-notification"),
   lineTemplateMemberRegistrationRequest: document.getElementById("line-template-member-registration-request"),
   lineTemplatePendingMemberSummary: document.getElementById("line-template-pending-member-summary"),
+  lineTemplateTestKey: document.getElementById("line-template-test-key"),
 };
 
 document.addEventListener("DOMContentLoaded", init);
@@ -678,6 +680,33 @@ elements.saveAndSendAnnouncementButton.addEventListener("click", async function(
     showStatus(error.message || "LINE配信文面の保存または送信に失敗しました。", "error");
     setBusyState(false);
     showResultOverlay_("処理できませんでした", error.message || "LINE配信文面の保存または送信に失敗しました。");
+  }
+});
+
+elements.sendLineTemplateTestButton.addEventListener("click", async function() {
+  const templateKey = elements.lineTemplateTestKey.value;
+
+  try {
+    setBusyState(true, "LINE配信文面を保存してテストグループへ送信しています...");
+    await saveLineMessageTemplates_();
+    const result = await postJson({
+      action: "send_line_template_test",
+      template_key: templateKey,
+    });
+    await loadAdminData();
+    state.primaryTab = "settings";
+    state.settingsMode = "settings-line-messages";
+    renderTabs();
+    showStatus("テストグループへLINE配信文面を送信しました。", "success");
+    setBusyState(false);
+    showResultOverlay_(
+      "テスト送信しました",
+      "テストグループへ送信しました。\n送信先: " + (result.group_id || "-")
+    );
+  } catch (error) {
+    showStatus(error.message || "テスト送信に失敗しました。", "error");
+    setBusyState(false);
+    showResultOverlay_("テスト送信できませんでした", error.message || "テスト送信に失敗しました。");
   }
 });
 
