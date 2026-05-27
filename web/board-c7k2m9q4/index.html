@@ -291,7 +291,20 @@
             <span class="field-note">使える差し込み: `{{MEMBER_BLOCKS}}`, `{{ADMIN_PAGE_URL}}`</span>
           </label>
           <div class="actions">
+            <label class="field inline-field">
+              <span>テスト送信する文面</span>
+              <select id="line-template-test-key">
+                <option value="announcement">大会情報更新通知</option>
+                <option value="group_reminder">回答締切リマインド</option>
+                <option value="manager_internal_deadline">担当者向け 申込対応リマインド</option>
+                <option value="manager_true_deadline">担当者向け 最終リマインド</option>
+                <option value="applied_notification">申込完了通知</option>
+                <option value="member_registration_request">メンバー追加申請通知</option>
+                <option value="pending_member_summary">未処理メンバー追加申請まとめ通知</option>
+              </select>
+            </label>
             <button type="button" id="reset-line-message-settings-button" class="secondary-button">現在値に戻す</button>
+            <button type="button" id="send-line-template-test-button" class="secondary-button">保存してテスト送信</button>
             <button type="button" id="save-and-send-announcement-button" class="secondary-button">保存して更新通知を送信</button>
             <button type="submit">文面を更新</button>
           </div>

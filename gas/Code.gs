@@ -274,6 +274,17 @@ function doPost(e) {
       });
     }
 
+    if (action === "send_line_template_test") {
+      validateAdminToken(body.admin_token || "");
+      const result = sendLineTemplateTest_(body.template_key || "");
+      return jsonOutput({
+        ok: true,
+        sent: result.sent,
+        group_id: result.group_id,
+        template_key: result.template_key,
+      });
+    }
+
     if (action === "update_admin_settings") {
       validateAdminToken(body.admin_token || "");
       return jsonOutput({
@@ -2671,6 +2682,105 @@ function sendScheduledManagerRemindersForTournaments_(tournaments, notificationT
   );
 }
 
+function sendLineTemplateTest_(templateKey) {
+  validateLineMessageTemplateKey_(templateKey);
+
+  const groupId = getLineTestGroupId_();
+  const message = buildLineTemplateTestMessage_(templateKey);
+
+  pushLineMessage(groupId, [{
+    type: "text",
+    text: message,
+  }]);
+
+  appendNotificationLog({
+    tournament_id: "",
+    notification_type: "line_template_test",
+    sent_to_type: "test_group",
+    sent_to_id: groupId,
+    message: message,
+  });
+
+  return {
+    sent: true,
+    group_id: groupId,
+    template_key: templateKey,
+  };
+}
+
+function validateLineMessageTemplateKey_(templateKey) {
+  const key = String(templateKey || "").trim();
+  const definitions = getLineMessageTemplateDefinitions_();
+
+  if (!key || !definitions[key]) {
+    throw new Error("Invalid line message template key");
+  }
+}
+
+function buildLineTemplateTestMessage_(templateKey) {
+  const key = String(templateKey || "").trim();
+  const rendered = renderLineMessageTemplate_(
+    key,
+    getLineTemplateTestReplacements_()
+  );
+
+  if (!rendered) {
+    throw new Error("LINE template is empty");
+  }
+
+  return [
+    "【テスト送信】",
+    "テンプレート: " + getLineTemplateTestLabel_(key),
+    "本番グループには送信されていません。",
+    "",
+    rendered,
+  ].join("\n");
+}
+
+function getLineTemplateTestLabel_(templateKey) {
+  const labels = {
+    announcement: "大会情報更新通知",
+    group_reminder: "回答締切リマインド",
+    manager_internal_deadline: "担当者向け 申込対応リマインド",
+    manager_true_deadline: "担当者向け 最終リマインド",
+    applied_notification: "申込完了通知",
+    member_registration_request: "メンバー追加申請通知",
+    pending_member_summary: "未処理メンバー追加申請まとめ通知",
+  };
+
+  return labels[templateKey] || templateKey;
+}
+
+function getLineTemplateTestReplacements_() {
+  return {
+    TOURNAMENT_LINES: [
+      "6月1日 テスト大会A級（公認）",
+      "6月2日 テスト大会B級（後援）",
+    ].join("\n"),
+    TOURNAMENT_BLOCKS: [
+      "",
+      "==テスト大会A級==",
+      "主催締切日: 6月5日 23:59",
+      "山田太郎 A級",
+      "佐藤花子 B級",
+    ].join("\n"),
+    ENTRY_URL: "https://example.com/entry/?page_token=test",
+    DRIVE_FOLDER_URL: "https://drive.google.com/drive/folders/TEST_FOLDER_ID",
+    ADMIN_PAGE_URL: "https://example.com/board-c7k2m9q4/",
+    MEMBER_NAME: "山田太郎",
+    MEMBER_KANA: "やまだ たろう",
+    MEMBER_RANK: "初段",
+    MEMBER_GRADE: "A級",
+    MEMBER_BLOCKS: [
+      "",
+      "山田太郎",
+      "ふりがな: やまだ たろう",
+      "段位: 初段",
+      "級: A級",
+    ].join("\n"),
+  };
+}
+
 function buildAnnouncementMessage(tournaments) {
   const first = tournaments[0];
   const entryUrl = getTournamentEntryUrlForLine_(first);
@@ -3376,6 +3486,17 @@ function getLineGroupId() {
 
   if (!groupId) {
     throw new Error("LINE_GROUP_ID is not set");
+  }
+
+  return groupId;
+}
+
+function getLineTestGroupId_() {
+  const groupId =
+    PropertiesService.getScriptProperties().getProperty("LINE_TEST_GROUP_ID");
+
+  if (!groupId) {
+    throw new Error("LINE_TEST_GROUP_ID is not set");
   }
 
   return groupId;
