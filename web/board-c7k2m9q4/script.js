@@ -139,6 +139,7 @@ const elements = {
   settingsAdminPageUrl: document.getElementById("settings-admin-page-url"),
   settingsDefaultEntryPageToken: document.getElementById("settings-default-entry-page-token"),
   settingsLineGroupId: document.getElementById("settings-line-group-id"),
+  settingsLineTestGroupId: document.getElementById("settings-line-test-group-id"),
   settingsCalendarId: document.getElementById("settings-calendar-id"),
   settingsDailyAnnouncementTime: document.getElementById("settings-daily-announcement-time"),
   settingsTournamentReminderTime: document.getElementById("settings-tournament-reminder-time"),
@@ -593,6 +594,7 @@ elements.lineBotSettingsForm.addEventListener("submit", async function(event) {
 
   const payload = {
     line_group_id: elements.settingsLineGroupId.value.trim(),
+    line_test_group_id: elements.settingsLineTestGroupId.value.trim(),
     daily_announcement_time: elements.settingsDailyAnnouncementTime.value.trim(),
     tournament_reminder_time: elements.settingsTournamentReminderTime.value.trim(),
     pending_member_summary_time: elements.settingsPendingMemberSummaryTime.value.trim(),
@@ -1190,6 +1192,7 @@ function populateSettingsForm() {
 
 function populateLineBotSettingsForm_() {
   elements.settingsLineGroupId.value = state.settings.line_group_id || "";
+  elements.settingsLineTestGroupId.value = state.settings.line_test_group_id || "";
   elements.settingsDailyAnnouncementTime.value =
     state.settings.daily_announcement_time || "17:00";
   elements.settingsTournamentReminderTime.value =
