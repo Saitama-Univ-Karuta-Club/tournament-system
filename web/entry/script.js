@@ -607,7 +607,7 @@ function renderTournaments(tournaments) {
   elements.tournamentList.innerHTML = "";
 
   if (!tournaments.length) {
-    renderEmptyState("現在回答対象の大会はありません。");
+    renderEmptyState("現在表示できる大会はありません。");
     return;
   }
 
@@ -617,12 +617,15 @@ function renderTournaments(tournaments) {
     const displayTournament = getGroupedTournamentDisplayItem_(tournament);
     const savedResponse = state.savedResponsesByTournament[tournament.tournament_id] || null;
     const draftResponse = state.draftResponsesByTournament[tournament.tournament_id] || null;
+    const canSubmitResponse = canSubmitTournamentResponse_(tournament);
 
     fragment.querySelector(".tournament-title").textContent =
       displayTournament.title || tournament.title;
     fragment.querySelector(".tournament-meta").textContent = "";
     fragment.querySelector(".response-state").textContent =
-      savedResponse ? "回答済み" : "未回答";
+      canSubmitResponse ?
+        (savedResponse ? "回答済み" : "未回答") :
+        "申込済み";
     fragment.querySelector(".event-date").textContent =
       displayTournament.event_date_label || tournament.event_date_label || "-";
     fragment.querySelector(".grades").textContent =
@@ -641,6 +644,7 @@ function renderTournaments(tournaments) {
     radioInputs.forEach(function(input) {
       input.name = "response-" + tournament.tournament_id;
       input.dataset.tournamentId = tournament.tournament_id;
+      input.disabled = !canSubmitResponse;
       if (draftResponse && draftResponse.response === input.value) {
         input.checked = true;
       }
@@ -649,8 +653,13 @@ function renderTournaments(tournaments) {
     const textarea = fragment.querySelector("textarea");
     textarea.dataset.tournamentId = tournament.tournament_id;
     textarea.value = draftResponse ? draftResponse.comment || "" : "";
+    textarea.disabled = !canSubmitResponse;
+    textarea.placeholder = canSubmitResponse ?
+      "任意" :
+      "申込済みのため回答は締め切られています。";
 
     card.dataset.tournamentId = tournament.tournament_id;
+    card.classList.toggle("is-applied", !canSubmitResponse);
     updateResponseOptionStyles_(card);
     elements.tournamentList.appendChild(fragment);
   });
@@ -658,6 +667,10 @@ function renderTournaments(tournaments) {
 
 function collectResponses() {
   return state.filteredTournaments.reduce(function(result, tournament) {
+    if (!canSubmitTournamentResponse_(tournament)) {
+      return result;
+    }
+
     const draftResponse = state.draftResponsesByTournament[tournament.tournament_id];
 
     if (!draftResponse || !draftResponse.response) {
@@ -672,6 +685,10 @@ function collectResponses() {
 
     return result;
   }, []);
+}
+
+function canSubmitTournamentResponse_(tournament) {
+  return String(tournament && tournament.status || "").trim() === "active";
 }
 
 function getSelectedMember() {
@@ -711,7 +728,7 @@ function filterTournamentsForMember(tournaments, member) {
 
 function renderCurrentTournamentView() {
   const visibleTournaments = state.filteredTournaments.filter(function(tournament) {
-    return matchesVisibilityFilter(tournament.tournament_id);
+    return matchesVisibilityFilter(tournament);
   });
 
   renderSelectedMemberNotice_();
@@ -754,7 +771,7 @@ function renderSelectedMemberNotice_() {
   }
 
   elements.selectedMemberNotice.textContent =
-    selectedMember.display_name + "さん 以下の大会が申し込み受付中です。";
+    selectedMember.display_name + "さんの対象大会を表示しています。";
 }
 
 function syncMemberRequestLinkVisibility_() {
@@ -958,7 +975,9 @@ function mergeApplicantGroups_(leftGroups, rightGroups) {
   });
 }
 
-function matchesVisibilityFilter(tournamentId) {
+function matchesVisibilityFilter(tournament) {
+  const tournamentId = tournament.tournament_id;
+  const canSubmitResponse = canSubmitTournamentResponse_(tournament);
   const hasResponse = Boolean(
     state.savedResponsesByTournament[tournamentId] &&
     state.savedResponsesByTournament[tournamentId].response
@@ -969,7 +988,7 @@ function matchesVisibilityFilter(tournamentId) {
   }
 
   if (state.visibilityFilter === "unanswered") {
-    return !hasResponse;
+    return canSubmitResponse && !hasResponse;
   }
 
   return true;
@@ -1003,6 +1022,14 @@ function syncTournamentDraft(target) {
   const tournamentId = target.dataset.tournamentId;
 
   if (!tournamentId) {
+    return;
+  }
+
+  const tournament = state.tournaments.find(function(item) {
+    return item.tournament_id === tournamentId;
+  });
+
+  if (!canSubmitTournamentResponse_(tournament)) {
     return;
   }
 
