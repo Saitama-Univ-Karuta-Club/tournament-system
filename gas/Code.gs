@@ -2455,13 +2455,17 @@ function getAutomaticTournamentStatus_(tournament, applicantCount, now) {
     return "closed";
   }
 
-  const deadlineSwitchAt = buildTournamentStatusCheckpoint_(
+  const noApplicantCloseAt = buildTournamentStatusCheckpoint_(
     tournament.true_deadline,
-    1
+    2
   );
 
-  if (deadlineSwitchAt && now.getTime() >= deadlineSwitchAt.getTime()) {
-    return applicantCount > 0 ? "applied" : "no_applicants";
+  if (
+    applicantCount <= 0 &&
+    noApplicantCloseAt &&
+    now.getTime() >= noApplicantCloseAt.getTime()
+  ) {
+    return "closed";
   }
 
   return currentStatus;
