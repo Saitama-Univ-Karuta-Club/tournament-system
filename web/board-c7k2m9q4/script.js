@@ -45,6 +45,8 @@ const elements = {
   secondaryTabs: document.querySelectorAll(".secondary-tab"),
   subpanels: document.querySelectorAll("[data-subpanel]"),
   tournamentList: document.getElementById("tournament-list"),
+  tournamentFollowupList: document.getElementById("tournament-followup-list"),
+  tournamentFollowupCount: document.getElementById("tournament-followup-count"),
   memberList: document.getElementById("member-list"),
   pendingMemberPanel: document.getElementById("pending-member-panel"),
   pendingMemberCount: document.getElementById("pending-member-count"),
@@ -747,6 +749,7 @@ async function loadAdminData() {
     populateSettingsForm();
     applyTournamentDefaultsIfNeeded_();
     renderTournamentList();
+    renderTournamentFollowupList_();
     renderTournamentResponseOverview();
     renderPendingMemberRequests();
     renderMemberList();
@@ -884,6 +887,96 @@ function renderTournamentList() {
       showStatus("大会情報を編集できます。申込情報は保持されます。", "");
     });
   });
+}
+
+function renderTournamentFollowupList_() {
+  if (!elements.tournamentFollowupList) {
+    return;
+  }
+
+  const followupItems = getTournamentFollowupItems_();
+
+  if (elements.tournamentFollowupCount) {
+    elements.tournamentFollowupCount.textContent =
+      String(followupItems.length) + "件";
+  }
+
+  if (!followupItems.length) {
+    elements.tournamentFollowupList.innerHTML =
+      '<p class="empty-state">申込後フォローが必要な大会はありません。</p>';
+    return;
+  }
+
+  elements.tournamentFollowupList.innerHTML = followupItems.map(function(item) {
+    const applicantBody = item.applicant_groups.length ?
+      item.applicant_groups.map(function(group) {
+        return (
+          '<div class="response-overview-grade-row">' +
+            '<div class="response-overview-grade-label">' +
+              escapeHtml(formatOverviewGradeLabel(group.grade)) +
+            "</div>" +
+            '<div class="response-overview-grade-names">' +
+              escapeHtml((group.names || []).join("、")) +
+            "</div>" +
+          "</div>"
+        );
+      }).join("") :
+      '<p class="response-overview-empty">申込希望者はいません。</p>';
+    const driveLink = item.drive_url ?
+      '<a href="' + escapeHtml(item.drive_url) + '" target="_blank" rel="noopener noreferrer">要項を開く</a>' :
+      "要項未設定";
+
+    return (
+      '<section class="response-overview-card">' +
+        '<div class="response-overview-card-header">' +
+          '<h4>' + escapeHtml(item.title || "無題") + "</h4>" +
+          '<div class="response-overview-tag-row">' +
+            '<span class="response-overview-status-tag is-applied">申込済</span>' +
+            '<span class="response-overview-count">' +
+              escapeHtml(String(item.applicant_count || 0)) + "名" +
+            "</span>" +
+          "</div>" +
+        "</div>" +
+        '<div class="response-overview-meta">' +
+          '<span>大会日: ' + escapeHtml(buildEventDateLabel_(item)) + "</span>" +
+          '<span>' + escapeHtml(buildDaysUntilEventLabel_(item.event_start_date)) + "</span>" +
+          '<span>開催級: ' + escapeHtml(item.grades || "級制限なし") + "</span>" +
+          '<span>会場: ' + escapeHtml(item.venue || "-") + "</span>" +
+          '<span>担当: ' + escapeHtml(item.manager_name || "-") + "</span>" +
+          '<span>' + driveLink + "</span>" +
+        "</div>" +
+        '<div class="response-overview-content">' +
+          '<div class="response-overview-body">' +
+            '<div class="followup-check-list" aria-label="確認観点">' +
+              '<span>抽選結果</span>' +
+              '<span>参加者名簿</span>' +
+              '<span>参加費支払い</span>' +
+            "</div>" +
+            applicantBody +
+          "</div>" +
+          '<div class="response-overview-actions response-overview-actions-side">' +
+            '<button type="button" class="response-overview-edit-button" data-edit-followup-tournament-ids="' +
+              escapeHtml((item.tournament_ids || []).join(",")) +
+              '">情報を編集する</button>' +
+          "</div>" +
+        "</div>" +
+      "</section>"
+    );
+  }).join("");
+
+  elements.tournamentFollowupList
+    .querySelectorAll("[data-edit-followup-tournament-ids]")
+    .forEach(function(button) {
+      button.addEventListener("click", function() {
+        state.primaryTab = "tournaments";
+        state.tournamentMode = "tournament-followup";
+        renderTabs();
+        openTournamentEditModalForIds_(
+          parseTournamentIds_(button.dataset.editFollowupTournamentIds)
+        );
+        showStatus("申込後フォロー対象の大会情報を編集できます。", "");
+      });
+    });
 }
 
 function renderMemberList() {
@@ -1857,6 +1950,80 @@ function getGroupedTournamentListItems_() {
   });
 }
 
+function getTournamentFollowupItems_() {
+  const todayKey = buildDateKeyFromDate_(new Date());
+
+  return getGroupedTournamentListItemsFromSource_(state.tournaments)
+    .filter(function(item) {
+      const eventStartDate = normalizeDateKey_(item.event_start_date);
+      return String(item.status || "").trim() === "applied" &&
+        Number(item.applicant_count || 0) > 0 &&
+        eventStartDate &&
+        eventStartDate >= todayKey;
+    })
+    .sort(function(a, b) {
+      return compareOverviewDateValues_(a.event_start_date, b.event_start_date) ||
+        String(a.title || "").localeCompare(String(b.title || ""), "ja");
+    });
+}
+
+function getGroupedTournamentListItemsFromSource_(items) {
+  const groups = {};
+
+  (items || []).forEach(function(item) {
+    const groupKey = buildTournamentListGroupKey_(item);
+    const overview = getTournamentOverviewById_(item.tournament_id);
+
+    if (!groups[groupKey]) {
+      groups[groupKey] = {
+        group_key: groupKey,
+        tournament_id: item.tournament_id || "",
+        tournament_ids: [],
+        title: buildTournamentDisplayTitleForGrouping_(item.title, []),
+        status: item.status || "",
+        event_start_date: item.event_start_date || "",
+        event_end_date: item.event_end_date || item.event_start_date || "",
+        internal_deadline: item.internal_deadline || "",
+        true_deadline: item.true_deadline || "",
+        grades: [],
+        venue: item.venue || "",
+        drive_url: item.drive_url || "",
+        entry_page_token: item.entry_page_token || "",
+        entry_url: item.entry_url || "",
+        manager_name: item.manager_name || "",
+        manager_line_user_id: item.manager_line_user_id || "",
+        tournament_type: item.tournament_type || "",
+        applicant_groups: [],
+        applicant_count: 0,
+      };
+    }
+
+    groups[groupKey].tournament_ids.push(item.tournament_id || "");
+    groups[groupKey].grades = sortTournamentGrades_(
+      groups[groupKey].grades.concat(normalizeGradeValues(item.grades || ""))
+    );
+    groups[groupKey].status = mergeTournamentStatuses_(
+      groups[groupKey].status,
+      item.status
+    );
+
+    if (overview) {
+      groups[groupKey].applicant_groups = mergeApplicantGroups_(
+        groups[groupKey].applicant_groups,
+        overview.applicant_groups
+      );
+      groups[groupKey].applicant_count += Number(overview.applicant_count || 0);
+    }
+  });
+
+  return Object.keys(groups).map(function(groupKey) {
+    const item = groups[groupKey];
+    item.grades = item.grades.join(",");
+    item.title = buildTournamentDisplayTitleForGrouping_(item.title, item.grades);
+    return item;
+  });
+}
+
 function buildTournamentListGroupKey_(item) {
   return [
     buildTournamentBaseTitleForGrouping_(item.title, item.grades),
@@ -2013,6 +2180,30 @@ function buildEventDateLabel_(item) {
   return buildEventDateLabelFromValues_(item.event_start_date, item.event_end_date) || "-";
 }
 
+function buildDaysUntilEventLabel_(eventStartDate) {
+  const eventDateKey = normalizeDateKey_(eventStartDate);
+
+  if (!eventDateKey) {
+    return "大会日未設定";
+  }
+
+  const today = parseDateOnly_(buildDateKeyFromDate_(new Date()));
+  const eventDate = parseDateOnly_(eventDateKey);
+  const diffDays = Math.round(
+    (eventDate.getTime() - today.getTime()) / (24 * 60 * 60 * 1000)
+  );
+
+  if (diffDays === 0) {
+    return "本日開催";
+  }
+
+  if (diffDays > 0) {
+    return "大会日まで" + diffDays + "日";
+  }
+
+  return "大会終了";
+}
+
 function buildEventDateLabelFromValues_(startDate, endDate) {
   const start = normalizeDateKey_(startDate);
   const end = normalizeDateKey_(endDate);
@@ -2064,6 +2255,17 @@ function buildDateKeyFromDate_(date) {
     String(date.getMonth() + 1).padStart(2, "0"),
     String(date.getDate()).padStart(2, "0"),
   ].join("-");
+}
+
+function parseDateOnly_(value) {
+  const normalized = normalizeDateKey_(value);
+  const parts = normalized.split("-");
+
+  if (parts.length !== 3) {
+    return new Date(NaN);
+  }
+
+  return new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]));
 }
 
 function formatDateLabel_(dateString) {

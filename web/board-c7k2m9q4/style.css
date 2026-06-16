@@ -596,6 +596,24 @@ button {
   gap: 10px;
   min-height: 100%;
 }
+.followup-check-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.followup-check-list span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  border: 1px solid rgba(92, 133, 107, 0.28);
+  border-radius: 999px;
+  padding: 6px 10px;
+  font-size: 0.84rem;
+  font-weight: 700;
+  color: #2f6846;
+  background: rgba(238, 247, 240, 0.95);
+}
 .response-overview-grade-row {
   display: grid;
   grid-template-columns: 88px minmax(0, 1fr);
