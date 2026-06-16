@@ -742,6 +742,8 @@ function renderCurrentTournamentView() {
   if (!visibleTournaments.length) {
     if (state.visibilityFilter === "answered") {
       renderEmptyState("回答済みの大会はありません。");
+    } else if (state.visibilityFilter === "planned") {
+      renderEmptyState("出場予定の大会はありません。");
     } else if (state.visibilityFilter === "unanswered") {
       renderEmptyState("未回答の大会はありません。");
     }
@@ -978,13 +980,16 @@ function mergeApplicantGroups_(leftGroups, rightGroups) {
 function matchesVisibilityFilter(tournament) {
   const tournamentId = tournament.tournament_id;
   const canSubmitResponse = canSubmitTournamentResponse_(tournament);
-  const hasResponse = Boolean(
-    state.savedResponsesByTournament[tournamentId] &&
-    state.savedResponsesByTournament[tournamentId].response
-  );
+  const savedResponse = state.savedResponsesByTournament[tournamentId] || {};
+  const hasResponse = Boolean(savedResponse.response);
+  const isApplied = String(tournament.status || "").trim() === "applied";
 
   if (state.visibilityFilter === "answered") {
-    return hasResponse;
+    return canSubmitResponse && hasResponse;
+  }
+
+  if (state.visibilityFilter === "planned") {
+    return isApplied && savedResponse.response === "yes";
   }
 
   if (state.visibilityFilter === "unanswered") {
