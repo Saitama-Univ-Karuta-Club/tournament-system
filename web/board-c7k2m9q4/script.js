@@ -448,9 +448,7 @@ elements.tournamentForm.addEventListener("submit", async function(event) {
     if (!wasEditingInModal) {
       state.primaryTab = "tournaments";
       state.tournamentMode = "tournament-create";
-      if (result.tournament_ids && result.tournament_ids.length) {
-        selectTournamentById(result.tournament_ids[0]);
-      }
+      resetTournamentForm();
       renderTabs();
     }
     const successMessage = buildTournamentSaveMessage(result);

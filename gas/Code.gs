@@ -884,13 +884,17 @@ function listPublicTournaments(pageToken) {
 
   return listTournaments()
     .filter(function(tournament) {
-      return tournament.status === "active" &&
+      return (
+        tournament.status === "active" ||
+        tournament.status === "applied"
+      ) &&
         tournament.entry_page_token === pageToken;
     })
     .map(function(tournament) {
       return {
         tournament_id: tournament.tournament_id,
         title: tournament.title,
+        status: tournament.status || "",
         event_date_label: buildEventDateLabel(
           tournament.event_start_date,
           tournament.event_end_date
@@ -1284,7 +1288,9 @@ function upsertResponses(pageToken, memberName, responses) {
   validateResponseRequest(pageToken, memberName, responses);
   getEntryPage(pageToken);
 
-  const tournaments = listPublicTournaments(pageToken);
+  const tournaments = listPublicTournaments(pageToken).filter(function(tournament) {
+    return String(tournament.status || "").trim() === "active";
+  });
   const allowedTournamentIds = {};
   const sheet = getSheetByName("Responses");
   const values = sheet.getDataRange().getValues();
@@ -2139,7 +2145,6 @@ function getPendingAppliedNotificationTournaments_() {
     "application_completed",
     "group"
   );
-  const todayKey = Utilities.formatDate(new Date(), "Asia/Tokyo", "yyyy-MM-dd");
 
   return listTournaments().filter(function(tournament) {
     if (String(tournament.status || "").trim() !== "applied") {
@@ -2150,9 +2155,10 @@ function getPendingAppliedNotificationTournaments_() {
       return false;
     }
 
-    return normalizeDateKey(tournament.applied_at) === todayKey;
+    return true;
   }).sort(function(a, b) {
-    return String(a.event_start_date || "").localeCompare(String(b.event_start_date || "")) ||
+    return String(a.applied_at || "").localeCompare(String(b.applied_at || "")) ||
+      String(a.event_start_date || "").localeCompare(String(b.event_start_date || "")) ||
       String(a.title || "").localeCompare(String(b.title || ""), "ja");
   });
 }
