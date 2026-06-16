@@ -10,7 +10,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="./style.css?v=20260525-2">
+  <link rel="stylesheet" href="./style.css?v=20260616-2">
 </head>
 <body>
   <main class="page">
@@ -33,11 +33,25 @@
 
       <div class="secondary-tabs" aria-label="大会操作切り替え">
         <button type="button" class="secondary-tab is-active" data-secondary-tab="tournament-create">新規入力</button>
+        <button type="button" class="secondary-tab" data-secondary-tab="tournament-followup">申込後フォロー</button>
         <button type="button" class="secondary-tab" data-secondary-tab="tournament-list">登録済み一覧</button>
       </div>
 
       <div class="subpanel is-active" data-subpanel="tournament-create">
         <div id="tournament-create-host" class="form-host"></div>
+      </div>
+
+      <div class="subpanel" data-subpanel="tournament-followup">
+        <div class="response-overview-panel" aria-live="polite">
+          <div class="response-panel-header response-panel-header-with-controls">
+            <div>
+              <h3>申込後フォロー</h3>
+              <p>抽選結果、参加者名簿、参加費支払いなど、申込後にメール確認が必要な大会です。</p>
+            </div>
+            <span id="tournament-followup-count" class="response-overview-count">0件</span>
+          </div>
+          <div id="tournament-followup-list" class="response-overview-list"></div>
+        </div>
       </div>
 
       <div class="subpanel" data-subpanel="tournament-list">
@@ -668,6 +682,6 @@
     </div>
   </form>
 
-  <script src="./script.js?v=20260616-1"></script>
+  <script src="./script.js?v=20260616-2"></script>
 </body>
 </html>
