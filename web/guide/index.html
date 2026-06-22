@@ -10,7 +10,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="./style.css?v=20260618-1">
+  <link rel="stylesheet" href="./style.css?v=20260622-1">
 </head>
 <body>
   <main class="page">
@@ -22,7 +22,7 @@
         正式なルール・マナーは全日本かるた協会の資料を確認してください。
       </p>
       <div class="hero-link-row">
-        <a class="hero-link-button" href="../entry/">大会申込に戻る</a>
+        <a id="back-to-entry-link" class="hero-link-button" href="../entry/">大会申込に戻る</a>
       </div>
     </section>
 
@@ -235,5 +235,41 @@
       </p>
     </section>
   </main>
+  <script>
+    (function() {
+      const pageToken = new URL(window.location.href).searchParams.get("page_token") || "";
+      const backLink = document.getElementById("back-to-entry-link");
+
+      if (!backLink) {
+        return;
+      }
+
+      if (pageToken) {
+        const url = new URL(backLink.getAttribute("href"), window.location.href);
+        url.searchParams.set("page_token", pageToken);
+        backLink.href = url.toString();
+      }
+
+      backLink.addEventListener("click", function(event) {
+        if (!document.referrer) {
+          return;
+        }
+
+        const referrerUrl = new URL(document.referrer);
+        const currentUrl = new URL(window.location.href);
+        const referrerPageToken = referrerUrl.searchParams.get("page_token") || "";
+        const cameFromEntry =
+          referrerUrl.origin === currentUrl.origin &&
+          /\/entry\/(?:index\.html)?$/.test(referrerUrl.pathname);
+
+        if (!cameFromEntry || referrerPageToken !== pageToken) {
+          return;
+        }
+
+        event.preventDefault();
+        window.history.back();
+      });
+    })();
+  </script>
 </body>
 </html>
