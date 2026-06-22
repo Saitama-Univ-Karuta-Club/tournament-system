@@ -484,8 +484,69 @@ textarea {
 
 .overview-list {
   display: grid;
-  gap: 12px;
+  gap: 18px;
   margin-top: 18px;
+}
+
+.overview-section {
+  display: grid;
+  gap: 12px;
+}
+
+.overview-section-title {
+  margin: 0;
+  font-size: 1rem;
+  color: var(--accent-dark);
+}
+
+.overview-card-list {
+  display: grid;
+  gap: 12px;
+}
+
+.overview-past-section {
+  border: 1px solid rgba(221, 210, 195, 0.9);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.62);
+}
+
+.overview-past-section summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  color: var(--accent-dark);
+  font-weight: 700;
+  cursor: pointer;
+  list-style: none;
+}
+
+.overview-past-section summary::-webkit-details-marker {
+  display: none;
+}
+
+.overview-past-section summary::after {
+  content: "開く";
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+
+.overview-past-section[open] summary::after {
+  content: "閉じる";
+}
+
+.overview-past-count {
+  margin-left: auto;
+  border-radius: 999px;
+  padding: 4px 9px;
+  background: var(--accent-soft);
+  color: var(--accent-dark);
+  font-size: 0.82rem;
+}
+
+.overview-card-list-past {
+  padding: 0 16px 16px;
 }
 
 .overview-card {
@@ -506,6 +567,34 @@ textarea {
   margin: 0;
   font-size: 1rem;
   color: var(--ink);
+}
+
+.overview-card-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.overview-status-badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 4px 9px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.overview-status-badge.is-open {
+  color: #14623e;
+  background: rgba(28, 124, 84, 0.14);
+}
+
+.overview-status-badge.is-closed {
+  color: #755019;
+  background: rgba(181, 125, 35, 0.16);
 }
 
 .overview-count {

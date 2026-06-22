@@ -54,6 +54,7 @@ const elements = {
   memberRequestView: document.getElementById("member-request-view"),
   openOverviewButton: document.getElementById("open-overview-button"),
   openAnnualScheduleButton: document.getElementById("open-annual-schedule-button"),
+  openGuideLink: document.getElementById("open-guide-link"),
   openMemberRequestLink: document.getElementById("open-member-request-link"),
   closeOverviewButton: document.getElementById("close-overview-button"),
   closeAnnualScheduleButton: document.getElementById("close-annual-schedule-button"),
@@ -128,6 +129,7 @@ async function init() {
   const url = new URL(window.location.href);
   const pageToken = url.searchParams.get("page_token") || "";
   state.pageToken = pageToken;
+  syncGuideLinkPageToken_(pageToken);
 
   if (!pageToken) {
     showStatus("page_token が指定されていません。", "error");
@@ -513,47 +515,126 @@ function renderTournamentOverview() {
   }
 
   const overviewItems = getGroupedTournamentOverviewItems_();
+  const upcomingItems = overviewItems
+    .filter(function(item) {
+      return !isPastTournament_(item);
+    })
+    .sort(compareUpcomingOverviewItems_);
+  const pastItems = overviewItems
+    .filter(function(item) {
+      return isPastTournament_(item) && Number(item.applicant_count || 0) > 0;
+    })
+    .sort(comparePastOverviewItems_);
 
-  if (!overviewItems.length) {
+  if (!upcomingItems.length && !pastItems.length) {
     elements.tournamentOverviewList.innerHTML =
       '<div class="empty-state">申込状況を表示できる大会はまだありません。</div>';
     return;
   }
 
-  elements.tournamentOverviewList.innerHTML = overviewItems
-    .map(function(item) {
-      const applicantGroups = Array.isArray(item.applicant_groups) ? item.applicant_groups : [];
-      const applicantBody = applicantGroups.length ?
-        applicantGroups.map(function(group) {
-          return (
-            '<div class="overview-grade-row">' +
-              '<div class="overview-grade-label">' +
-                escapeHtml(formatOverviewGradeLabel(group.grade)) +
-              "</div>" +
-              '<div class="overview-grade-names">' +
-                escapeHtml((group.names || []).join("、")) +
-              "</div>" +
-            "</div>"
-          );
-        }).join("") :
-        '<p class="overview-empty">まだ参加希望者はいません。</p>';
+  elements.tournamentOverviewList.innerHTML =
+    renderOverviewSection_("これからの大会", upcomingItems, {
+      emptyMessage: "これから開催される大会はありません。",
+      includeStatusBadge: true,
+    }) +
+    renderPastOverviewSection_(pastItems);
+}
 
+function renderOverviewSection_(title, items, options) {
+  const settings = options || {};
+
+  if (!items.length) {
+    return (
+      '<section class="overview-section">' +
+        '<h3 class="overview-section-title">' + escapeHtml(title) + "</h3>" +
+        '<div class="empty-state">' + escapeHtml(settings.emptyMessage || "表示できる大会はありません。") + "</div>" +
+      "</section>"
+    );
+  }
+
+  return (
+    '<section class="overview-section">' +
+      '<h3 class="overview-section-title">' + escapeHtml(title) + "</h3>" +
+      '<div class="overview-card-list">' +
+        items.map(function(item) {
+          return renderOverviewCard_(item, settings);
+        }).join("") +
+      "</div>" +
+    "</section>"
+  );
+}
+
+function renderPastOverviewSection_(items) {
+  if (!items.length) {
+    return "";
+  }
+
+  return (
+    '<details class="overview-past-section">' +
+      '<summary>' +
+        '<span>過去の大会</span>' +
+        '<span class="overview-past-count">' + escapeHtml(String(items.length)) + "件</span>" +
+      "</summary>" +
+      '<div class="overview-card-list overview-card-list-past">' +
+        items.map(function(item) {
+          return renderOverviewCard_(item, { includeStatusBadge: false });
+        }).join("") +
+      "</div>" +
+    "</details>"
+  );
+}
+
+function renderOverviewCard_(item, options) {
+  const applicantGroups = Array.isArray(item.applicant_groups) ? item.applicant_groups : [];
+  const applicantBody = applicantGroups.length ?
+    applicantGroups.map(function(group) {
       return (
-        '<section class="overview-card">' +
-          '<div class="overview-card-header">' +
-            '<h3>' + escapeHtml(item.title || "無題") + "</h3>" +
-            '<span class="overview-count">' + escapeHtml(String(item.applicant_count || 0)) + "名</span>" +
+        '<div class="overview-grade-row">' +
+          '<div class="overview-grade-label">' +
+            escapeHtml(formatOverviewGradeLabel(group.grade)) +
           "</div>" +
-          '<div class="overview-meta">' +
-            '<span>大会日: ' + escapeHtml(item.event_date_label || "-") + "</span>" +
-            '<span>締切: ' + escapeHtml(formatDateTime(item.internal_deadline)) + "</span>" +
-            '<span>開催級: ' + escapeHtml(item.grades || "級制限なし") + "</span>" +
+          '<div class="overview-grade-names">' +
+            escapeHtml((group.names || []).join("、")) +
           "</div>" +
-          '<div class="overview-body">' + applicantBody + "</div>" +
-        "</section>"
+        "</div>"
       );
-    })
-    .join("");
+    }).join("") :
+    '<p class="overview-empty">まだ参加希望者はいません。</p>';
+  const statusBadge = options && options.includeStatusBadge ?
+    renderOverviewStatusBadge_(item) :
+    "";
+
+  return (
+    '<section class="overview-card">' +
+      '<div class="overview-card-header">' +
+        '<div class="overview-card-title-row">' +
+          '<h3>' + escapeHtml(item.title || "無題") + "</h3>" +
+          statusBadge +
+        "</div>" +
+        '<span class="overview-count">' + escapeHtml(String(item.applicant_count || 0)) + "名</span>" +
+      "</div>" +
+      '<div class="overview-meta">' +
+        '<span>大会日: ' + escapeHtml(item.event_date_label || "-") + "</span>" +
+        '<span>締切: ' + escapeHtml(formatDateTime(item.internal_deadline)) + "</span>" +
+        '<span>開催級: ' + escapeHtml(item.grades || "級制限なし") + "</span>" +
+      "</div>" +
+      '<div class="overview-body">' + applicantBody + "</div>" +
+    "</section>"
+  );
+}
+
+function renderOverviewStatusBadge_(item) {
+  const status = String(item.status || "").trim();
+
+  if (status === "active") {
+    return '<span class="overview-status-badge is-open">申込受付中</span>';
+  }
+
+  if (status === "applied") {
+    return '<span class="overview-status-badge is-closed">申込締切済</span>';
+  }
+
+  return "";
 }
 
 function renderMemberOptions(members) {
@@ -787,6 +868,16 @@ function syncMemberRequestLinkVisibility_() {
   );
 }
 
+function syncGuideLinkPageToken_(pageToken) {
+  if (!elements.openGuideLink || !pageToken) {
+    return;
+  }
+
+  const url = new URL(elements.openGuideLink.getAttribute("href"), window.location.href);
+  url.searchParams.set("page_token", pageToken);
+  elements.openGuideLink.href = url.toString();
+}
+
 function getGroupedTournamentDisplayItem_(tournament) {
   const items = getGroupedPublicTournamentItems_();
   const groupKey = buildPublicTournamentGroupKey_(tournament);
@@ -806,6 +897,9 @@ function getGroupedTournamentOverviewItems_() {
       groups[groupKey] = {
         group_key: groupKey,
         title: buildTournamentDisplayTitleForGrouping_(item.title, []),
+        status: item.status || "",
+        event_start_date: item.event_start_date || "",
+        event_end_date: item.event_end_date || item.event_start_date || "",
         event_date_label: item.event_date_label || "",
         internal_deadline: item.internal_deadline || "",
         grades: [],
@@ -816,6 +910,10 @@ function getGroupedTournamentOverviewItems_() {
 
     groups[groupKey].grades = sortTournamentGrades_(
       groups[groupKey].grades.concat(normalizeTournamentGradeValues_(item.grades))
+    );
+    groups[groupKey].status = mergeOverviewStatus_(
+      groups[groupKey].status,
+      item.status
     );
     groups[groupKey].applicant_groups = mergeApplicantGroups_(
       groups[groupKey].applicant_groups,
@@ -845,6 +943,9 @@ function getGroupedPublicTournamentItems_() {
       groups[groupKey] = {
         group_key: groupKey,
         title: buildTournamentDisplayTitleForGrouping_(item.title, []),
+        status: item.status || "",
+        event_start_date: item.event_start_date || "",
+        event_end_date: item.event_end_date || item.event_start_date || "",
         event_date_label: item.event_date_label || "",
         internal_deadline: item.internal_deadline || "",
         grades: [],
@@ -854,6 +955,10 @@ function getGroupedPublicTournamentItems_() {
 
     groups[groupKey].grades = sortTournamentGrades_(
       groups[groupKey].grades.concat(normalizeTournamentGradeValues_(item.grades))
+    );
+    groups[groupKey].status = mergeOverviewStatus_(
+      groups[groupKey].status,
+      item.status
     );
   });
 
@@ -868,7 +973,8 @@ function getGroupedPublicTournamentItems_() {
 function buildPublicTournamentGroupKey_(item) {
   return [
     buildTournamentBaseTitleForGrouping_(item.title, item.grades),
-    String(item.event_date_label || "").trim(),
+    normalizeDateKey_(item.event_start_date) || String(item.event_date_label || "").trim(),
+    normalizeDateKey_(item.event_end_date || item.event_start_date),
     String(item.internal_deadline || "").trim(),
     String(item.drive_url || "").trim(),
   ].join("::");
@@ -975,6 +1081,100 @@ function mergeApplicantGroups_(leftGroups, rightGroups) {
       }),
     };
   });
+}
+
+function mergeOverviewStatus_(leftStatus, rightStatus) {
+  const left = String(leftStatus || "").trim();
+  const right = String(rightStatus || "").trim();
+
+  if (left === "active" || right === "active") {
+    return "active";
+  }
+
+  return left || right;
+}
+
+function isPastTournament_(item) {
+  const endDate = parseOverviewDateOnly_(
+    item && (item.event_end_date || item.event_start_date)
+  );
+
+  if (Number.isNaN(endDate.getTime())) {
+    return false;
+  }
+
+  endDate.setHours(23, 59, 59, 999);
+  return endDate < getTodayStart_();
+}
+
+function compareUpcomingOverviewItems_(a, b) {
+  return compareOverviewDateValues_(a.event_start_date, b.event_start_date) ||
+    compareOverviewDateValues_(a.internal_deadline, b.internal_deadline) ||
+    String(a.title || "").localeCompare(String(b.title || ""), "ja");
+}
+
+function comparePastOverviewItems_(a, b) {
+  return compareOverviewDateValues_(b.event_start_date, a.event_start_date) ||
+    compareOverviewDateValues_(b.internal_deadline, a.internal_deadline) ||
+    String(a.title || "").localeCompare(String(b.title || ""), "ja");
+}
+
+function compareOverviewDateValues_(leftValue, rightValue) {
+  const leftDate = parseDateValue_(leftValue);
+  const rightDate = parseDateValue_(rightValue);
+  const leftTime = leftDate.getTime();
+  const rightTime = rightDate.getTime();
+  const leftValid = !Number.isNaN(leftTime);
+  const rightValid = !Number.isNaN(rightTime);
+
+  if (leftValid && rightValid) {
+    return leftTime - rightTime;
+  }
+
+  if (leftValid) {
+    return -1;
+  }
+
+  if (rightValid) {
+    return 1;
+  }
+
+  return 0;
+}
+
+function normalizeDateKey_(value) {
+  const date = parseOverviewDateOnly_(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+
+  const year = String(date.getFullYear());
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return year + "-" + month + "-" + day;
+}
+
+function parseOverviewDateOnly_(value) {
+  const text = String(value || "").trim();
+
+  if (!text) {
+    return new Date("");
+  }
+
+  if (/^\d{4}-\d{2}-\d{2}/.test(text)) {
+    const datePart = text.slice(0, 10);
+    const parts = datePart.split("-");
+    return new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]));
+  }
+
+  return parseDateValue_(text);
+}
+
+function getTodayStart_() {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  return today;
 }
 
 function matchesVisibilityFilter(tournament) {

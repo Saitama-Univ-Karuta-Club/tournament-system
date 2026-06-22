@@ -899,6 +899,8 @@ function listPublicTournaments(pageToken) {
           tournament.event_start_date,
           tournament.event_end_date
         ),
+        event_start_date: tournament.event_start_date || "",
+        event_end_date: tournament.event_end_date || tournament.event_start_date || "",
         grades: tournament.grades,
         internal_deadline: tournament.internal_deadline,
         drive_url: tournament.drive_url,
@@ -1109,6 +1111,7 @@ function listTournamentResponseOverview() {
       title: tournament.title || "",
       status: tournament.status || "",
       event_start_date: tournament.event_start_date || "",
+      event_end_date: tournament.event_end_date || tournament.event_start_date || "",
       internal_deadline: tournament.internal_deadline || "",
       event_date_label: buildEventDateLabel(
         tournament.event_start_date,
@@ -1194,6 +1197,9 @@ function listPublicTournamentResponseOverview(pageToken) {
     return {
       tournament_id: tournament.tournament_id,
       title: tournament.title || "",
+      status: tournament.status || "",
+      event_start_date: tournament.event_start_date || "",
+      event_end_date: tournament.event_end_date || tournament.event_start_date || "",
       event_date_label: tournament.event_date_label || "",
       internal_deadline: tournament.internal_deadline || "",
       grades: tournament.grades || "",
