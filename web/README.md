@@ -24,3 +24,6 @@ Expected published paths:
 
 - `/entry/`
 - `/board-c7k2m9q4/`
+- `/manuals/`
+
+`manuals/` exposes PDF copies of the operation and developer manuals.

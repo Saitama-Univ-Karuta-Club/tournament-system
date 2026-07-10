@@ -1,0 +1,734 @@
+\documentclass[a4paper,11pt]{ltjsarticle}
+\usepackage[top=22mm,bottom=24mm,left=22mm,right=22mm]{geometry}
+\usepackage{luatexja-fontspec}
+\usepackage{fontspec}
+\usepackage[table]{xcolor}
+\usepackage{tabularx}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{fancyhdr}
+\usepackage{hyperref}
+\usepackage{fvextra}
+\usepackage{titlesec}
+\usepackage{tcolorbox}
+
+\setmainjfont{Hiragino Sans}
+\setsansjfont{Hiragino Sans}
+\setmainfont{Helvetica Neue}
+\setsansfont{Helvetica Neue}
+\setmonofont{Menlo}[Scale=0.88]
+
+\definecolor{ink}{HTML}{172033}
+\definecolor{muted}{HTML}{61708A}
+\definecolor{accent}{HTML}{1F5FBF}
+\definecolor{accentlight}{HTML}{E8F0FF}
+\definecolor{tablehead}{HTML}{EAF1FA}
+\definecolor{tableline}{HTML}{C9D4E3}
+\definecolor{soft}{HTML}{F6F8FB}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=accent,
+  urlcolor=accent,
+  pdftitle={大会申込みシステム 技術マニュアル},
+  pdfauthor={Saitama University Karuta Club}
+}
+
+\pagestyle{fancy}
+\setlength{\headheight}{28pt}
+\fancyhf{}
+\lhead{\small\textcolor{muted}{埼玉大学かるた会 大会申込みシステム}}
+\rhead{\small\textcolor{muted}{機能改修・保守担当者向け}}
+\cfoot{\small\textcolor{muted}{\thepage}}
+\renewcommand{\headrulewidth}{0.3pt}
+\renewcommand{\headrule}{\hbox to\headwidth{\color{tableline}\leaders\hrule height \headrulewidth\hfill}}
+
+\titleformat{\section}
+  {\Large\bfseries\color{ink}}
+  {\thesection}
+  {0.8em}
+  {}
+  [{\color{accent}\titlerule[0.8pt]}]
+\titleformat{\subsection}
+  {\large\bfseries\color{ink}}
+  {\thesubsection}
+  {0.6em}
+  {}
+\titleformat{\subsubsection}
+  {\normalsize\bfseries\color{ink}}
+  {\thesubsubsection}
+  {0.6em}
+  {}
+\titlespacing*{\section}{0pt}{2.0\baselineskip}{0.8\baselineskip}
+\titlespacing*{\subsection}{0pt}{1.3\baselineskip}{0.5\baselineskip}
+\titlespacing*{\subsubsection}{0pt}{1.0\baselineskip}{0.3\baselineskip}
+
+\setlist[itemize]{leftmargin=2.2em,itemsep=0.18em,topsep=0.35em}
+\setlist[enumerate]{leftmargin=2.4em,itemsep=0.18em,topsep=0.35em}
+\renewcommand{\labelitemi}{\textcolor{accent}{\small\raisebox{0.2ex}{\textbullet}}}
+
+\newcommand{\code}[1]{\tcbox[
+  on line,
+  boxsep=0.3mm,
+  left=0.7mm,
+  right=0.7mm,
+  top=0.2mm,
+  bottom=0.2mm,
+  arc=0.7mm,
+  colback=soft,
+  colframe=soft
+]{\ttfamily\small #1}}
+
+\DefineVerbatimEnvironment{manualcode}{Verbatim}{
+  breaklines=true,
+  breaksymbolleft={},
+  fontsize=\small,
+  frame=single,
+  framerule=0.3pt,
+  rulecolor=\color{tableline},
+  commandchars=\\\{\},
+}
+
+\AtBeginDocument{\color{ink}}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0.55\baselineskip}
+
+\begin{document}
+\begin{titlepage}
+\thispagestyle{empty}
+\vspace*{18mm}
+{\Huge\bfseries\color{ink} 大会申込みシステム\\[2mm] 技術マニュアル\par}
+\vspace{5mm}
+{\Large\color{accent} 機能改修・保守担当者向け\par}
+\vspace{7mm}
+{\large\color{muted} 埼玉大学かるた会\par}
+\vfill
+\begin{tcolorbox}[
+  colback=accentlight,
+  colframe=accentlight,
+  arc=2mm,
+  boxrule=0pt,
+  left=5mm,
+  right=5mm,
+  top=4mm,
+  bottom=4mm,
+]
+このPDFは、\texttt{docs/manuals} にあるMarkdown原稿からLuaLaTeXで生成しています。秘密情報や本番URLそのものは含めない方針です。
+\end{tcolorbox}
+\vspace*{12mm}
+{\small\color{muted} Saitama University Karuta Club Tournament System\par}
+\end{titlepage}
+
+\tableofcontents
+\clearpage
+
+
+この文書は、大会申込みシステムを改修・保守する技術担当者向けのマニュアルです。
+
+基本操作だけを行う申込担当者は、先に \code{basic-operation-manual.md} を読んでください。この文書では、GitHub、Git、Google Apps Script、GitHub Pages、Google Sheets、LINE Messaging API の基礎知識があることを前提にします。
+
+\section{技術担当者に求める前提知識}
+
+機能改修を担当する人は、少なくとも以下を理解していることが望ましいです。
+
+\begin{itemize}
+\item GitHubアカウントを持っている
+\item Gitの基本操作ができる
+\item HTML、CSS、JavaScriptを読める
+\item 静的WebサイトとWeb APIの関係を理解している
+\item Google Apps Script のエディタでコード更新とデプロイができる
+\item Google Sheets の列名がAPIの契約になっていることを理解している
+\item LINE Messaging API のチャネル設定を確認できる
+\end{itemize}
+すべてを一人で完璧に理解している必要はありませんが、GitHub Pages と Apps Script の両方に触る変更では、Webアプリの基本を知っている人が作業してください。
+
+\section{システム構成}
+
+このシステムは、静的フロントエンドと Google Apps Script バックエンドで構成されています。
+
+\begin{manualcode}
+GitHub Pages
+  web/
+    entry/              参加者向け回答ページ
+    board-c7k2m9q4/     管理画面
+    guide/              参加者向け案内ページ
+
+Google Apps Script
+  gas/Code.gs           API、Sheets連携、LINE通知、Calendar同期
+
+Google Sheets
+  Tournaments           大会情報
+  Members               メンバー情報
+  Responses             参加回答
+  EntryPages            参加ページtoken
+  Managers              申込担当者
+  NotificationLogs      通知履歴
+
+External Services
+  Google Drive          要項ファイル保存先
+  Google Calendar       大会日程・締切予定
+  LINE Messaging API    グループ通知・担当者通知
+\end{manualcode}
+正本データは Google Sheets です。GitHub Pages は画面を配信するだけで、データ保存は行いません。
+
+\section{リポジトリ構成}
+
+主なディレクトリは以下です。
+
+\rowcolors{2}{white}{soft}
+\renewcommand{\arraystretch}{1.25}
+\begin{tabularx}{\linewidth}{>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}X}
+\toprule
+\rowcolor{tablehead}
+\textbf{パス} & \textbf{役割} \\ \midrule
+\code{docs/} & 仕様書、セットアップメモ、引き継ぎ文書 \\
+\code{gas/Code.gs} & Google Apps Script の本体 \\
+\code{gas/SETUP.md} & GAS設定メモ \\
+\code{web/entry/} & 参加者向けページ \\
+\code{web/board-c7k2m9q4/} & 管理画面 \\
+\code{web/guide/} & 参加者向け案内 \\
+\code{web/README.md} & Web公開方針 \\
+\bottomrule
+\end{tabularx}
+
+現在はGASが単一ファイル構成です。Apps Script側へ反映するときは、\code{gas/Code.gs} の内容をApps Scriptプロジェクトへコピーし、デプロイを更新します。
+
+\section{公開URLと秘密情報の扱い}
+
+本番URLやトークンは、GitHub上の公開文書に書かないでください。
+
+特に以下はリポジトリへコミットしないでください。
+
+\begin{itemize}
+\item 管理者用トークン
+\item Apps Script の本番デプロイURL
+\item \code{LINE\textbackslash{}\_CHANNEL\textbackslash{}\_ACCESS\textbackslash{}\_TOKEN}
+\item Google Sheets の編集権限付きURL
+\item 個人LINE userIdの一覧
+\item サークル外へ出してはいけないDrive URL
+\end{itemize}
+現在、フロントエンドの \code{script.js} には Apps Script Web App URL が直接書かれています。本番URLを公開リポジトリに出したくない場合は、公開方針を再検討してください。
+
+\section{フロントエンド}
+
+\subsection{参加者向けページ}
+
+対象ファイル:
+
+\begin{itemize}
+\item \code{web/entry/index.html}
+\item \code{web/entry/style.css}
+\item \code{web/entry/script.js}
+\end{itemize}
+主な機能:
+
+\begin{itemize}
+\item URLの \code{page\textbackslash{}\_token} を読む
+\item \code{list\textbackslash{}\_public\textbackslash{}\_tournaments} で大会、メンバー、ページ設定を取得する
+\item 名前選択後、メンバーの級に合う大会を表示する
+\item \code{未回答 / 回答済み / 出場予定 / 全て} で絞り込む
+\item \code{upsert\textbackslash{}\_response} で回答を保存する
+\item 名前がない場合、\code{request\textbackslash{}\_member\textbackslash{}\_registration} で追加申請する
+\item 年間大会予定表と要項フォルダへのリンクを表示する
+\end{itemize}
+\subsection{管理画面}
+
+対象ファイル:
+
+\begin{itemize}
+\item \code{web/board-c7k2m9q4/index.html}
+\item \code{web/board-c7k2m9q4/style.css}
+\item \code{web/board-c7k2m9q4/script.js}
+\end{itemize}
+主な機能:
+
+\begin{itemize}
+\item 管理者用トークンで認証する
+\item \code{admin\textbackslash{}\_bootstrap} で大会、メンバー、担当者、設定をまとめて取得する
+\item 大会を新規登録・編集する
+\item 複数級大会を \code{upsert\textbackslash{}\_tournament\textbackslash{}\_batch} で級ごとに保存する
+\item 要項ファイルを \code{upload\textbackslash{}\_brief\textbackslash{}\_file} でGoogle Driveへ保存する
+\item メンバーを追加・編集する
+\item メンバー追加申請を承認・却下する
+\item LINE文面と通知時刻を編集する
+\item 定期トリガーを再作成する
+\item 手動でLINE更新通知やテスト通知を送る
+\end{itemize}
+\section{Google Apps Script API}
+
+\code{gas/Code.gs} の \code{doGet} と \code{doPost} がAPI入口です。
+
+\subsection{GET}
+
+\rowcolors{2}{white}{soft}
+\renewcommand{\arraystretch}{1.25}
+\begin{tabularx}{\linewidth}{>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}X}
+\toprule
+\rowcolor{tablehead}
+\textbf{action} & \textbf{認証} & \textbf{用途} \\ \midrule
+\code{list\textbackslash{}\_public\textbackslash{}\_tournaments} & \code{page\textbackslash{}\_token} & 参加者向けページの初期表示 \\
+\code{list\textbackslash{}\_member\textbackslash{}\_responses} & \code{page\textbackslash{}\_token} & 選択メンバーの回答取得 \\
+\code{list\textbackslash{}\_members} & なし & 公開メンバー一覧取得 \\
+\code{admin\textbackslash{}\_bootstrap} & \code{admin\textbackslash{}\_token} & 管理画面の初期表示 \\
+\code{list\textbackslash{}\_tournaments} & \code{admin\textbackslash{}\_token} & 管理者向け大会一覧 \\
+\code{list\textbackslash{}\_admin\textbackslash{}\_members} & \code{admin\textbackslash{}\_token} & 管理者向けメンバー一覧 \\
+\code{list\textbackslash{}\_managers} & \code{admin\textbackslash{}\_token} & 申込担当者一覧 \\
+\code{list\textbackslash{}\_tournament\textbackslash{}\_responses} & \code{admin\textbackslash{}\_token} & 大会ごとの回答取得 \\
+\code{list\textbackslash{}\_tournament\textbackslash{}\_response\textbackslash{}\_overview} & \code{admin\textbackslash{}\_token} & 回答概要取得 \\
+\bottomrule
+\end{tabularx}
+
+\subsection{POST}
+
+\rowcolors{2}{white}{soft}
+\renewcommand{\arraystretch}{1.25}
+\begin{tabularx}{\linewidth}{>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}X}
+\toprule
+\rowcolor{tablehead}
+\textbf{action} & \textbf{認証} & \textbf{用途} \\ \midrule
+\code{upsert\textbackslash{}\_tournament} & \code{admin\textbackslash{}\_token} & 単一大会の作成・更新 \\
+\code{upsert\textbackslash{}\_tournament\textbackslash{}\_batch} & \code{admin\textbackslash{}\_token} & 複数級大会の作成・更新 \\
+\code{update\textbackslash{}\_tournament\textbackslash{}\_status} & \code{admin\textbackslash{}\_token} & 大会ステータス更新 \\
+\code{upsert\textbackslash{}\_response} & \code{page\textbackslash{}\_token} & 参加回答の保存 \\
+\code{upsert\textbackslash{}\_member} & \code{admin\textbackslash{}\_token} & メンバー作成・更新 \\
+\code{request\textbackslash{}\_member\textbackslash{}\_registration} & なし & メンバー追加申請 \\
+\code{upload\textbackslash{}\_brief\textbackslash{}\_file} & \code{admin\textbackslash{}\_token} & 要項ファイルアップロード \\
+\code{send\textbackslash{}\_announcement} & \code{admin\textbackslash{}\_token} & 手動の大会情報通知 \\
+\code{send\textbackslash{}\_scheduled\textbackslash{}\_daily\textbackslash{}\_announcements} & \code{admin\textbackslash{}\_token} & 未通知大会の一斉通知 \\
+\code{send\textbackslash{}\_group\textbackslash{}\_reminder} & \code{admin\textbackslash{}\_token} & グループ向けリマインド \\
+\code{send\textbackslash{}\_manager\textbackslash{}\_reminder} & \code{admin\textbackslash{}\_token} & 担当者向けリマインド \\
+\code{send\textbackslash{}\_line\textbackslash{}\_template\textbackslash{}\_test} & \code{admin\textbackslash{}\_token} & LINE文面テスト送信 \\
+\code{update\textbackslash{}\_admin\textbackslash{}\_settings} & \code{admin\textbackslash{}\_token} & Script Properties更新 \\
+\code{install\textbackslash{}\_scheduled\textbackslash{}\_triggers} & \code{admin\textbackslash{}\_token} & 定期トリガー再作成 \\
+\bottomrule
+\end{tabularx}
+
+LINE Webhook からのPOSTは \code{body.events} を持つため、通常APIとは別に \code{handleLineWebhook} へ渡されます。
+
+\section{Google Sheets}
+
+Google Sheets の列名はコードと強く結びついています。列名を変える場合は、必ず \code{Code.gs} とフロントエンドの両方を確認してください。
+
+\subsection{Tournaments}
+
+大会情報の正本です。
+
+重要な列:
+
+\begin{itemize}
+\item \code{tournament\textbackslash{}\_id}
+\item \code{title}
+\item \code{event\textbackslash{}\_start\textbackslash{}\_date}
+\item \code{event\textbackslash{}\_end\textbackslash{}\_date}
+\item \code{grades}
+\item \code{tournament\textbackslash{}\_type}
+\item \code{is\textbackslash{}\_official}
+\item \code{venue}
+\item \code{true\textbackslash{}\_deadline}
+\item \code{internal\textbackslash{}\_deadline}
+\item \code{drive\textbackslash{}\_url}
+\item \code{entry\textbackslash{}\_page\textbackslash{}\_token}
+\item \code{entry\textbackslash{}\_url}
+\item \code{manager\textbackslash{}\_name}
+\item \code{manager\textbackslash{}\_line\textbackslash{}\_user\textbackslash{}\_id}
+\item \code{status}
+\item \code{calendar\textbackslash{}\_event\textbackslash{}\_id\textbackslash{}\_event}
+\item \code{calendar\textbackslash{}\_event\textbackslash{}\_id\textbackslash{}\_internal\textbackslash{}\_deadline}
+\item \code{calendar\textbackslash{}\_event\textbackslash{}\_id\textbackslash{}\_true\textbackslash{}\_deadline}
+\item \code{created\textbackslash{}\_at}
+\item \code{updated\textbackslash{}\_at}
+\item \code{applied\textbackslash{}\_at}
+\item \code{deleted\textbackslash{}\_at}
+\end{itemize}
+\code{Code.gs} は最低限 \code{tournament\textbackslash{}\_type} と \code{applied\textbackslash{}\_at} が存在することを確認します。ただし、実運用では仕様書にある列一式を維持してください。
+
+\subsection{Members}
+
+メンバー情報です。
+
+重要な列:
+
+\begin{itemize}
+\item \code{member\textbackslash{}\_id}
+\item \code{last\textbackslash{}\_name}
+\item \code{last\textbackslash{}\_name\textbackslash{}\_kana}
+\item \code{first\textbackslash{}\_name}
+\item \code{first\textbackslash{}\_name\textbackslash{}\_kana}
+\item \code{rank}
+\item \code{grade}
+\item \code{display\textbackslash{}\_name}
+\item \code{display\textbackslash{}\_name\textbackslash{}\_kana}
+\item \code{normalized\textbackslash{}\_name}
+\item \code{normalized\textbackslash{}\_kana}
+\item \code{status}
+\item \code{created\textbackslash{}\_at}
+\item \code{updated\textbackslash{}\_at}
+\end{itemize}
+\code{status} は \code{active}、\code{inactive}、\code{pending}、\code{rejected} を使います。参加者ページに出すのは基本的に \code{active} のメンバーです。
+
+\subsection{Responses}
+
+参加回答です。
+
+重要な列:
+
+\begin{itemize}
+\item \code{response\textbackslash{}\_id}
+\item \code{tournament\textbackslash{}\_id}
+\item \code{member\textbackslash{}\_name}
+\item \code{response}
+\item \code{comment}
+\item \code{created\textbackslash{}\_at}
+\item \code{updated\textbackslash{}\_at}
+\end{itemize}
+同じ \code{tournament\textbackslash{}\_id} と \code{member\textbackslash{}\_name} の回答は上書きされます。
+
+\subsection{EntryPages}
+
+参加者向けページのtokenと表示文言です。
+
+重要な列:
+
+\begin{itemize}
+\item \code{page\textbackslash{}\_token}
+\item \code{title}
+\item \code{description}
+\item \code{active\textbackslash{}\_from}
+\item \code{active\textbackslash{}\_until}
+\item \code{status}
+\item \code{created\textbackslash{}\_at}
+\item \code{updated\textbackslash{}\_at}
+\end{itemize}
+\code{list\textbackslash{}\_public\textbackslash{}\_tournaments} では、\code{page\textbackslash{}\_token} が一致し、\code{status} が \code{active} のページだけが有効です。
+
+\subsection{Managers}
+
+申込担当者のLINE通知先です。
+
+重要な列:
+
+\begin{itemize}
+\item \code{manager\textbackslash{}\_name}
+\item \code{line\textbackslash{}\_user\textbackslash{}\_id}
+\item \code{display\textbackslash{}\_name}
+\item \code{status}
+\item \code{created\textbackslash{}\_at}
+\item \code{updated\textbackslash{}\_at}
+\end{itemize}
+LINEで \code{/担当者登録} を実行すると、\code{line\textbackslash{}\_user\textbackslash{}\_id} を取得してこのシートに登録します。
+
+\subsection{NotificationLogs}
+
+通知済み判定に使います。
+
+重要な列:
+
+\begin{itemize}
+\item \code{log\textbackslash{}\_id}
+\item \code{tournament\textbackslash{}\_id}
+\item \code{notification\textbackslash{}\_type}
+\item \code{sent\textbackslash{}\_to\textbackslash{}\_type}
+\item \code{sent\textbackslash{}\_to\textbackslash{}\_id}
+\item \code{sent\textbackslash{}\_at}
+\item \code{message}
+\end{itemize}
+二重通知防止はこのシートに依存します。手で削除すると再通知される場合があります。
+
+\section{Script Properties}
+
+Apps Script の Script Properties には、外部サービス連携や秘密情報を保存します。
+
+主なキー:
+
+\rowcolors{2}{white}{soft}
+\renewcommand{\arraystretch}{1.25}
+\begin{tabularx}{\linewidth}{>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}X}
+\toprule
+\rowcolor{tablehead}
+\textbf{キー} & \textbf{用途} \\ \midrule
+\code{SHEET\textbackslash{}\_ID} & 運用用Google SheetsのID \\
+\code{ADMIN\textbackslash{}\_CONSOLE\textbackslash{}\_TOKEN} & 管理画面/API用トークン \\
+\code{LINE\textbackslash{}\_CHANNEL\textbackslash{}\_ACCESS\textbackslash{}\_TOKEN} & LINE Messaging APIのアクセストークン \\
+\code{LINE\textbackslash{}\_GROUP\textbackslash{}\_ID} & 本番通知先LINE groupId \\
+\code{LINE\textbackslash{}\_TEST\textbackslash{}\_GROUP\textbackslash{}\_ID} & テスト通知先LINE groupId \\
+\code{DRIVE\textbackslash{}\_FOLDER\textbackslash{}\_ID} & 要項保存用Google DriveフォルダID \\
+\code{CALENDAR\textbackslash{}\_ID} & 同期先Google Calendar ID \\
+\code{WEB\textbackslash{}\_BASE\textbackslash{}\_URL} & GitHub Pagesの基準URL \\
+\code{ADMIN\textbackslash{}\_PAGE\textbackslash{}\_URL} & 管理画面URL \\
+\code{DEFAULT\textbackslash{}\_ENTRY\textbackslash{}\_PAGE\textbackslash{}\_TOKEN} & 既定の参加ページtoken \\
+\code{ANNUAL\textbackslash{}\_SCHEDULE\textbackslash{}\_PREVIEW\textbackslash{}\_URL} & 年間予定表プレビューURL \\
+\code{ANNUAL\textbackslash{}\_SCHEDULE\textbackslash{}\_VIEW\textbackslash{}\_URL} & 年間予定表公開URL \\
+\code{DAILY\textbackslash{}\_ANNOUNCEMENT\textbackslash{}\_TIME} & 大会情報通知時刻 \\
+\code{TOURNAMENT\textbackslash{}\_REMINDER\textbackslash{}\_TIME} & 締切リマインド時刻 \\
+\code{PENDING\textbackslash{}\_MEMBER\textbackslash{}\_SUMMARY\textbackslash{}\_TIME} & 未処理メンバー申請まとめ通知時刻 \\
+\code{NIGHTLY\textbackslash{}\_AUTOMATION\textbackslash{}\_TIME} & 夜間自動処理時刻 \\
+\bottomrule
+\end{tabularx}
+
+LINE文面は \code{LINE\textbackslash{}\_TEMPLATE\textbackslash{}\_...} 系のプロパティとして保存されます。管理画面の設定タブから編集できます。
+
+\section{LINE Bot}
+
+\code{handleLineWebhook} は以下のテキストコマンドを処理します。
+
+\rowcolors{2}{white}{soft}
+\renewcommand{\arraystretch}{1.25}
+\begin{tabularx}{\linewidth}{>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}X}
+\toprule
+\rowcolor{tablehead}
+\textbf{コマンド} & \textbf{処理} \\ \midrule
+\code{/groupid} & 実行されたLINEグループの \code{groupId} を \code{LINE\textbackslash{}\_GROUP\textbackslash{}\_ID} に保存 \\
+\code{/testgroupid} & 実行されたLINEグループの \code{groupId} を \code{LINE\textbackslash{}\_TEST\textbackslash{}\_GROUP\textbackslash{}\_ID} に保存 \\
+\code{/担当者登録} & 実行者のLINE userIdを \code{Managers} に保存 \\
+\bottomrule
+\end{tabularx}
+
+LINE通知は主に以下の関数から送られます。
+
+\begin{itemize}
+\item \code{sendScheduledDailyAnnouncements}
+\item \code{sendScheduledTournamentReminders}
+\item \code{sendScheduledAppliedNotifications}
+\item \code{sendPendingMemberRegistrationSummary}
+\item \code{sendAnnouncement}
+\item \code{sendLineTemplateTest\textbackslash{}\_}
+\end{itemize}
+送信後は \code{NotificationLogs} に記録されます。
+
+\section{定期トリガー}
+
+管理画面の \code{設定}、\code{管理者操作}、\code{トリガーを再作成} から以下のトリガーを作ります。
+
+\rowcolors{2}{white}{soft}
+\renewcommand{\arraystretch}{1.25}
+\begin{tabularx}{\linewidth}{>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}X}
+\toprule
+\rowcolor{tablehead}
+\textbf{処理} & \textbf{関数} & \textbf{既定時刻} \\ \midrule
+大会情報更新通知 & \code{sendScheduledDailyAnnouncements} & \code{17:00} \\
+締切リマインド & \code{sendScheduledTournamentReminders} & \code{10:00} \\
+メンバー申請まとめ通知 & \code{sendPendingMemberRegistrationSummary} & \code{07:00} \\
+夜間自動処理 & \code{runNightlyTournamentAutomation} & \code{23:59} \\
+\bottomrule
+\end{tabularx}
+
+通知時刻を変更した後は、トリガーを再作成してください。Script Properties を変えただけでは、既存トリガーの時刻は変わりません。
+
+\section{Google Calendar同期}
+
+大会保存時に、以下3種類の予定を同期します。
+
+\begin{itemize}
+\item 大会日予定
+\item サークル内締切予定
+\item 主催締切予定
+\end{itemize}
+関連する列:
+
+\begin{itemize}
+\item \code{calendar\textbackslash{}\_event\textbackslash{}\_id\textbackslash{}\_event}
+\item \code{calendar\textbackslash{}\_event\textbackslash{}\_id\textbackslash{}\_internal\textbackslash{}\_deadline}
+\item \code{calendar\textbackslash{}\_event\textbackslash{}\_id\textbackslash{}\_true\textbackslash{}\_deadline}
+\end{itemize}
+これらのevent idがある場合は既存予定を更新し、ない場合は新規作成します。\code{CALENDAR\textbackslash{}\_ID} が未設定、またはカレンダー権限が不足していると同期に失敗します。
+
+\section{Google Drive要項アップロード}
+
+管理画面から要項ファイルをアップロードすると、\code{upload\textbackslash{}\_brief\textbackslash{}\_file} が \code{DRIVE\textbackslash{}\_FOLDER\textbackslash{}\_ID} のフォルダへ保存します。
+
+ファイル名は大会情報から生成されます。同名ファイルがある場合は既存ファイルを再利用する処理があります。
+
+Drive連携で失敗する場合は以下を確認してください。
+
+\begin{itemize}
+\item \code{DRIVE\textbackslash{}\_FOLDER\textbackslash{}\_ID} が設定されている
+\item Apps Script の実行アカウントがフォルダに書き込める
+\item ファイルサイズがApps Scriptで扱える範囲に収まっている
+\end{itemize}
+\section{デプロイ手順}
+
+\subsection{Web画面}
+
+\code{web/} 配下は GitHub Pages で公開します。
+
+基本手順:
+
+\begin{enumerate}
+\item ローカルで \code{web/entry/} または \code{web/board-c7k2m9q4/} を修正する
+\item ブラウザで表示と操作を確認する
+\item 変更をコミットする
+\item GitHubへpushする
+\item GitHub ActionsとGitHub Pagesの反映を確認する
+\end{enumerate}
+リポジトリ設定やPages設定を変える場合は、サークルのGitHub Organization権限が必要です。
+
+\subsection{Google Apps Script}
+
+基本手順:
+
+\begin{enumerate}
+\item \code{gas/Code.gs} を修正する
+\item Apps Scriptプロジェクトへ反映する
+\item 保存する
+\item Webアプリのデプロイを更新する
+\item 管理画面またはテストURLでAPI動作を確認する
+\item 必要なら定期トリガーを再作成する
+\end{enumerate}
+Apps Script のデプロイ更新を忘れると、GitHub上のコードを直しても本番APIには反映されません。
+
+\section{改修時の確認観点}
+
+フロントエンドだけの変更でも、以下を確認してください。
+
+\begin{itemize}
+\item 参加者ページが読み込める
+\item 名前選択後に大会が表示される
+\item 回答を送信できる
+\item メンバー追加申請が送信できる
+\item 管理画面へ認証できる
+\item 大会を保存できる
+\item メンバーを保存できる
+\item 設定を読み込める
+\end{itemize}
+GASを変更した場合は、追加で以下を確認してください。
+
+\begin{itemize}
+\item \code{admin\textbackslash{}\_bootstrap} が成功する
+\item \code{list\textbackslash{}\_public\textbackslash{}\_tournaments} が成功する
+\item \code{upsert\textbackslash{}\_tournament\textbackslash{}\_batch} が成功する
+\item \code{upsert\textbackslash{}\_response} が成功する
+\item \code{NotificationLogs} に通知履歴が残る
+\item LINEテスト送信が成功する
+\item Calendar同期が成功する
+\end{itemize}
+\section{よくある改修パターン}
+
+\subsection{入力項目を追加する}
+
+\begin{enumerate}
+\item Google Sheets に列を追加する
+\item 管理画面HTMLへ入力欄を追加する
+\item 管理画面JSのpayloadへ項目を追加する
+\item \code{Code.gs} の保存処理で値を保持できるか確認する
+\item 必要なら参加者画面の表示に追加する
+\item 既存データが空欄でも動くことを確認する
+\end{enumerate}
+列名を変えるより、列を追加するほうが安全です。
+
+\subsection{LINE文面を変える}
+
+軽微な文面変更は管理画面の \code{設定}、\code{LINE配信文面} から行います。
+
+コード側のテンプレート初期値を変える場合は、\code{getDefaultLineMessageTemplates\textbackslash{}\_} を修正します。ただし、Script Properties に既に保存済みの文面がある場合は、そちらが優先されます。
+
+\subsection{新しい通知を追加する}
+
+\begin{enumerate}
+\item 通知対象の抽出関数を作る
+\item メッセージ生成関数を作る
+\item LINE送信関数を作る
+\item \code{NotificationLogs} に新しい \code{notification\textbackslash{}\_type} で記録する
+\item 二重送信防止を実装する
+\item 必要なら定期トリガーへ組み込む
+\item 管理画面に手動実行や設定を追加する
+\end{enumerate}
+通知系は二重送信が事故になりやすいため、必ず \code{NotificationLogs} を使ってください。
+
+\subsection{大会ステータスを追加する}
+
+\begin{enumerate}
+\item \code{validateTournamentStatusForUpdate\textbackslash{}\_} の許可値を増やす
+\item 管理画面の \code{<select>} に選択肢を追加する
+\item 一覧フィルタと表示ラベルを見直す
+\item 通知対象判定に影響しないか確認する
+\item Calendar同期でどう扱うか決める
+\end{enumerate}
+\section{運用上の設計判断}
+
+このシステムは、厳密なログイン認証ではなく、長いURLと管理者用トークンで簡易的に守っています。
+
+そのため、以下の運用を守ってください。
+
+\begin{itemize}
+\item 管理画面URLを公開しない
+\item 管理者用トークンをGitに入れない
+\item 参加者向けURLもサークル内だけで共有する
+\item GitHub上のREADMEやdocsに本番URLを書かない
+\item 個人情報を増やす改修は慎重に判断する
+\end{itemize}
+正式申込に必要な電話番号、メールアドレス、会員番号などは、このシステムでは扱わない方針です。
+
+\section{トラブルシュート}
+
+\subsection{APIが \code{Unknown action} を返す}
+
+\begin{itemize}
+\item フロントエンドの \code{action} 名と \code{Code.gs} の分岐が一致しているか確認する
+\item Apps Scriptのデプロイが最新か確認する
+\end{itemize}
+\subsection{管理画面で認証できない}
+
+\begin{itemize}
+\item \code{ADMIN\textbackslash{}\_CONSOLE\textbackslash{}\_TOKEN} が設定されているか確認する
+\item 入力したトークンとScript Propertiesの値が一致しているか確認する
+\item 本番とテストのApps Script URLを取り違えていないか確認する
+\end{itemize}
+\subsection{参加ページで大会が出ない}
+
+\begin{itemize}
+\item \code{EntryPages} に該当 \code{page\textbackslash{}\_token} があり、\code{status} が \code{active} か確認する
+\item \code{Tournaments} の \code{entry\textbackslash{}\_page\textbackslash{}\_token} が一致しているか確認する
+\item 大会の \code{status} が \code{active} か確認する
+\item メンバーの \code{grade} と大会の \code{grades} が合っているか確認する
+\end{itemize}
+\subsection{LINE通知が送れない}
+
+\begin{itemize}
+\item \code{LINE\textbackslash{}\_CHANNEL\textbackslash{}\_ACCESS\textbackslash{}\_TOKEN} が有効か確認する
+\item Botが対象LINEグループに参加しているか確認する
+\item \code{LINE\textbackslash{}\_GROUP\textbackslash{}\_ID} または \code{LINE\textbackslash{}\_TEST\textbackslash{}\_GROUP\textbackslash{}\_ID} が設定されているか確認する
+\item LINE DevelopersのWebhook URLが最新のApps Script URLか確認する
+\end{itemize}
+\subsection{カレンダー同期が失敗する}
+
+\begin{itemize}
+\item \code{CALENDAR\textbackslash{}\_ID} が正しいか確認する
+\item Apps Scriptの実行アカウントにカレンダー編集権限があるか確認する
+\item \code{calendar\textbackslash{}\_event\textbackslash{}\_id\textbackslash{}\_...} の列が存在するか確認する
+\end{itemize}
+\subsection{シート列エラーが出る}
+
+\begin{itemize}
+\item エラーメッセージに出た列名をGoogle Sheetsへ追加する
+\item 列名のスペースや全角文字混入を確認する
+\item 既存列をリネームしていないか確認する
+\end{itemize}
+\section{引き継ぎチェックリスト}
+
+技術担当者を交代するときは、以下を確認してください。
+
+\begin{itemize}
+\item GitHub Organization またはリポジトリへのアクセス権がある
+\item GitHub Pages の公開設定を確認できる
+\item Apps Script プロジェクトを開ける
+\item Apps Script のデプロイを更新できる
+\item Script Properties を確認・編集できる
+\item 運用Google Sheetsを開ける
+\item Driveフォルダを確認できる
+\item Google Calendarを確認できる
+\item LINE Developers のチャネル設定を確認できる
+\item テスト用LINEグループがある
+\item 管理画面URL、参加者向けURL、管理者用トークンの受け渡し方法が決まっている
+\end{itemize}
+\section{関連ドキュメント}
+
+\begin{itemize}
+\item \code{docs/line\textbackslash{}\_bot\textbackslash{}\_tournament\textbackslash{}\_system\textbackslash{}\_spec.md}: 詳細仕様
+\item \code{docs/setup.md}: 初期セットアップメモ
+\item \code{gas/SETUP.md}: GAS設定メモ
+\item \code{web/README.md}: Web公開方針
+\item \code{docs/manuals/basic-operation-manual.md}: 日常運用者向けマニュアル
+\end{itemize}
+
+\end{document}

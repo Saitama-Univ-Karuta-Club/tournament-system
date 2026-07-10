@@ -1,0 +1,632 @@
+\documentclass[a4paper,11pt]{ltjsarticle}
+\usepackage[top=22mm,bottom=24mm,left=22mm,right=22mm]{geometry}
+\usepackage{luatexja-fontspec}
+\usepackage{fontspec}
+\usepackage[table]{xcolor}
+\usepackage{tabularx}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{fancyhdr}
+\usepackage{hyperref}
+\usepackage{fvextra}
+\usepackage{titlesec}
+\usepackage{tcolorbox}
+
+\setmainjfont{Hiragino Sans}
+\setsansjfont{Hiragino Sans}
+\setmainfont{Helvetica Neue}
+\setsansfont{Helvetica Neue}
+\setmonofont{Menlo}[Scale=0.88]
+
+\definecolor{ink}{HTML}{172033}
+\definecolor{muted}{HTML}{61708A}
+\definecolor{accent}{HTML}{1F5FBF}
+\definecolor{accentlight}{HTML}{E8F0FF}
+\definecolor{tablehead}{HTML}{EAF1FA}
+\definecolor{tableline}{HTML}{C9D4E3}
+\definecolor{soft}{HTML}{F6F8FB}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=accent,
+  urlcolor=accent,
+  pdftitle={大会申込みシステム 基本操作マニュアル},
+  pdfauthor={Saitama University Karuta Club}
+}
+
+\pagestyle{fancy}
+\setlength{\headheight}{28pt}
+\fancyhf{}
+\lhead{\small\textcolor{muted}{埼玉大学かるた会 大会申込みシステム}}
+\rhead{\small\textcolor{muted}{日常運用担当者向け}}
+\cfoot{\small\textcolor{muted}{\thepage}}
+\renewcommand{\headrulewidth}{0.3pt}
+\renewcommand{\headrule}{\hbox to\headwidth{\color{tableline}\leaders\hrule height \headrulewidth\hfill}}
+
+\titleformat{\section}
+  {\Large\bfseries\color{ink}}
+  {\thesection}
+  {0.8em}
+  {}
+  [{\color{accent}\titlerule[0.8pt]}]
+\titleformat{\subsection}
+  {\large\bfseries\color{ink}}
+  {\thesubsection}
+  {0.6em}
+  {}
+\titleformat{\subsubsection}
+  {\normalsize\bfseries\color{ink}}
+  {\thesubsubsection}
+  {0.6em}
+  {}
+\titlespacing*{\section}{0pt}{2.0\baselineskip}{0.8\baselineskip}
+\titlespacing*{\subsection}{0pt}{1.3\baselineskip}{0.5\baselineskip}
+\titlespacing*{\subsubsection}{0pt}{1.0\baselineskip}{0.3\baselineskip}
+
+\setlist[itemize]{leftmargin=2.2em,itemsep=0.18em,topsep=0.35em}
+\setlist[enumerate]{leftmargin=2.4em,itemsep=0.18em,topsep=0.35em}
+\renewcommand{\labelitemi}{\textcolor{accent}{\small\raisebox{0.2ex}{\textbullet}}}
+
+\newcommand{\code}[1]{\tcbox[
+  on line,
+  boxsep=0.3mm,
+  left=0.7mm,
+  right=0.7mm,
+  top=0.2mm,
+  bottom=0.2mm,
+  arc=0.7mm,
+  colback=soft,
+  colframe=soft
+]{\ttfamily\small #1}}
+
+\DefineVerbatimEnvironment{manualcode}{Verbatim}{
+  breaklines=true,
+  breaksymbolleft={},
+  fontsize=\small,
+  frame=single,
+  framerule=0.3pt,
+  rulecolor=\color{tableline},
+  commandchars=\\\{\},
+}
+
+\AtBeginDocument{\color{ink}}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0.55\baselineskip}
+
+\begin{document}
+\begin{titlepage}
+\thispagestyle{empty}
+\vspace*{18mm}
+{\Huge\bfseries\color{ink} 大会申込みシステム\\[2mm] 基本操作マニュアル\par}
+\vspace{5mm}
+{\Large\color{accent} 日常運用担当者向け\par}
+\vspace{7mm}
+{\large\color{muted} 埼玉大学かるた会\par}
+\vfill
+\begin{tcolorbox}[
+  colback=accentlight,
+  colframe=accentlight,
+  arc=2mm,
+  boxrule=0pt,
+  left=5mm,
+  right=5mm,
+  top=4mm,
+  bottom=4mm,
+]
+このPDFは、\texttt{docs/manuals} にあるMarkdown原稿からLuaLaTeXで生成しています。秘密情報や本番URLそのものは含めない方針です。
+\end{tcolorbox}
+\vspace*{12mm}
+{\small\color{muted} Saitama University Karuta Club Tournament System\par}
+\end{titlepage}
+
+\tableofcontents
+\clearpage
+
+
+この文書は、サークルの申込担当者が日常運用を行うためのマニュアルです。
+
+プログラムの修正、GitHub Pages の設定変更、Google Apps Script のデプロイ、LINE Bot の技術的な修正は、この文書の対象外です。必要な場合は \code{developer-manual.md} を確認し、WebアプリやGit管理に慣れている人へ依頼してください。
+
+\section{はじめに}
+
+\subsection{このシステムでできること}
+
+このシステムは、大会情報の登録、参加意思確認、申込担当者へのリマインド、LINEグループへの通知をまとめて扱うためのものです。
+
+主な利用者は以下です。
+
+\begin{itemize}
+\item 申込担当者: 大会情報を登録し、回答状況を確認し、正式申込後に申込完了へ変更する
+\item サークルメンバー: 参加意思確認ページから \code{○ / △ / ×} を回答する
+\item 技術担当者: 必要に応じて画面や自動処理を改修する
+\end{itemize}
+日常運用では、基本的に管理画面と参加者向けページだけを使います。
+
+\subsection{日常運用で使う画面}
+
+日常運用で主に使う画面は以下です。
+
+\rowcolors{2}{white}{soft}
+\renewcommand{\arraystretch}{1.25}
+\begin{tabularx}{\linewidth}{>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}X}
+\toprule
+\rowcolor{tablehead}
+\textbf{画面} & \textbf{主な用途} \\ \midrule
+管理画面の \code{大会} タブ & 大会登録、編集、回答確認、申込完了処理 \\
+管理画面の \code{メンバー} タブ & メンバー追加、追加申請の承認 \\
+管理画面の \code{設定} タブ & 通知時刻、LINE文面、年度切替時のURL確認 \\
+参加者向けページ & メンバーが参加希望、未定、不参加を回答する \\
+LINE Bot & 通知先グループや申込担当者の登録 \\
+\bottomrule
+\end{tabularx}
+
+\subsection{引き継ぎ時に受け取るもの}
+
+新しい申込担当者は、前任者から以下を受け取ってください。
+
+\begin{itemize}
+\item 管理画面URL
+\item 管理者用トークン
+\item 参加者向けURL
+\item 大会要項を保存する Google Drive フォルダ
+\item 年間大会予定表の場所
+\item 申込担当者が入っているLINEグループ
+\item このシステムで通知を受け取るLINEアカウント
+\end{itemize}
+\subsection{秘密情報の扱い}
+
+管理者用トークン、Apps Script のURL、LINEのアクセストークンなどは、公開文書やGitHubには書かないでください。
+
+特に以下は外部に共有しないでください。
+
+\begin{itemize}
+\item 管理画面URLと管理者用トークン
+\item サークル外へ出してはいけない Google Drive URL
+\item LINE userId、LINE groupId
+\item Apps Script の本番URL
+\item LINE Developers や Google Apps Script の認証情報
+\end{itemize}
+\newpage
+
+\section{日常運用の全体像}
+
+\subsection{大会要項を受け取ってから正式申込まで}
+
+\rowcolors{2}{white}{soft}
+\renewcommand{\arraystretch}{1.25}
+\begin{tabularx}{\linewidth}{>{\raggedright\arraybackslash}p{0.08\linewidth}>{\raggedright\arraybackslash}p{0.24\linewidth}>{\raggedright\arraybackslash}X}
+\toprule
+\rowcolor{tablehead}
+\textbf{番号} & \textbf{やること} & \textbf{詳細な方法} \\ \midrule
+1 & 大会情報を確認する & メーリスの案内から、大会日時、開催級、主催締切、申込方法、参加費などを把握します。 \\
+2 & 要項PDFを保存する & あとからアップロードできるように、要項をPDF形式で自分のパソコンに保存します。 \\
+3 & 大会情報を登録する & 管理画面の \code{大会} タブで新規大会として情報を入力し、要項PDFをアップロードします。 \\
+4 & 表示を確認する & 登録後、参加者向けページに大会が表示されていることを確認します。 \\
+5 & 正式申込を行う & サークル内締切後に大会お知らせくん（LINE Bot）から通知が届いたら、参加希望者を確認し、主催者へ正式申込します。 \\
+6 & 申込済みにする & 正式申込後、管理画面の大会一覧で該当大会を \code{申込済み} に変更します。 \\
+\bottomrule
+\end{tabularx}
+
+通知や締切リマインドは基本的に自動処理に任せます。急ぎの場合だけ、手動でLINE通知を送ります。
+
+\section{大会登録・大会管理}
+
+\subsection{管理画面に入る}
+
+\begin{enumerate}
+\item 管理画面URLを開く
+\item 認証画面が出たら管理者用トークンを入力する
+\item \code{大会}、\code{メンバー}、\code{設定} のタブが表示されれば操作できます
+\end{enumerate}
+管理画面URLやトークンが分からない場合は、前任者または技術担当者に確認してください。
+
+\subsection{大会登録時に確認する項目}
+
+大会情報を登録するときは、2.1の流れに沿って管理画面の \code{大会} タブを使います。
+
+入力時に特に確認する項目は以下です。
+
+\rowcolors{2}{white}{soft}
+\renewcommand{\arraystretch}{1.25}
+\begin{tabularx}{\linewidth}{>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}X}
+\toprule
+\rowcolor{tablehead}
+\textbf{項目} & \textbf{確認すること} \\ \midrule
+大会名 & 要項に書かれている正式な大会名を入力する \\
+開催級 & 対象級を選ぶ。複数級の場合は選び漏れに注意する \\
+大会日程 & 級ごとに日程が違う場合は詳細設定で上書きする \\
+主催締切 & 主催者へ正式申込する締切を入力する \\
+サークル内締切 & 未調整なら主催締切の3日前を基準に自動設定される。必要に応じて手で直す \\
+要項 & PDFをアップロードするか、要項URLを入力する \\
+申込担当者 & 締切後に担当者向けLINE通知を受け取る人を選ぶ \\
+ステータス & 通常は公開対象の状態で保存する \\
+\bottomrule
+\end{tabularx}
+
+\subsection{複数級の大会を登録する}
+
+A級、B級、C級などが同じ要項にまとまっている場合でも、管理画面ではまとめて登録できます。
+
+\begin{enumerate}
+\item 開催級を複数選ぶ
+\item 共通の日程と締切を入力する
+\item 級ごとに日程や締切が違う場合は \code{詳細設定} を開く
+\item \code{級別日程・締切設定} で、違う級だけ上書きする
+\item 保存する
+\end{enumerate}
+保存後は、内部的には級ごとに別の大会として登録されます。これにより、参加者画面、締切リマインド、Google Calendar 同期が級ごとに正しく扱われます。
+
+\subsection{大会情報を修正する}
+
+登録済み大会を修正する場合は、\code{大会} タブの \code{登録済み一覧} から行います。
+
+\begin{enumerate}
+\item \code{大会} を開く
+\item \code{登録済み一覧} を選ぶ
+\item 必要に応じて \code{公開中}、\code{申込済}、\code{終了} の表示を切り替える
+\item 修正したい大会を開く
+\item 内容を直す
+\item 保存する
+\end{enumerate}
+保存すると Google Sheets の大会情報が更新され、Google Calendar も再同期されます。
+
+\subsection{要項ファイルを扱う}
+
+大会登録時は、要項ファイルをアップロードするか、既に公開されている要項URLを入力します。
+
+アップロードに失敗した場合は、以下を確認してください。
+
+\begin{itemize}
+\item DriveフォルダURLが設定されているか
+\item ファイル名やファイル形式に問題がないか
+\item Google Drive の権限に問題がないか
+\item 大会要項保存用 Drive フォルダが年度切替後も正しいか
+\end{itemize}
+解決しない場合は、技術担当者に Google Drive と Apps Script の設定を確認してもらってください。
+
+\subsection{回答状況と申込後フォローを確認する}
+
+回答状況は、管理画面の大会一覧や回答概要から確認します。
+
+確認したい観点は以下です。
+
+\begin{itemize}
+\item 参加希望 \code{○} の人数
+\item 未定 \code{△} の人数
+\item 不参加 \code{×} の人数
+\item 未回答者が多くないか
+\item 申込担当者が正式申込できるだけの情報が集まっているか
+\end{itemize}
+サークル内締切を過ぎると、申込担当者へLINEで参加希望者一覧が届きます。
+
+正式申込が終わったあとは、2.1の最後の手順どおり大会を \code{申込済み} に変更します。
+
+また、\code{大会} タブの \code{申込後フォロー} には、申込後に追加確認が必要になりやすい大会が表示されます。
+
+例:
+
+\begin{itemize}
+\item 抽選結果の確認
+\item 参加者名簿の確認
+\item 参加費支払い
+\item 主催者からの追加連絡
+\end{itemize}
+正式申込して終わりではない大会があるため、定期的に確認してください。
+
+\section{メンバー管理}
+
+\subsection{メンバー一覧を確認する}
+
+メンバー情報は、管理画面の \code{メンバー} タブで確認します。
+
+確認したい観点は以下です。
+
+\begin{itemize}
+\item 名前が正しく登録されているか
+\item ふりがな、段位、級が正しいか
+\item ステータスが \code{active} になっているか
+\item 卒業や退会などで不要になったメンバーが残っていないか
+\end{itemize}
+参加者向けページに表示されるのは、基本的に \code{active} のメンバーです。
+
+\subsection{メンバーを手動で追加する}
+
+新しいメンバーを管理者が直接登録する場合は、\code{メンバー} タブの \code{新規入力} から登録します。
+
+\begin{enumerate}
+\item 管理画面の \code{メンバー} を開く
+\item \code{新規入力} を選ぶ
+\item 氏名、ふりがな、段位、級を入力する
+\item ステータスを \code{active} にする
+\item 保存する
+\end{enumerate}
+名前や級が間違っていると、参加者向けページで大会が正しく表示されないことがあります。
+
+\subsection{メンバー追加申請を承認する}
+
+参加者向けページに名前がない場合、メンバー本人が \code{名前がない場合は追加申請} から申請できます。
+
+申請が送信されると、担当者向けのLINEメッセージが届きます。メッセージを確認したら、管理画面で内容を確認して承認します。
+
+\rowcolors{2}{white}{soft}
+\renewcommand{\arraystretch}{1.25}
+\begin{tabularx}{\linewidth}{>{\raggedright\arraybackslash}p{0.08\linewidth}>{\raggedright\arraybackslash}p{0.24\linewidth}>{\raggedright\arraybackslash}X}
+\toprule
+\rowcolor{tablehead}
+\textbf{番号} & \textbf{やること} & \textbf{詳細な方法} \\ \midrule
+1 & LINE通知を確認する & メンバー追加申請が届くと、担当者の個人LINEに通知が届きます。 \\
+2 & 管理画面を開く & 管理画面の \code{メンバー} タブを開きます。 \\
+3 & 申請内容を確認する & \code{申請中メンバー} で氏名、ふりがな、段位、級を確認します。 \\
+4 & 承認する & 問題なければ \code{承認} を押し、メンバーを有効化します。 \\
+5 & 表示を確認する & 参加者向けページの名前一覧に追加されたことを確認します。 \\
+\bottomrule
+\end{tabularx}
+
+誤登録を防ぐため、同姓同名やふりがなの違いがないかも確認してください。
+
+\subsection{名前が一覧に出ない場合の確認}
+
+参加者向けページに名前が出ない場合は、以下を確認してください。
+
+\begin{itemize}
+\item \code{メンバー} で該当者が登録されているか
+\item ステータスが \code{active} か
+\item 申請中なら承認済みか
+\item 参加者向けURLの \code{page\textbackslash{}\_token} が正しいか
+\end{itemize}
+登録されているのに表示されない場合は、技術担当者へ連絡してください。
+
+\section{参加者向けページ}
+
+\subsection{参加者向けURLを共有する}
+
+メンバーには、参加者向けURLをLINEグループ等で共有します。
+
+参加者向けURLはサークル内だけで共有してください。外部に広く公開するものではありません。
+
+\subsection{メンバーが回答する流れ}
+
+メンバー側の操作は以下です。
+
+\begin{enumerate}
+\item 参加者向けURLを開く
+\item 名前を選ぶ
+\item \code{未回答}、\code{回答済み}、\code{出場予定}、\code{全て} を必要に応じて切り替える
+\item 各大会で \code{○ 参加希望}、\code{△ 未定}、\code{× 不参加} を選ぶ
+\item 必要ならコメントを書く
+\item \code{送信する} を押す
+\item 確認画面で内容を確認し、送信する
+\end{enumerate}
+\subsection{回答の変更・上書き}
+
+同じ人が同じ大会へ再回答した場合は、前の回答が上書きされます。
+
+回答後に予定が変わったメンバーには、同じ参加者向けページから再回答してもらってください。
+
+\subsection{参加者から問い合わせが来たとき}
+
+よくある問い合わせと確認先は以下です。
+
+\rowcolors{2}{white}{soft}
+\renewcommand{\arraystretch}{1.25}
+\begin{tabularx}{\linewidth}{>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}X}
+\toprule
+\rowcolor{tablehead}
+\textbf{問い合わせ} & \textbf{確認する場所} \\ \midrule
+名前がない & 管理画面の \code{メンバー} タブ \\
+大会が出ない & 大会ステータス、開催級、参加者向けURL \\
+回答を変えたい & 同じページから再回答できることを案内 \\
+要項を見たい & 大会カードの要項リンクまたは年間大会予定表 \\
+\bottomrule
+\end{tabularx}
+
+大会が出ない場合は、大会ステータスが \code{active} になっているか、開催級がメンバーの級と合っているかを確認してください。
+
+\section{LINE通知・LINE Bot}
+
+\subsection{LINE通知の全体像}
+
+LINE通知には、サークル全体へ送るものと、担当者個人へ送るものがあります。
+
+\rowcolors{2}{white}{soft}
+\renewcommand{\arraystretch}{1.25}
+\begin{tabularx}{\linewidth}{>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}X}
+\toprule
+\rowcolor{tablehead}
+\textbf{通知先} & \textbf{通知の種類} & \textbf{主な目的} \\ \midrule
+全体グループ & 大会情報更新通知 & 新しく登録・更新された大会をメンバー全体へ知らせる \\
+全体グループ & 回答締切リマインド & サークル内締切が近い大会について回答を促す \\
+全体グループ & 申込完了通知 & 担当者が正式申込を終えた大会を全体へ知らせる \\
+担当者個人 & 申込対応リマインド & サークル内締切後、参加希望者を確認して正式申込するよう促す \\
+担当者個人 & 最終リマインド & 主催締切日になっても申込済みでない大会について確認を促す \\
+担当者個人 & メンバー追加申請通知 & メンバー追加申請が届いたことを知らせる \\
+担当者個人 & 未処理メンバー申請まとめ通知 & 未承認のメンバー追加申請が残っていることを知らせる \\
+\bottomrule
+\end{tabularx}
+
+\subsection{全体グループ向け通知}
+
+全体グループ向け通知は、メンバー全体への周知と回答促進のために送られます。
+
+\rowcolors{2}{white}{soft}
+\renewcommand{\arraystretch}{1.25}
+\begin{tabularx}{\linewidth}{>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}X}
+\toprule
+\rowcolor{tablehead}
+\textbf{通知} & \textbf{送られるタイミング} & \textbf{担当者がすること} \\ \midrule
+大会情報更新通知 & 毎日17時台に、未通知の大会情報がある場合 & 通常は何もしません。急ぎの場合だけ手動送信します。 \\
+回答締切リマインド & サークル内締切2日前の10時台 & 回答が少ない場合は、必要に応じて個別に声をかけます。 \\
+申込完了通知 & 大会を \code{申込済み} にした日の23時台 & 内容に誤りがないか確認します。 \\
+\bottomrule
+\end{tabularx}
+
+\subsection{担当者個人向け通知}
+
+担当者個人向け通知は、申込担当者や管理者に具体的な作業を促すために送られます。
+
+\rowcolors{2}{white}{soft}
+\renewcommand{\arraystretch}{1.25}
+\begin{tabularx}{\linewidth}{>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}X}
+\toprule
+\rowcolor{tablehead}
+\textbf{通知} & \textbf{送られるタイミング} & \textbf{担当者がすること} \\ \midrule
+申込対応リマインド & サークル内締切翌日の10時台 & 参加希望者を確認し、主催者へ正式申込します。 \\
+最終リマインド & 主催締切日の10時台に、まだ \code{申込済み} でない場合 & 申込漏れがないか確認し、必要ならすぐに正式申込します。 \\
+メンバー追加申請通知 & メンバーが参加者向けページから追加申請した直後 & 管理画面の \code{メンバー} タブで申請内容を確認し、承認または却下します。 \\
+未処理メンバー申請まとめ通知 & 未承認の申請が残っている日の7時台 & 申請を確認し、承認または却下します。 \\
+\bottomrule
+\end{tabularx}
+
+\subsection{手動で大会情報を通知する}
+
+大会情報更新通知は基本的に自動送信に任せます。急ぎで知らせたい場合だけ、管理画面から手動送信します。
+
+\begin{enumerate}
+\item 大会の新規入力または編集画面を開く
+\item 対象大会を保存済みにする
+\item \code{LINEへ更新通知} を押す
+\end{enumerate}
+同じ大会を何度も送るとメンバーに混乱が出るため、手動送信は急ぎの連絡や重要な修正時だけにしてください。
+
+LINE配信文面のテスト送信は、通常の運用通知ではありません。文面を変更したときに、テスト用LINEグループで表示確認するために使います。
+
+\subsection{LINE Bot コマンド}
+
+担当者交代や初期設定で使うコマンドがあります。
+
+\rowcolors{2}{white}{soft}
+\renewcommand{\arraystretch}{1.25}
+\begin{tabularx}{\linewidth}{>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}X}
+\toprule
+\rowcolor{tablehead}
+\textbf{コマンド} & \textbf{使う場所} & \textbf{用途} \\ \midrule
+\code{/groupid} & 本番通知先LINEグループ & 通知先グループIDを登録する \\
+\code{/testgroupid} & テスト用LINEグループ & テスト通知先グループIDを登録する \\
+\code{/担当者登録} & Botと会話できる場所 & 申込担当者のLINE userIdを登録する \\
+\bottomrule
+\end{tabularx}
+
+日常運用で頻繁に使うものではありません。通知先の変更や担当者交代時に使います。
+
+\subsection{通知が届かない場合}
+
+LINE通知が届かない場合は、以下を確認してください。
+
+\begin{itemize}
+\item 通知先LINEグループにBotが入っているか
+\item \code{/groupid} を登録済みか
+\item 管理画面の \code{設定} でLINE groupIdが正しいか
+\item 通知時刻を変更したあとにトリガーを再作成しているか
+\end{itemize}
+解決しない場合は、技術担当者にLINE DevelopersやApps Scriptの設定を確認してもらってください。
+
+\section{設定・年度切替}
+
+\subsection{設定画面で触ってよい項目}
+
+\code{設定} タブには、年度切替や担当者交代時に見直す項目があります。
+
+日常運用者が触ってよい主な項目は以下です。
+
+\begin{itemize}
+\item 大会要項保存用 Drive フォルダURL
+\item 年間大会予定表 PDF のURL
+\item 参加ページの基本URL
+\item 管理画面URL
+\item 通知先 LINE groupId
+\item 定期通知の時刻
+\item LINE配信文面
+\end{itemize}
+\subsection{通知時刻を変更する}
+
+通知時刻を変えた場合は、\code{管理者操作} から \code{トリガーを再作成} を押してください。
+
+トリガーを再作成しないと、画面上の時刻を変えても実際の通知時刻が変わらない場合があります。
+
+\subsection{年度切替チェックリスト}
+
+年度や担当者が変わるときは、以下を確認してください。
+
+\begin{itemize}
+\item 新担当者が管理画面URLを知っている
+\item 新担当者が管理者用トークンを受け取っている
+\item 新担当者がLINE Botで \code{/担当者登録} を済ませている
+\item 通知先LINEグループが正しい
+\item 大会要項保存用 Drive フォルダが正しい
+\item 年間大会予定表のURLが新年度版になっている
+\item 参加者向けURLを共有できる
+\item メンバー一覧が新年度の状態になっている
+\item 通知時刻を変更した場合、トリガーを再作成している
+\end{itemize}
+\subsection{触る前に技術担当者へ相談するもの}
+
+以下は、日常運用者だけで変更しないでください。
+
+\begin{itemize}
+\item Apps Script のURL
+\item 管理者用トークン
+\item Google Sheets の列名
+\item LINE Developers のチャネル設定
+\item GitHub Pages の公開設定
+\item 管理画面や参加者向け画面のHTML/CSS/JavaScript
+\end{itemize}
+必要な場合は、技術担当者へ依頼してください。
+
+\section{よくあるトラブル}
+
+\subsection{管理画面に入れない}
+
+\begin{itemize}
+\item 管理画面URLが正しいか確認する
+\item 管理者用トークンが正しいか確認する
+\item それでも入れない場合は技術担当者へ連絡する
+\end{itemize}
+\subsection{参加者ページに大会が出ない}
+
+\begin{itemize}
+\item 大会ステータスが \code{active} になっているか確認する
+\item 開催級がメンバーの級と合っているか確認する
+\item 参加者向けURLの \code{page\textbackslash{}\_token} が正しいか確認する
+\end{itemize}
+\subsection{名前が一覧に出ない}
+
+\begin{itemize}
+\item \code{メンバー} で該当者が登録されているか確認する
+\item ステータスが \code{active} か確認する
+\item 申請中なら承認する
+\end{itemize}
+\subsection{LINE通知が届かない}
+
+\begin{itemize}
+\item 通知先LINEグループにBotが入っているか確認する
+\item \code{/groupid} を登録済みか確認する
+\item 管理画面の \code{設定} でLINE groupIdを確認する
+\item 技術担当者にLINE DevelopersやApps Scriptの設定を確認してもらう
+\end{itemize}
+\subsection{要項アップロードに失敗する}
+
+\begin{itemize}
+\item DriveフォルダURLが設定されているか確認する
+\item ファイル名やファイル形式を確認する
+\item Google Drive の権限を確認する
+\end{itemize}
+\subsection{カレンダーに反映されない}
+
+\begin{itemize}
+\item Calendar ID が設定されているか確認する
+\item 大会を保存し直す
+\item それでも反映されない場合は技術担当者へ連絡する
+\end{itemize}
+\section{運用上の注意}
+
+\begin{itemize}
+\item 管理画面URLと管理者用トークンは外部に共有しない
+\item 参加者向けURLもサークル内だけで共有する
+\item 個人情報は必要最小限にする
+\item 正式申込に必要な電話番号、メールアドレス、会員番号などはこのシステムに保存しない
+\item 申込完了後は必ず \code{applied} にする
+\item システム改修は、GitHubやWebアプリに慣れている人に任せる
+\end{itemize}
+
+\end{document}

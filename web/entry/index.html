@@ -10,7 +10,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="./style.css?v=20260622-1">
+  <link rel="stylesheet" href="./style.css?v=20260710-1">
 </head>
 <body>
   <main class="page">
@@ -34,6 +34,13 @@
           type="button"
         >
           年間大会予定表
+        </button>
+        <button
+          id="open-calendar-button"
+          class="hero-link-button"
+          type="button"
+        >
+          カレンダー
         </button>
         <a
           id="open-guide-link"
@@ -130,6 +137,34 @@
               rel="noopener noreferrer"
             >
               Google Drive で開く
+            </a>
+          </p>
+        </div>
+      </section>
+
+      <section id="calendar-view" class="overview-page is-hidden" aria-live="polite">
+        <div class="overview-page-header">
+          <button id="close-calendar-button" class="overview-back-button" type="button">
+            申込に戻る
+          </button>
+          <h2>大会カレンダー</h2>
+        </div>
+        <div class="schedule-embed-card">
+          <iframe
+            id="calendar-frame"
+            class="schedule-embed-frame"
+            title="大会カレンダー"
+            loading="lazy"
+            src="about:blank"
+          ></iframe>
+          <p class="schedule-embed-link">
+            <a
+              id="calendar-link"
+              href="#"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              Google カレンダーで開く
             </a>
           </p>
         </div>

@@ -144,6 +144,11 @@ const elements = {
   settingsLineGroupId: document.getElementById("settings-line-group-id"),
   settingsLineTestGroupId: document.getElementById("settings-line-test-group-id"),
   settingsCalendarId: document.getElementById("settings-calendar-id"),
+  settingsCalendarEmbedUrl: document.getElementById("settings-calendar-embed-url"),
+  settingsCalendarViewUrl: document.getElementById("settings-calendar-view-url"),
+  calendarFrame: document.getElementById("calendar-frame"),
+  calendarLink: document.getElementById("calendar-link"),
+  calendarSettingsButton: document.getElementById("calendar-settings-button"),
   settingsDailyAnnouncementTime: document.getElementById("settings-daily-announcement-time"),
   settingsTournamentReminderTime: document.getElementById("settings-tournament-reminder-time"),
   settingsPendingMemberSummaryTime: document.getElementById("settings-pending-member-summary-time"),
@@ -242,6 +247,13 @@ elements.sendAnnouncementButton.addEventListener("click", async function() {
 
 elements.resetMemberButton.addEventListener("click", function() {
   resetMemberForm();
+});
+
+elements.calendarSettingsButton.addEventListener("click", function() {
+  state.primaryTab = "settings";
+  state.settingsMode = "settings-links";
+  renderTabs();
+  elements.settingsCalendarId.focus();
 });
 
 elements.resetSettingsButton.addEventListener("click", function() {
@@ -568,6 +580,8 @@ elements.settingsForm.addEventListener("submit", async function(event) {
     admin_page_url: elements.settingsAdminPageUrl.value.trim(),
     default_entry_page_token: elements.settingsDefaultEntryPageToken.value.trim(),
     calendar_id: elements.settingsCalendarId.value.trim(),
+    calendar_embed_url: elements.settingsCalendarEmbedUrl.value.trim(),
+    calendar_view_url: elements.settingsCalendarViewUrl.value.trim(),
   };
 
   try {
@@ -753,6 +767,7 @@ async function loadAdminData() {
     renderTournamentResponseOverview();
     renderPendingMemberRequests();
     renderMemberList();
+    renderCalendarEmbed_();
     showStatus("", "");
   } catch (error) {
     showStatus(error.message || "管理データの取得に失敗しました。", "error");
@@ -1306,8 +1321,24 @@ function populateSettingsForm() {
   elements.settingsDefaultEntryPageToken.value =
     getDefaultEntryPageToken_();
   elements.settingsCalendarId.value = state.settings.calendar_id || "";
+  elements.settingsCalendarEmbedUrl.value = state.settings.calendar_embed_url || "";
+  elements.settingsCalendarViewUrl.value = state.settings.calendar_view_url || "";
   populateLineBotSettingsForm_();
   populateLineMessageSettingsForm_();
+}
+
+function renderCalendarEmbed_() {
+  const embedUrl = String(state.settings.calendar_embed_url || "").trim();
+  const viewUrl = String(state.settings.calendar_view_url || "").trim();
+
+  if (elements.calendarFrame) {
+    elements.calendarFrame.src = embedUrl || "about:blank";
+  }
+
+  if (elements.calendarLink) {
+    elements.calendarLink.href = viewUrl || "#";
+    elements.calendarLink.classList.toggle("is-disabled", !viewUrl);
+  }
 }
 
 function populateLineBotSettingsForm_() {
