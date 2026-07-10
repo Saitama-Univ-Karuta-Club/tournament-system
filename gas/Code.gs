@@ -389,6 +389,16 @@ function getAdminSettings_() {
     calendar_id: String(
       properties.getProperty("CALENDAR_ID") || ""
     ).trim(),
+    calendar_embed_url: String(
+      properties.getProperty("CALENDAR_EMBED_URL") || ""
+    ).trim() || buildGoogleCalendarEmbedUrl_(
+      String(properties.getProperty("CALENDAR_ID") || "").trim()
+    ),
+    calendar_view_url: String(
+      properties.getProperty("CALENDAR_VIEW_URL") || ""
+    ).trim() || buildGoogleCalendarViewUrl_(
+      String(properties.getProperty("CALENDAR_ID") || "").trim()
+    ),
     line_group_id: String(
       properties.getProperty("LINE_GROUP_ID") || ""
     ).trim(),
@@ -425,7 +435,28 @@ function getPublicPageSettings_() {
     drive_folder_url: settings.drive_folder_url || "",
     annual_schedule_preview_url: settings.annual_schedule_preview_url || "",
     annual_schedule_view_url: settings.annual_schedule_view_url || "",
+    calendar_embed_url: settings.calendar_embed_url || "",
+    calendar_view_url: settings.calendar_view_url || "",
   };
+}
+
+function buildGoogleCalendarEmbedUrl_(calendarId) {
+  const normalizedCalendarId = String(calendarId || "").trim();
+  if (!normalizedCalendarId) {
+    return "";
+  }
+  return "https://calendar.google.com/calendar/embed?src=" +
+    encodeURIComponent(normalizedCalendarId) +
+    "&ctz=Asia%2FTokyo";
+}
+
+function buildGoogleCalendarViewUrl_(calendarId) {
+  const normalizedCalendarId = String(calendarId || "").trim();
+  if (!normalizedCalendarId) {
+    return "";
+  }
+  return "https://calendar.google.com/calendar/u/0?cid=" +
+    encodeURIComponent(normalizedCalendarId);
 }
 
 function updateAdminSettings_(input) {
@@ -450,6 +481,12 @@ function updateAdminSettings_(input) {
   }
   if (hasOwnProperty_(source, "calendar_id")) {
     setOrDeleteScriptProperty_(properties, "CALENDAR_ID", normalized.calendar_id);
+  }
+  if (hasOwnProperty_(source, "calendar_embed_url")) {
+    setOrDeleteScriptProperty_(properties, "CALENDAR_EMBED_URL", normalized.calendar_embed_url);
+  }
+  if (hasOwnProperty_(source, "calendar_view_url")) {
+    setOrDeleteScriptProperty_(properties, "CALENDAR_VIEW_URL", normalized.calendar_view_url);
   }
   if (hasOwnProperty_(source, "line_group_id")) {
     setOrDeleteScriptProperty_(properties, "LINE_GROUP_ID", normalized.line_group_id);
@@ -492,6 +529,8 @@ function normalizeAdminSettingsInput_(input) {
     admin_page_url: String(input.admin_page_url || "").trim(),
     default_entry_page_token: String(input.default_entry_page_token || "").trim(),
     calendar_id: String(input.calendar_id || "").trim(),
+    calendar_embed_url: String(input.calendar_embed_url || "").trim(),
+    calendar_view_url: String(input.calendar_view_url || "").trim(),
     line_group_id: String(input.line_group_id || "").trim(),
     line_test_group_id: String(input.line_test_group_id || "").trim(),
     daily_announcement_time: normalizeTimeSetting_(

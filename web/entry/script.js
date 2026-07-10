@@ -50,14 +50,19 @@ const elements = {
   annualScheduleView: document.getElementById("annual-schedule-view"),
   annualScheduleFrame: document.getElementById("annual-schedule-frame"),
   annualScheduleLink: document.getElementById("annual-schedule-link"),
+  calendarView: document.getElementById("calendar-view"),
+  calendarFrame: document.getElementById("calendar-frame"),
+  calendarLink: document.getElementById("calendar-link"),
   openDriveFolderLink: document.getElementById("open-drive-folder-link"),
   memberRequestView: document.getElementById("member-request-view"),
   openOverviewButton: document.getElementById("open-overview-button"),
   openAnnualScheduleButton: document.getElementById("open-annual-schedule-button"),
+  openCalendarButton: document.getElementById("open-calendar-button"),
   openGuideLink: document.getElementById("open-guide-link"),
   openMemberRequestLink: document.getElementById("open-member-request-link"),
   closeOverviewButton: document.getElementById("close-overview-button"),
   closeAnnualScheduleButton: document.getElementById("close-annual-schedule-button"),
+  closeCalendarButton: document.getElementById("close-calendar-button"),
   closeMemberRequestButton: document.getElementById("close-member-request-button"),
   requestLastName: document.getElementById("request-last-name"),
   requestLastNameKana: document.getElementById("request-last-name-kana"),
@@ -97,6 +102,10 @@ elements.openAnnualScheduleButton.addEventListener("click", function() {
   setCurrentView("annual-schedule");
 });
 
+elements.openCalendarButton.addEventListener("click", function() {
+  setCurrentView("calendar");
+});
+
 elements.openMemberRequestLink.addEventListener("click", function() {
   setCurrentView("member-request");
 });
@@ -106,6 +115,10 @@ elements.closeOverviewButton.addEventListener("click", function() {
 });
 
 elements.closeAnnualScheduleButton.addEventListener("click", function() {
+  setCurrentView("entry");
+});
+
+elements.closeCalendarButton.addEventListener("click", function() {
   setCurrentView("entry");
 });
 
@@ -479,6 +492,7 @@ function setCurrentView(viewName) {
   if (
     viewName !== "overview" &&
     viewName !== "annual-schedule" &&
+    viewName !== "calendar" &&
     viewName !== "member-request"
   ) {
     state.currentView = "entry";
@@ -489,14 +503,20 @@ function setCurrentView(viewName) {
   const isEntry = state.currentView === "entry";
   const isOverview = state.currentView === "overview";
   const isAnnualSchedule = state.currentView === "annual-schedule";
+  const isCalendar = state.currentView === "calendar";
   const isMemberRequest = state.currentView === "member-request";
 
   elements.entryView.classList.toggle("is-hidden", !isEntry);
   elements.overviewView.classList.toggle("is-hidden", !isOverview);
   elements.annualScheduleView.classList.toggle("is-hidden", !isAnnualSchedule);
+  elements.calendarView.classList.toggle("is-hidden", !isCalendar);
   elements.memberRequestView.classList.toggle("is-hidden", !isMemberRequest);
   elements.openOverviewButton.classList.toggle("is-hidden", !isEntry);
   elements.openAnnualScheduleButton.classList.toggle("is-hidden", !isEntry);
+  elements.openCalendarButton.classList.toggle(
+    "is-hidden",
+    !isEntry || !hasCalendarUrl_()
+  );
   if (elements.openDriveFolderLink) {
     const hasDriveFolderUrl = Boolean(
       String(state.settings.drive_folder_url || "").trim()
@@ -670,6 +690,8 @@ function applyPublicSettings_() {
   const driveFolderUrl = String(state.settings.drive_folder_url || "").trim();
   const previewUrl = String(state.settings.annual_schedule_preview_url || "").trim();
   const viewUrl = String(state.settings.annual_schedule_view_url || "").trim();
+  const calendarEmbedUrl = String(state.settings.calendar_embed_url || "").trim();
+  const calendarViewUrl = String(state.settings.calendar_view_url || "").trim();
 
   if (elements.annualScheduleFrame) {
     elements.annualScheduleFrame.src = previewUrl || "about:blank";
@@ -682,6 +704,21 @@ function applyPublicSettings_() {
   if (elements.openDriveFolderLink) {
     elements.openDriveFolderLink.href = driveFolderUrl || "#";
   }
+
+  if (elements.calendarFrame) {
+    elements.calendarFrame.src = calendarEmbedUrl || "about:blank";
+  }
+
+  if (elements.calendarLink) {
+    elements.calendarLink.href = calendarViewUrl || "#";
+  }
+}
+
+function hasCalendarUrl_() {
+  return Boolean(
+    String(state.settings.calendar_embed_url || "").trim() ||
+    String(state.settings.calendar_view_url || "").trim()
+  );
 }
 
 function renderTournaments(tournaments) {

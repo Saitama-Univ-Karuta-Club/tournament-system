@@ -43,10 +43,15 @@ Published paths are expected to be:
 
 - `/entry/`
 - `/board-c7k2m9q4/`
+- `/manuals/`
+
+`/manuals/` serves PDF copies of the handover manuals for operators and developers.
 
 ## Documents
 
 - Main specification: [docs/line_bot_tournament_system_spec.md](docs/line_bot_tournament_system_spec.md)
+- Basic operation manual: [docs/manuals/basic-operation-manual.md](docs/manuals/basic-operation-manual.md)
+- Developer manual: [docs/manuals/developer-manual.md](docs/manuals/developer-manual.md)
 - Setup notes: [docs/setup.md](docs/setup.md)
 - Design decisions: [docs/decisions.md](docs/decisions.md)
 

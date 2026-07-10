@@ -29,6 +29,11 @@ jobs:
       - name: Configure Pages
         uses: actions/configure-pages@v5
 
+      - name: Copy manual PDFs
+        run: |
+          mkdir -p web/manuals
+          cp docs/manuals/*.pdf web/manuals/
+
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:

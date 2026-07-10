@@ -10,7 +10,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="./style.css?v=20260616-2">
+  <link rel="stylesheet" href="./style.css?v=20260710-1">
 </head>
 <body>
   <main class="page">
@@ -23,6 +23,7 @@
     <nav class="primary-tabs" aria-label="管理対象切り替え">
       <button type="button" class="primary-tab is-active" data-primary-tab="tournaments">大会</button>
       <button type="button" class="primary-tab" data-primary-tab="members">メンバー</button>
+      <button type="button" class="primary-tab" data-primary-tab="calendar">カレンダー</button>
       <button type="button" class="primary-tab" data-primary-tab="settings">設定</button>
     </nav>
 
@@ -146,6 +147,39 @@
       </div>
     </section>
 
+    <section class="panel is-hidden" data-panel="calendar">
+      <div class="section-header">
+        <div>
+          <h2>大会カレンダー</h2>
+          <p>Google カレンダーに同期された大会日程と締切を閲覧します。ここから予定の編集はできません。</p>
+        </div>
+      </div>
+
+      <div class="calendar-embed-card">
+        <iframe
+          id="calendar-frame"
+          class="calendar-embed-frame"
+          title="大会カレンダー"
+          loading="lazy"
+          src="about:blank"
+        ></iframe>
+        <div class="calendar-embed-footer">
+          <a
+            id="calendar-link"
+            class="calendar-open-link"
+            href="#"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Google カレンダーで開く
+          </a>
+          <button type="button" id="calendar-settings-button" class="secondary-button">
+            カレンダー設定を確認する
+          </button>
+        </div>
+      </div>
+    </section>
+
     <section class="panel is-hidden" data-panel="settings">
       <div class="section-header">
         <h2>設定</h2>
@@ -192,6 +226,14 @@
           <label class="field">
             <span>同期先 Google Calendar ID</span>
             <input id="settings-calendar-id" type="text" placeholder="CALENDAR_ID">
+          </label>
+          <label class="field">
+            <span>Google カレンダー埋め込みURL</span>
+            <input id="settings-calendar-embed-url" type="url" placeholder="空欄なら Calendar ID から自動生成">
+          </label>
+          <label class="field">
+            <span>Google カレンダー公開URL</span>
+            <input id="settings-calendar-view-url" type="url" placeholder="空欄なら Calendar ID から自動生成">
           </label>
           <div class="actions">
             <button type="button" id="reset-settings-button" class="secondary-button">現在値に戻す</button>

@@ -82,6 +82,11 @@ body {
   margin-bottom: 18px;
 }
 .section-header h2 { margin: 0; }
+.section-header p {
+  margin: 8px 0 0;
+  color: var(--muted);
+  line-height: 1.7;
+}
 .admin-grid {
   display: grid;
   grid-template-columns: minmax(240px, 320px) minmax(0, 1fr);
@@ -228,6 +233,36 @@ body {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+}
+.calendar-embed-card {
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  padding: 14px;
+  background: #fff;
+}
+.calendar-embed-frame {
+  width: 100%;
+  min-height: 72vh;
+  border: 0;
+  border-radius: 14px;
+  background: #f7f1e8;
+}
+.calendar-embed-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+.calendar-open-link {
+  color: var(--accent-dark);
+  font-weight: 700;
+}
+.calendar-open-link.is-disabled {
+  color: var(--muted);
+  pointer-events: none;
+  text-decoration: none;
 }
 .token-button {
   border: 1px solid var(--line);
