@@ -239,6 +239,9 @@ function doPost(e) {
         reason: result.reason || "",
         group_id: result.group_id || "",
         tournament_ids: result.tournament_ids || [],
+        announcement_tournament_ids: result.announcement_tournament_ids || [],
+        reminder_tournament_ids: result.reminder_tournament_ids || [],
+        manager_backup: result.manager_backup || null,
       });
     }
 
@@ -2073,6 +2076,12 @@ function sendAnnouncement(adminToken, tournamentIds) {
 function sendAnnouncementForTournaments(tournaments) {
   const groupId = getLineGroupId();
   const message = buildAnnouncementMessage(tournaments);
+  const sentAt = toIsoString(new Date());
+  const managerBackup = sendManagerBackupForGroupMessage_(
+    message,
+    "announcement",
+    tournaments
+  );
   pushLineMessage(groupId, [{
     type: "text",
     text: message,
@@ -2087,6 +2096,11 @@ function sendAnnouncementForTournaments(tournaments) {
       message: message,
     });
   });
+  markTournamentNotificationSent_(
+    tournaments,
+    "announcement_sent_at",
+    sentAt
+  );
 
   return {
     sent: true,
@@ -2094,24 +2108,106 @@ function sendAnnouncementForTournaments(tournaments) {
     tournament_ids: tournaments.map(function(tournament) {
       return tournament.tournament_id;
     }),
+    manager_backup: managerBackup,
   };
 }
 
 function sendScheduledDailyAnnouncements() {
-  const tournaments = getPendingAnnouncementTournaments();
+  const result = sendScheduledWeeklyAnnouncementDigest_();
 
-  if (!tournaments.length) {
-    Logger.log("No pending tournaments for scheduled announcement.");
+  Logger.log(result);
+  return result;
+}
+
+function sendScheduledWeeklyAnnouncementDigest_() {
+  const announcementTournaments = getPendingAnnouncementTournaments();
+  const reminderTournaments = getPendingWeeklyGroupReminderTournaments_();
+  const messages = [];
+  const sentAt = toIsoString(new Date());
+
+  if (announcementTournaments.length) {
+    messages.push({
+      type: "text",
+      text: buildAnnouncementMessage(announcementTournaments),
+    });
+  }
+
+  if (reminderTournaments.length) {
+    messages.push({
+      type: "text",
+      text: buildWeeklyGroupReminderMessage_(reminderTournaments),
+    });
+  }
+
+  if (!messages.length) {
     return {
       sent: false,
-      reason: "no_pending_tournaments",
+      skipped: true,
+      reason: "no_pending_tournaments_or_reminders",
       tournament_ids: [],
+      announcement_tournament_ids: [],
+      reminder_tournament_ids: [],
     };
   }
 
-  const result = sendAnnouncementForTournaments(tournaments);
-  Logger.log(result);
-  return result;
+  const groupId = getLineGroupId();
+  const allTournaments = mergeTournamentsById_(
+    announcementTournaments,
+    reminderTournaments
+  );
+  const managerBackup = sendManagerBackupForGroupMessages_(
+    messages,
+    "weekly_digest",
+    allTournaments
+  );
+
+  pushLineMessage(groupId, messages);
+
+  if (announcementTournaments.length) {
+    appendGroupNotificationLogs_(
+      announcementTournaments,
+      "announcement",
+      groupId,
+      messages[0].text
+    );
+    markTournamentNotificationSent_(
+      announcementTournaments,
+      "announcement_sent_at",
+      sentAt
+    );
+  }
+
+  if (reminderTournaments.length) {
+    appendGroupNotificationLogs_(
+      reminderTournaments,
+      "weekly_internal_deadline_reminder",
+      groupId,
+      messages[messages.length - 1].text
+    );
+    markTournamentNotificationSent_(
+      reminderTournaments,
+      "internal_deadline_reminder_sent_at",
+      sentAt
+    );
+  }
+
+  return {
+    sent: true,
+    skipped: false,
+    notification_type: "weekly_digest",
+    group_id: groupId,
+    tournament_ids: allTournaments.map(function(tournament) {
+      return tournament.tournament_id;
+    }),
+    announcement_tournament_ids: announcementTournaments.map(function(tournament) {
+      return tournament.tournament_id;
+    }),
+    reminder_tournament_ids: reminderTournaments.map(function(tournament) {
+      return tournament.tournament_id;
+    }),
+    message_count: messages.length,
+    manager_backup: managerBackup,
+  };
 }
 
 function sendScheduledAppliedNotifications() {
@@ -2132,19 +2228,12 @@ function sendScheduledAppliedNotifications() {
 }
 
 function getPendingAnnouncementTournaments() {
-  const lastSentAt = getLastNotificationSentAt_("announcement");
-
   return listTournaments().filter(function(tournament) {
-    if (tournament.status !== "active") {
+    if (String(tournament.status || "").trim() !== "active") {
       return false;
     }
 
-    const updatedAt = parseOptionalDateTime_(tournament.updated_at);
-    if (!updatedAt) {
-      return false;
-    }
-
-    return !lastSentAt || updatedAt.getTime() > lastSentAt.getTime();
+    return !hasNotificationSentAt_(tournament, "announcement_sent_at");
   }).sort(function(a, b) {
     return String(a.event_start_date || "").localeCompare(
       String(b.event_start_date || "")
@@ -2186,17 +2275,12 @@ function getLastNotificationSentAt_(notificationType) {
 }
 
 function getPendingAppliedNotificationTournaments_() {
-  const notifiedTournamentIds = getNotifiedTournamentIdMap_(
-    "application_completed",
-    "group"
-  );
-
   return listTournaments().filter(function(tournament) {
     if (String(tournament.status || "").trim() !== "applied") {
       return false;
     }
 
-    if (notifiedTournamentIds[String(tournament.tournament_id || "")]) {
+    if (hasNotificationSentAt_(tournament, "application_completed_sent_at")) {
       return false;
     }
 
@@ -2223,8 +2307,144 @@ function getNotifiedTournamentIdMap_(notificationType, sentToType) {
   return notified;
 }
 
+function hasNotificationSentAt_(tournament, fieldName) {
+  return Boolean(String(tournament && tournament[fieldName] || "").trim());
+}
+
+function getTournamentNotificationSentAtField_(notificationType) {
+  const fields = {
+    announcement: "announcement_sent_at",
+    internal_deadline_2days_before: "internal_deadline_reminder_sent_at",
+    internal_deadline_next_day_manager: "manager_internal_deadline_reminder_sent_at",
+    true_deadline_morning_manager: "manager_true_deadline_reminder_sent_at",
+    application_completed: "application_completed_sent_at",
+  };
+
+  return fields[String(notificationType || "").trim()] || "";
+}
+
+function markTournamentNotificationSent_(tournaments, fieldName, sentAt) {
+  const normalizedFieldName = String(fieldName || "").trim();
+  const timestamp = String(sentAt || "").trim() || toIsoString(new Date());
+
+  if (!normalizedFieldName || !Array.isArray(tournaments) || !tournaments.length) {
+    return {
+      updated_count: 0,
+      missing_field: !normalizedFieldName,
+    };
+  }
+
+  const tournamentIds = {};
+  tournaments.forEach(function(tournament) {
+    const tournamentId = String(tournament && tournament.tournament_id || "").trim();
+    if (tournamentId) {
+      tournamentIds[tournamentId] = true;
+    }
+  });
+
+  if (!Object.keys(tournamentIds).length) {
+    return {
+      updated_count: 0,
+    };
+  }
+
+  const sheet = getSheetByName("Tournaments");
+  const values = sheet.getDataRange().getValues();
+
+  if (values.length <= 1) {
+    return {
+      updated_count: 0,
+    };
+  }
+
+  const headers = values[0];
+  const idIndex = headers.indexOf("tournament_id");
+  const fieldIndex = headers.indexOf(normalizedFieldName);
+
+  if (idIndex === -1) {
+    throw new Error("Tournamentsシートに tournament_id 列がありません。");
+  }
+
+  if (fieldIndex === -1) {
+    throw new Error("Tournamentsシートに列を追加してください: " + normalizedFieldName);
+  }
+
+  let updatedCount = 0;
+  for (let i = 1; i < values.length; i += 1) {
+    const tournamentId = String(values[i][idIndex] || "").trim();
+
+    if (!tournamentIds[tournamentId]) {
+      continue;
+    }
+
+    sheet.getRange(i + 1, fieldIndex + 1).setValue(timestamp);
+    updatedCount += 1;
+  }
+
+  if (updatedCount) {
+    invalidateSheetCaches_(["Tournaments"]);
+  }
+
+  return {
+    updated_count: updatedCount,
+  };
+}
+
+function appendGroupNotificationLogs_(tournaments, notificationType, groupId, message) {
+  (tournaments || []).forEach(function(tournament) {
+    appendNotificationLog({
+      tournament_id: tournament.tournament_id,
+      notification_type: notificationType,
+      sent_to_type: "group",
+      sent_to_id: groupId,
+      message: message,
+    });
+  });
+}
+
+function mergeTournamentsById_() {
+  const merged = [];
+  const seen = {};
+
+  Array.prototype.slice.call(arguments).forEach(function(tournaments) {
+    (tournaments || []).forEach(function(tournament) {
+      const tournamentId = String(tournament.tournament_id || "").trim();
+
+      if (!tournamentId || seen[tournamentId]) {
+        return;
+      }
+
+      seen[tournamentId] = true;
+      merged.push(tournament);
+    });
+  });
+
+  return merged;
+}
+
+function getCurrentWeekDateRange_() {
+  const today = parseDateOnly(
+    Utilities.formatDate(new Date(), "Asia/Tokyo", "yyyy-MM-dd")
+  );
+  const dayOfWeek = today.getDay();
+  const mondayOffset = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
+  const start = addDays(today, mondayOffset);
+  const end = addDays(start, 6);
+
+  return {
+    start_key: normalizeDateKey(start),
+    end_key: normalizeDateKey(end),
+  };
+}
+
 function sendScheduledTournamentReminders() {
-  const groupResult = sendScheduledGroupReminders_();
+  const groupResult = {
+    sent: false,
+    skipped: true,
+    reason: "handled_by_weekly_digest",
+    notification_type: "internal_deadline_2days_before",
+    tournament_ids: [],
+  };
   const managerInternalResult = sendScheduledManagerInternalDeadlineReminders_();
   const managerTrueDeadlineResult = sendScheduledManagerTrueDeadlineReminders_();
   const result = {
@@ -2255,6 +2475,12 @@ function sendScheduledGroupReminders_() {
     tournaments,
     "internal_deadline_2days_before"
   );
+  const sentAt = toIsoString(new Date());
+  const managerBackup = sendManagerBackupForGroupMessage_(
+    message,
+    "internal_deadline_2days_before",
+    tournaments
+  );
 
   pushLineMessage(groupId, [{
     type: "text",
@@ -2270,6 +2496,11 @@ function sendScheduledGroupReminders_() {
       message: message,
     });
   });
+  markTournamentNotificationSent_(
+    tournaments,
+    "internal_deadline_reminder_sent_at",
+    sentAt
+  );
 
   return {
     sent: true,
@@ -2279,6 +2510,7 @@ function sendScheduledGroupReminders_() {
     tournament_ids: tournaments.map(function(tournament) {
       return tournament.tournament_id;
     }),
+    manager_backup: managerBackup,
   };
 }
 
@@ -2288,6 +2520,34 @@ function getPendingGroupReminderTournaments_() {
     sent_to_type: "group",
     date_field: "internal_deadline",
     days_offset: 2,
+    sent_at_field: "internal_deadline_reminder_sent_at",
+  });
+}
+
+function getPendingWeeklyGroupReminderTournaments_() {
+  const range = getCurrentWeekDateRange_();
+
+  return listTournaments().filter(function(tournament) {
+    const tournamentId = String(tournament.tournament_id || "").trim();
+    const deadlineKey = normalizeDateKey(tournament.internal_deadline);
+
+    if (String(tournament.status || "").trim() !== "active") {
+      return false;
+    }
+
+    if (!tournamentId || !deadlineKey) {
+      return false;
+    }
+
+    if (hasNotificationSentAt_(tournament, "internal_deadline_reminder_sent_at")) {
+      return false;
+    }
+
+    return deadlineKey >= range.start_key && deadlineKey <= range.end_key;
+  }).sort(function(a, b) {
+    return String(a.internal_deadline || "").localeCompare(String(b.internal_deadline || "")) ||
+      String(a.event_start_date || "").localeCompare(String(b.event_start_date || "")) ||
+      String(a.title || "").localeCompare(String(b.title || ""), "ja");
   });
 }
 
@@ -2306,6 +2566,7 @@ function getPendingManagerInternalDeadlineReminderTournaments_() {
     sent_to_type: "manager",
     date_field: "internal_deadline",
     days_offset: -1,
+    sent_at_field: "manager_internal_deadline_reminder_sent_at",
   });
 }
 
@@ -2324,18 +2585,14 @@ function getPendingManagerTrueDeadlineReminderTournaments_() {
     sent_to_type: "manager",
     date_field: "true_deadline",
     days_offset: 0,
+    sent_at_field: "manager_true_deadline_reminder_sent_at",
   });
 }
 
 function getPendingReminderTournamentsByDateOffset_(options) {
-  const notificationType = String(options.notification_type || "").trim();
-  const sentToType = String(options.sent_to_type || "").trim();
   const dateField = String(options.date_field || "").trim();
   const daysOffset = Number(options.days_offset || 0);
-  const notifiedTournamentIds = getNotifiedTournamentIdMap_(
-    notificationType,
-    sentToType
-  );
+  const sentAtField = String(options.sent_at_field || "").trim();
   const targetDateKey = Utilities.formatDate(
     addDays(new Date(), daysOffset),
     "Asia/Tokyo",
@@ -2349,7 +2606,11 @@ function getPendingReminderTournamentsByDateOffset_(options) {
       return false;
     }
 
-    if (!tournamentId || notifiedTournamentIds[tournamentId]) {
+    if (!tournamentId) {
+      return false;
+    }
+
+    if (sentAtField && hasNotificationSentAt_(tournament, sentAtField)) {
       return false;
     }
 
@@ -2547,6 +2808,12 @@ function sendGroupReminder(adminToken, tournamentIds, notificationType) {
   }
 
   const message = buildGroupReminderMessage(tournaments, notificationType);
+  const sentAt = toIsoString(new Date());
+  const managerBackup = sendManagerBackupForGroupMessage_(
+    message,
+    notificationType,
+    tournaments
+  );
   pushLineMessage(groupId, [{
     type: "text",
     text: message,
@@ -2561,6 +2828,11 @@ function sendGroupReminder(adminToken, tournamentIds, notificationType) {
       message: message,
     });
   });
+  markTournamentNotificationSent_(
+    tournaments,
+    "internal_deadline_reminder_sent_at",
+    sentAt
+  );
 
   return {
     sent: true,
@@ -2569,12 +2841,19 @@ function sendGroupReminder(adminToken, tournamentIds, notificationType) {
       return tournament.tournament_id;
     }),
     notification_type: notificationType,
+    manager_backup: managerBackup,
   };
 }
 
 function sendAppliedNotificationForTournaments_(tournaments) {
   const groupId = getLineGroupId();
   const message = buildAppliedNotificationMessage_(tournaments);
+  const sentAt = toIsoString(new Date());
+  const managerBackup = sendManagerBackupForGroupMessage_(
+    message,
+    "application_completed",
+    tournaments
+  );
 
   pushLineMessage(groupId, [{
     type: "text",
@@ -2590,6 +2869,11 @@ function sendAppliedNotificationForTournaments_(tournaments) {
       message: message,
     });
   });
+  markTournamentNotificationSent_(
+    tournaments,
+    "application_completed_sent_at",
+    sentAt
+  );
 
   return {
     sent: true,
@@ -2597,7 +2881,138 @@ function sendAppliedNotificationForTournaments_(tournaments) {
     tournament_ids: tournaments.map(function(tournament) {
       return tournament.tournament_id;
     }),
+    manager_backup: managerBackup,
   };
+}
+
+function sendManagerBackupForGroupMessage_(message, notificationType, tournaments) {
+  return sendManagerBackupForGroupMessages_(
+    [{
+      type: "text",
+      text: message,
+    }],
+    notificationType,
+    tournaments
+  );
+}
+
+function sendManagerBackupForGroupMessages_(messages, notificationType, tournaments) {
+  const lineMessages = normalizeLineMessageObjects_(messages);
+  const messageLogText = buildLineMessagesLogText_(lineMessages);
+  const managerResolution = getActiveManagerLineUserIds_();
+  const invalidManagerIds = managerResolution.invalid_manager_ids;
+  const managerIds = managerResolution.manager_ids;
+  const tournamentIds = (tournaments || []).map(function(tournament) {
+    return String(tournament.tournament_id || "").trim();
+  }).filter(Boolean);
+  const sentManagerIds = [];
+  const failedManagerIds = [];
+
+  if (!lineMessages.length) {
+    return {
+      sent: false,
+      skipped: true,
+      manager_count: 0,
+      failed_manager_ids: [],
+    };
+  }
+
+  if (invalidManagerIds.length) {
+    appendNotificationLog({
+      tournament_id: tournamentIds.join(", "),
+      notification_type: notificationType + "_manager_backup_skipped",
+      sent_to_type: "manager",
+      sent_to_id: "",
+      message: "Invalid LINE user IDs in Managers: " + invalidManagerIds.join(", "),
+    });
+  }
+
+  if (!managerIds.length) {
+    appendNotificationLog({
+      tournament_id: tournamentIds.join(", "),
+      notification_type: notificationType + "_manager_backup_skipped",
+      sent_to_type: "manager",
+      sent_to_id: "",
+      message: "No active managers with valid LINE user ID.",
+    });
+    return {
+      sent: false,
+      skipped: true,
+      manager_count: 0,
+      failed_manager_ids: [],
+    };
+  }
+
+  managerIds.forEach(function(managerId) {
+    try {
+      pushLineMessage(managerId, lineMessages);
+      sentManagerIds.push(managerId);
+      appendManagerBackupNotificationLogs_(
+        tournamentIds,
+        notificationType,
+        managerId,
+        messageLogText
+      );
+    } catch (error) {
+      failedManagerIds.push(managerId);
+      appendNotificationLog({
+        tournament_id: tournamentIds.join(", "),
+        notification_type: notificationType + "_manager_backup_error",
+        sent_to_type: "manager",
+        sent_to_id: managerId,
+        message: String(error),
+      });
+    }
+  });
+
+  return {
+    sent: sentManagerIds.length > 0,
+    skipped: false,
+    manager_count: sentManagerIds.length,
+    failed_manager_ids: failedManagerIds,
+  };
+}
+
+function normalizeLineMessageObjects_(messages) {
+  if (!Array.isArray(messages)) {
+    return [{
+      type: "text",
+      text: String(messages || ""),
+    }];
+  }
+
+  return messages.filter(function(message) {
+    return message && message.type;
+  });
+}
+
+function buildLineMessagesLogText_(messages) {
+  return (messages || []).map(function(message) {
+    if (message.type === "text") {
+      return String(message.text || "");
+    }
+
+    return JSON.stringify(message);
+  }).join("\n\n---\n\n");
+}
+
+function appendManagerBackupNotificationLogs_(
+  tournamentIds,
+  notificationType,
+  managerId,
+  message
+) {
+  const ids = tournamentIds && tournamentIds.length ? tournamentIds : [""];
+
+  ids.forEach(function(tournamentId) {
+    appendNotificationLog({
+      tournament_id: tournamentId,
+      notification_type: notificationType + "_manager_backup",
+      sent_to_type: "manager",
+      sent_to_id: managerId,
+      message: message,
+    });
+  });
 }
 
 function sendManagerReminder(adminToken, tournamentIds, notificationType) {
@@ -2632,6 +3047,7 @@ function sendManagerReminderForTournaments_(tournaments, notificationType, optio
     options.strict_missing_manager !== false;
   const groupedTargets = {};
   const skipped = [];
+  const sentAt = toIsoString(new Date());
 
   (tournaments || []).forEach(function(tournament) {
     const managerLineUserId = resolveManagerLineUserId(tournament);
@@ -2686,6 +3102,11 @@ function sendManagerReminderForTournaments_(tournaments, notificationType, optio
         message: message,
       });
     });
+    markTournamentNotificationSent_(
+      managedTournaments,
+      getTournamentNotificationSentAtField_(notificationType),
+      sentAt
+    );
   });
 
   if (!Object.keys(groupedTargets).length) {
@@ -2853,6 +3274,41 @@ function buildGroupReminderMessage(tournaments, notificationType) {
     TOURNAMENT_LINES: buildGroupedTournamentSummaryLines_(tournaments).join("\n"),
     ENTRY_URL: entryUrl,
     DRIVE_FOLDER_URL: getDriveFolderUrlForLine_(),
+  });
+}
+
+function buildWeeklyGroupReminderMessage_(tournaments) {
+  const first = tournaments[0];
+
+  return [
+    "＝＝＝＝＝＝＝＝＝＝＝",
+    "【今週の回答締切リマインド】",
+    "＝＝＝＝＝＝＝＝＝＝＝",
+    "",
+    "今週中にサークル内締切がある大会です。",
+    "参加を考えている方は、忘れずに回答してください。",
+    "",
+    "【対象大会】",
+    buildWeeklyDeadlineTournamentLines_(tournaments).join("\n"),
+    "",
+    "【回答ページ】",
+    getTournamentEntryUrlForLine_(first),
+    "",
+    "【要項・案内】",
+    getDriveFolderUrlForLine_(),
+    "",
+    "※サークル内限定の案内です。URLの外部共有はしないでください。",
+  ].join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function buildWeeklyDeadlineTournamentLines_(tournaments) {
+  return (tournaments || []).map(function(tournament) {
+    return (
+      formatDateTimeLabel(tournament.internal_deadline) + "締切 " +
+      formatDateLabel(normalizeDateKey(tournament.event_start_date)) + " " +
+      buildTournamentHeadlineLabel_(tournament) +
+      buildTournamentTypeLabel_(tournament)
+    ).trim();
   });
 }
 
@@ -4500,13 +4956,12 @@ function installScheduledTriggersFromAdmin_() {
 
 function installDailyAnnouncementTrigger() {
   deleteTriggersByHandler_("sendScheduledDailyAnnouncements");
-  const time = getTimeSettingParts_("DAILY_ANNOUNCEMENT_TIME", "17:00");
 
   const trigger = ScriptApp.newTrigger("sendScheduledDailyAnnouncements")
     .timeBased()
-    .everyDays(1)
-    .atHour(time.hour)
-    .nearMinute(time.minute)
+    .onWeekDay(ScriptApp.WeekDay.MONDAY)
+    .atHour(17)
+    .nearMinute(0)
     .create();
 
   Logger.log(trigger.getUniqueId());
