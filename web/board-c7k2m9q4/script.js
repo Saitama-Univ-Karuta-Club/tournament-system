@@ -197,6 +197,7 @@ elements.secondaryTabs.forEach(function(button) {
 if (elements.tournamentResponseSort) {
   elements.tournamentResponseSort.addEventListener("change", function() {
     state.tournamentResponseSort = elements.tournamentResponseSort.value || "internal_deadline";
+    renderTournamentList();
     renderTournamentResponseOverview();
   });
 }
@@ -1975,10 +1976,22 @@ function getGroupedTournamentListItems_() {
     item.title = buildTournamentDisplayTitleForGrouping_(item.title, item.grades);
     return item;
   }).sort(function(a, b) {
+    return compareTournamentListItems_(a, b);
+  });
+}
+
+function compareTournamentListItems_(a, b) {
+  const sortKey = state.tournamentResponseSort;
+
+  if (sortKey === "event_start_date") {
     return compareOverviewDateValues_(a.event_start_date, b.event_start_date) ||
       compareOverviewDateValues_(a.internal_deadline, b.internal_deadline) ||
       String(a.title || "").localeCompare(String(b.title || ""), "ja");
-  });
+  }
+
+  return compareOverviewDateValues_(a.internal_deadline, b.internal_deadline) ||
+    compareOverviewDateValues_(a.event_start_date, b.event_start_date) ||
+    String(a.title || "").localeCompare(String(b.title || ""), "ja");
 }
 
 function getTournamentFollowupItems_() {
