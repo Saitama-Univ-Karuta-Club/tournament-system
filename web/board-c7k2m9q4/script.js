@@ -196,7 +196,7 @@ elements.secondaryTabs.forEach(function(button) {
 
 if (elements.tournamentResponseSort) {
   elements.tournamentResponseSort.addEventListener("change", function() {
-    state.tournamentResponseSort = elements.tournamentResponseSort.value || "internal_deadline";
+    syncTournamentSortStateFromControl_();
     renderTournamentList();
     renderTournamentResponseOverview();
   });
@@ -810,6 +810,7 @@ function renderTabs() {
 }
 
 function renderTournamentList() {
+  syncTournamentSortStateFromControl_();
   const visibleTournaments = getGroupedTournamentListItems_();
 
   if (!visibleTournaments.length) {
@@ -1885,6 +1886,7 @@ function renderTournamentResponseOverview() {
 }
 
 function getSortedTournamentResponseOverview_() {
+  syncTournamentSortStateFromControl_();
   const items = state.tournamentResponseOverview.slice();
   const sortKey = state.tournamentResponseSort;
 
@@ -1912,10 +1914,6 @@ function getVisibleTournamentResponseOverview_() {
 function getFilteredTournamentListItems_() {
   return state.tournaments
     .slice()
-    .sort(function(a, b) {
-      return compareOverviewDateValues_(a.event_start_date, b.event_start_date) ||
-        String(a.title || "").localeCompare(String(b.title || ""), "ja");
-    })
     .filter(function(item) {
       return Boolean(state.tournamentListFilters[getTournamentStatusTag_(item.status).key]);
     });
@@ -1992,6 +1990,17 @@ function compareTournamentListItems_(a, b) {
   return compareOverviewDateValues_(a.internal_deadline, b.internal_deadline) ||
     compareOverviewDateValues_(a.event_start_date, b.event_start_date) ||
     String(a.title || "").localeCompare(String(b.title || ""), "ja");
+}
+
+function syncTournamentSortStateFromControl_() {
+  if (!elements.tournamentResponseSort) {
+    return;
+  }
+
+  const value = String(elements.tournamentResponseSort.value || "").trim();
+  state.tournamentResponseSort = value === "event_start_date" ?
+    "event_start_date" :
+    "internal_deadline";
 }
 
 function getTournamentFollowupItems_() {
@@ -2338,22 +2347,48 @@ function formatDateTimeLabel_(value) {
 }
 
 function compareOverviewDateValues_(left, right) {
-  const leftValue = String(left || "");
-  const rightValue = String(right || "");
+  const leftValue = getComparableDateValue_(left);
+  const rightValue = getComparableDateValue_(right);
 
-  if (!leftValue && !rightValue) {
+  if (leftValue === null && rightValue === null) {
     return 0;
   }
 
-  if (!leftValue) {
+  if (leftValue === null) {
     return 1;
   }
 
-  if (!rightValue) {
+  if (rightValue === null) {
     return -1;
   }
 
-  return leftValue.localeCompare(rightValue);
+  return leftValue - rightValue;
+}
+
+function getComparableDateValue_(value) {
+  if (!value) {
+    return null;
+  }
+
+  if (Object.prototype.toString.call(value) === "[object Date]") {
+    return isNaN(value.getTime()) ? null : value.getTime();
+  }
+
+  const normalized = normalizeDateKey_(value);
+  const parsedDateOnly = parseDateOnly_(normalized);
+
+  if (!isNaN(parsedDateOnly.getTime())) {
+    if (/^\d{4}-\d{2}-\d{2}$/.test(String(value || "").trim())) {
+      return parsedDateOnly.getTime();
+    }
+  }
+
+  const parsedDateTime = new Date(value);
+  if (!isNaN(parsedDateTime.getTime())) {
+    return parsedDateTime.getTime();
+  }
+
+  return !isNaN(parsedDateOnly.getTime()) ? parsedDateOnly.getTime() : null;
 }
 
 function formatOverviewGradeLabel(grade) {
