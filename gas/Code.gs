@@ -426,7 +426,7 @@ function getAdminSettings_() {
     nightly_automation_time: getScriptTimeSetting_(
       properties,
       "NIGHTLY_AUTOMATION_TIME",
-      "23:59"
+      "00:00"
     ),
     line_message_templates: getLineMessageTemplates_(),
   };
@@ -550,7 +550,7 @@ function normalizeAdminSettingsInput_(input) {
     ),
     nightly_automation_time: normalizeTimeSetting_(
       input.nightly_automation_time,
-      "23:59"
+      "00:00"
     ),
     line_message_templates: normalizeLineMessageTemplatesInput_(
       input.line_message_templates || {}
@@ -2761,9 +2761,9 @@ function getAutomaticTournamentStatus_(tournament, applicantCount, now) {
     return "closed";
   }
 
-  const noApplicantCloseAt = buildTournamentStatusCheckpoint_(
+  const noApplicantCloseAt = buildStartOfDateCheckpoint_(
     tournament.true_deadline,
-    2
+    1
   );
 
   if (
@@ -2786,6 +2786,18 @@ function buildTournamentStatusCheckpoint_(value, daysToAdd) {
 
   const date = addDays(parseDateOnly(baseDateKey), Number(daysToAdd || 0));
   date.setHours(23, 59, 0, 0);
+  return date;
+}
+
+function buildStartOfDateCheckpoint_(value, daysToAdd) {
+  const baseDateKey = normalizeDateKey(value);
+
+  if (!baseDateKey) {
+    return null;
+  }
+
+  const date = addDays(parseDateOnly(baseDateKey), Number(daysToAdd || 0));
+  date.setHours(0, 0, 0, 0);
   return date;
 }
 
@@ -4986,7 +4998,7 @@ function installPendingMemberRegistrationSummaryTrigger() {
 function installAppliedNotificationTrigger() {
   deleteTriggersByHandler_("sendScheduledAppliedNotifications");
   deleteTriggersByHandler_("runNightlyTournamentAutomation");
-  const time = getTimeSettingParts_("NIGHTLY_AUTOMATION_TIME", "23:59");
+  const time = getTimeSettingParts_("NIGHTLY_AUTOMATION_TIME", "00:00");
 
   const trigger = ScriptApp.newTrigger("runNightlyTournamentAutomation")
     .timeBased()
