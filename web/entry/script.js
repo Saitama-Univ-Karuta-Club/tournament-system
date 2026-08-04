@@ -369,9 +369,11 @@ async function fetchPublicTournaments(pageToken) {
   const url = new URL(API_BASE_URL);
   url.searchParams.set("action", "list_public_tournaments");
   url.searchParams.set("page_token", pageToken);
+  url.searchParams.set("cache_bust", buildCacheBustValue_());
 
   const response = await fetch(url.toString(), {
     method: "GET",
+    cache: "no-store",
   });
   const data = await readJsonResponse(response, "大会情報の取得");
 
@@ -387,9 +389,11 @@ async function fetchMemberResponses(pageToken, memberName) {
   url.searchParams.set("action", "list_member_responses");
   url.searchParams.set("page_token", pageToken);
   url.searchParams.set("member_name", memberName);
+  url.searchParams.set("cache_bust", buildCacheBustValue_());
 
   const response = await fetch(url.toString(), {
     method: "GET",
+    cache: "no-store",
   });
   const data = await readJsonResponse(response, "既存回答の取得");
 
@@ -410,6 +414,7 @@ async function fetchMemberResponses(pageToken, memberName) {
 async function submitResponses(payload) {
   const response = await fetch(API_BASE_URL, {
     method: "POST",
+    cache: "no-store",
     headers: {
       "Content-Type": "text/plain;charset=utf-8",
     },
@@ -432,6 +437,7 @@ async function submitResponses(payload) {
 async function submitMemberRequest(member) {
   const response = await fetch(API_BASE_URL, {
     method: "POST",
+    cache: "no-store",
     headers: {
       "Content-Type": "text/plain;charset=utf-8",
     },
@@ -447,6 +453,10 @@ async function submitMemberRequest(member) {
   }
 
   return data;
+}
+
+function buildCacheBustValue_() {
+  return String(Date.now()) + "_" + Math.random().toString(36).slice(2);
 }
 
 async function readJsonResponse(response, actionLabel) {

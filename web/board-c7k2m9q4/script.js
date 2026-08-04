@@ -1616,7 +1616,12 @@ async function fetchJsonWithParams(action, params) {
     url.searchParams.set("admin_token", state.adminToken);
   }
 
-  const response = await fetch(url.toString(), { method: "GET" });
+  url.searchParams.set("cache_bust", buildCacheBustValue_());
+
+  const response = await fetch(url.toString(), {
+    method: "GET",
+    cache: "no-store",
+  });
   const data = await readJsonResponse(response, "読み込み(" + action + ")");
 
   if (!data.ok) {
@@ -1635,6 +1640,7 @@ async function postJson(payload) {
 
   const response = await fetch(API_BASE_URL, {
     method: "POST",
+    cache: "no-store",
     headers: {
       "Content-Type": "text/plain;charset=utf-8",
     },
@@ -1650,6 +1656,10 @@ async function postJson(payload) {
   }
 
   return data;
+}
+
+function buildCacheBustValue_() {
+  return String(Date.now()) + "_" + Math.random().toString(36).slice(2);
 }
 
 async function readJsonResponse(response, actionLabel) {
