@@ -752,13 +752,19 @@ async function loadAdminData() {
   showStatus("管理データを読み込んでいます...", "");
 
   try {
-    const data = await fetchJson("admin_bootstrap");
+    const settingsData = await fetchJson("list_admin_settings");
+    const tournamentData = await fetchJson("list_tournaments");
+    const memberData = await fetchJson("list_admin_members");
+    const managerData = await fetchJson("list_managers");
+    const overviewData = await fetchOptionalJson_(
+      "list_tournament_response_overview"
+    );
 
-    state.settings = data.settings || {};
-    state.tournaments = data.tournaments || [];
-    state.members = data.members || [];
-    state.managers = data.managers || [];
-    state.tournamentResponseOverview = data.tournament_response_overview || [];
+    state.settings = settingsData.settings || {};
+    state.tournaments = tournamentData.tournaments || [];
+    state.members = memberData.members || [];
+    state.managers = managerData.managers || [];
+    state.tournamentResponseOverview = overviewData.overview || [];
 
     populateManagerOptions();
     populateSettingsForm();
@@ -769,7 +775,12 @@ async function loadAdminData() {
     renderPendingMemberRequests();
     renderMemberList();
     renderCalendarEmbed_();
-    showStatus("", "");
+    showStatus(
+      overviewData.ok === false ?
+        "申込概要の取得だけ失敗しました。大会・メンバー編集は利用できます。" :
+        "",
+      overviewData.ok === false ? "error" : ""
+    );
   } catch (error) {
     showStatus(error.message || "管理データの取得に失敗しました。", "error");
     throw error;
@@ -1353,7 +1364,7 @@ function populateLineBotSettingsForm_() {
   elements.settingsPendingMemberSummaryTime.value =
     state.settings.pending_member_summary_time || "07:00";
   elements.settingsNightlyAutomationTime.value =
-    state.settings.nightly_automation_time || "23:59";
+    state.settings.nightly_automation_time || "00:00";
 }
 
 function populateLineMessageSettingsForm_() {
@@ -1558,6 +1569,17 @@ function syncDetailEditors() {
 
 async function fetchJson(action) {
   return fetchJsonWithParams(action, {});
+}
+
+async function fetchOptionalJson_(action) {
+  try {
+    return await fetchJson(action);
+  } catch (error) {
+    return {
+      ok: false,
+      error: error.message || String(error),
+    };
+  }
 }
 
 async function fetchJsonWithParams(action, params) {

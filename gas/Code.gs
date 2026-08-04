@@ -60,6 +60,14 @@ function doGet(e) {
       });
     }
 
+    if (action === "list_admin_settings") {
+      validateAdminToken(adminToken);
+      return jsonOutput({
+        ok: true,
+        settings: getAdminSettings_(),
+      });
+    }
+
     if (action === "list_admin_members") {
       validateAdminToken(adminToken);
       return jsonOutput({
