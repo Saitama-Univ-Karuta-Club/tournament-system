@@ -456,11 +456,18 @@ async function readJsonResponse(response, actionLabel) {
     return JSON.parse(text);
   } catch (error) {
     const trimmed = String(text || "").trim();
+    const responseUrl = response && response.url ? response.url : "";
+    const debugParts = [
+      "HTTP " + response.status,
+      responseUrl ? "URL: " + responseUrl : "",
+      trimmed ? "先頭: " + trimmed.slice(0, 160).replace(/\s+/g, " ") : "",
+    ].filter(Boolean);
 
     if (/^<!DOCTYPE html/i.test(trimmed) || /^<html/i.test(trimmed)) {
       throw new Error(
         actionLabel +
-        "先の Apps Script が JSON ではなく HTML を返しました。Webアプリの再デプロイ、公開権限、API URL を確認してください。"
+        "先の Apps Script が JSON ではなく HTML を返しました。Webアプリの再デプロイ、公開権限、API URL を確認してください。" +
+        (debugParts.length ? " " + debugParts.join(" / ") : "")
       );
     }
 
