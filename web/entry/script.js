@@ -366,22 +366,74 @@ async function handleMemberChange() {
 }
 
 async function fetchPublicTournaments(pageToken) {
+  const pageParams = {
+    page_token: pageToken,
+  };
+  const pageData = await fetchPublicJsonWithParams_(
+    "get_public_page",
+    pageParams,
+    "大会ページ設定の取得"
+  );
+  const memberData = await fetchPublicJsonWithParams_(
+    "list_members",
+    {},
+    "メンバー一覧の取得"
+  );
+  const tournamentData = await fetchPublicJsonWithParams_(
+    "list_public_tournament_items",
+    pageParams,
+    "大会一覧の取得"
+  );
+  const overviewData = await fetchOptionalPublicJsonWithParams_(
+    "list_public_tournament_response_overview",
+    pageParams,
+    "参加状況一覧の取得"
+  );
+
+  return {
+    ok: true,
+    page: pageData.page || {},
+    settings: pageData.settings || {},
+    members: memberData.members || [],
+    tournaments: tournamentData.tournaments || [],
+    tournament_response_overview: overviewData.ok ?
+      overviewData.overview || [] :
+      [],
+  };
+}
+
+async function fetchPublicJsonWithParams_(action, params, actionLabel) {
   const url = new URL(API_BASE_URL);
-  url.searchParams.set("action", "list_public_tournaments");
-  url.searchParams.set("page_token", pageToken);
+  url.searchParams.set("action", action);
+  Object.keys(params || {}).forEach(function(key) {
+    if (params[key] !== undefined && params[key] !== null && params[key] !== "") {
+      url.searchParams.set(key, params[key]);
+    }
+  });
   url.searchParams.set("cache_bust", buildCacheBustValue_());
 
   const response = await fetch(url.toString(), {
     method: "GET",
     cache: "no-store",
   });
-  const data = await readJsonResponse(response, "大会情報の取得");
+  const data = await readJsonResponse(response, actionLabel || "読み込み");
 
   if (!data.ok) {
-    throw new Error(data.error || "大会情報の取得に失敗しました。");
+    throw new Error(data.error || (actionLabel || "読み込み") + "に失敗しました。");
   }
 
   return data;
+}
+
+async function fetchOptionalPublicJsonWithParams_(action, params, actionLabel) {
+  try {
+    return await fetchPublicJsonWithParams_(action, params, actionLabel);
+  } catch (error) {
+    return {
+      ok: false,
+      error: error.message || String(error),
+    };
+  }
 }
 
 async function fetchMemberResponses(pageToken, memberName) {
