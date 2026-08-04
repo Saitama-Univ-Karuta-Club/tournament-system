@@ -1596,7 +1596,7 @@ async function fetchJsonWithParams(action, params) {
   }
 
   const response = await fetch(url.toString(), { method: "GET" });
-  const data = await readJsonResponse(response, "読み込み");
+  const data = await readJsonResponse(response, "読み込み(" + action + ")");
 
   if (!data.ok) {
     throw new Error(data.error || "読み込みに失敗しました。");
@@ -1619,7 +1619,10 @@ async function postJson(payload) {
     },
     body: JSON.stringify(nextPayload),
   });
-  const data = await readJsonResponse(response, "保存");
+  const data = await readJsonResponse(
+    response,
+    "保存(" + String(nextPayload.action || "unknown") + ")"
+  );
 
   if (!data.ok) {
     throw new Error(data.error || "保存に失敗しました。");
@@ -1639,7 +1642,9 @@ async function readJsonResponse(response, actionLabel) {
     if (/^<!DOCTYPE html/i.test(trimmed) || /^<html/i.test(trimmed)) {
       throw new Error(
         actionLabel +
-        "先の Apps Script が JSON ではなく HTML を返しました。Webアプリの再デプロイ、公開権限、API URL を確認してください。"
+        "先の Apps Script が JSON ではなく HTML を返しました。HTTP " +
+        response.status +
+        "。Webアプリの再デプロイ、公開権限、API URL を確認してください。"
       );
     }
 

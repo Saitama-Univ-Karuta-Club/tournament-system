@@ -376,7 +376,6 @@ function getAdminSettings_() {
   const driveFolderId = String(
     properties.getProperty("DRIVE_FOLDER_ID") || ""
   ).trim();
-  const annualScheduleUrls = getAnnualScheduleUrls_();
 
   return {
     drive_folder_url: driveFolderId ?
@@ -384,10 +383,10 @@ function getAdminSettings_() {
       "",
     annual_schedule_preview_url: String(
       properties.getProperty("ANNUAL_SCHEDULE_PREVIEW_URL") || ""
-    ).trim() || annualScheduleUrls.preview_url,
+    ).trim(),
     annual_schedule_view_url: String(
       properties.getProperty("ANNUAL_SCHEDULE_VIEW_URL") || ""
-    ).trim() || annualScheduleUrls.view_url,
+    ).trim(),
     web_base_url: String(
       properties.getProperty("WEB_BASE_URL") || ""
     ).trim(),
