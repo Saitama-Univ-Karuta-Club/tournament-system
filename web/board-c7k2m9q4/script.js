@@ -1604,6 +1604,21 @@ async function fetchOptionalJson_(action) {
 }
 
 async function fetchJsonWithParams(action, params) {
+  const data = await fetchJsonWithRetry_(
+    function() {
+      return buildAdminApiUrl_(action, params);
+    },
+    "読み込み(" + action + ")"
+  );
+
+  if (!data.ok) {
+    throw new Error(data.error || "読み込みに失敗しました。");
+  }
+
+  return data;
+}
+
+function buildAdminApiUrl_(action, params) {
   const url = new URL(API_BASE_URL);
   url.searchParams.set("action", action);
   Object.keys(params || {}).forEach(function(key) {
@@ -1618,17 +1633,7 @@ async function fetchJsonWithParams(action, params) {
 
   url.searchParams.set("cache_bust", buildCacheBustValue_());
 
-  const response = await fetch(url.toString(), {
-    method: "GET",
-    cache: "no-store",
-  });
-  const data = await readJsonResponse(response, "読み込み(" + action + ")");
-
-  if (!data.ok) {
-    throw new Error(data.error || "読み込みに失敗しました。");
-  }
-
-  return data;
+  return url.toString();
 }
 
 async function postJson(payload) {
@@ -1662,6 +1667,36 @@ function buildCacheBustValue_() {
   return String(Date.now()) + "_" + Math.random().toString(36).slice(2);
 }
 
+async function fetchJsonWithRetry_(urlBuilder, actionLabel) {
+  let lastError = null;
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const response = await fetch(urlBuilder(), {
+        method: "GET",
+        cache: "no-store",
+      });
+      return await readJsonResponse(response, actionLabel);
+    } catch (error) {
+      lastError = error;
+
+      if (!error || error.isRetryableContentServiceHtml !== true || attempt >= 2) {
+        throw error;
+      }
+
+      await wait_(250 * (attempt + 1));
+    }
+  }
+
+  throw lastError;
+}
+
+function wait_(milliseconds) {
+  return new Promise(function(resolve) {
+    window.setTimeout(resolve, milliseconds);
+  });
+}
+
 async function readJsonResponse(response, actionLabel) {
   const text = await response.text();
 
@@ -1677,13 +1712,17 @@ async function readJsonResponse(response, actionLabel) {
     ].filter(Boolean);
 
     if (/^<!DOCTYPE html/i.test(trimmed) || /^<html/i.test(trimmed)) {
-      throw new Error(
+      const htmlError = new Error(
         actionLabel +
         "先の Apps Script が JSON ではなく HTML を返しました。HTTP " +
         response.status +
         "。Webアプリの再デプロイ、公開権限、API URL を確認してください。" +
         (debugParts.length ? " " + debugParts.join(" / ") : "")
       );
+      htmlError.isRetryableContentServiceHtml =
+        response.status === 404 &&
+        /^https:\/\/script\.googleusercontent\.com\/macros\/echo/i.test(responseUrl);
+      throw htmlError;
     }
 
     throw new Error(

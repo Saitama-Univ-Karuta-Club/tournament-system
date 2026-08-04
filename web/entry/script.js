@@ -403,6 +403,25 @@ async function fetchPublicTournaments(pageToken) {
 }
 
 async function fetchPublicJsonWithParams_(action, params, actionLabel) {
+  const data = await fetchJsonWithRetry_(
+    function() {
+      return buildPublicApiUrl_(action, params);
+    },
+    {
+      method: "GET",
+      cache: "no-store",
+    },
+    actionLabel || "読み込み"
+  );
+
+  if (!data.ok) {
+    throw new Error(data.error || (actionLabel || "読み込み") + "に失敗しました。");
+  }
+
+  return data;
+}
+
+function buildPublicApiUrl_(action, params) {
   const url = new URL(API_BASE_URL);
   url.searchParams.set("action", action);
   Object.keys(params || {}).forEach(function(key) {
@@ -412,17 +431,7 @@ async function fetchPublicJsonWithParams_(action, params, actionLabel) {
   });
   url.searchParams.set("cache_bust", buildCacheBustValue_());
 
-  const response = await fetch(url.toString(), {
-    method: "GET",
-    cache: "no-store",
-  });
-  const data = await readJsonResponse(response, actionLabel || "読み込み");
-
-  if (!data.ok) {
-    throw new Error(data.error || (actionLabel || "読み込み") + "に失敗しました。");
-  }
-
-  return data;
+  return url.toString();
 }
 
 async function fetchOptionalPublicJsonWithParams_(action, params, actionLabel) {
@@ -437,17 +446,19 @@ async function fetchOptionalPublicJsonWithParams_(action, params, actionLabel) {
 }
 
 async function fetchMemberResponses(pageToken, memberName) {
-  const url = new URL(API_BASE_URL);
-  url.searchParams.set("action", "list_member_responses");
-  url.searchParams.set("page_token", pageToken);
-  url.searchParams.set("member_name", memberName);
-  url.searchParams.set("cache_bust", buildCacheBustValue_());
-
-  const response = await fetch(url.toString(), {
-    method: "GET",
-    cache: "no-store",
-  });
-  const data = await readJsonResponse(response, "既存回答の取得");
+  const data = await fetchJsonWithRetry_(
+    function() {
+      return buildPublicApiUrl_("list_member_responses", {
+        page_token: pageToken,
+        member_name: memberName,
+      });
+    },
+    {
+      method: "GET",
+      cache: "no-store",
+    },
+    "既存回答の取得"
+  );
 
   if (!data.ok) {
     throw new Error(data.error || "既存回答の取得に失敗しました。");
@@ -511,6 +522,33 @@ function buildCacheBustValue_() {
   return String(Date.now()) + "_" + Math.random().toString(36).slice(2);
 }
 
+async function fetchJsonWithRetry_(urlBuilder, fetchOptions, actionLabel) {
+  let lastError = null;
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const response = await fetch(urlBuilder(), fetchOptions);
+      return await readJsonResponse(response, actionLabel);
+    } catch (error) {
+      lastError = error;
+
+      if (!error || error.isRetryableContentServiceHtml !== true || attempt >= 2) {
+        throw error;
+      }
+
+      await wait_(250 * (attempt + 1));
+    }
+  }
+
+  throw lastError;
+}
+
+function wait_(milliseconds) {
+  return new Promise(function(resolve) {
+    window.setTimeout(resolve, milliseconds);
+  });
+}
+
 async function readJsonResponse(response, actionLabel) {
   const text = await response.text();
 
@@ -526,11 +564,15 @@ async function readJsonResponse(response, actionLabel) {
     ].filter(Boolean);
 
     if (/^<!DOCTYPE html/i.test(trimmed) || /^<html/i.test(trimmed)) {
-      throw new Error(
+      const htmlError = new Error(
         actionLabel +
         "先の Apps Script が JSON ではなく HTML を返しました。Webアプリの再デプロイ、公開権限、API URL を確認してください。" +
         (debugParts.length ? " " + debugParts.join(" / ") : "")
       );
+      htmlError.isRetryableContentServiceHtml =
+        response.status === 404 &&
+        /^https:\/\/script\.googleusercontent\.com\/macros\/echo/i.test(responseUrl);
+      throw htmlError;
     }
 
     throw new Error(
