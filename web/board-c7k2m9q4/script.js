@@ -459,7 +459,7 @@ elements.tournamentForm.addEventListener("submit", async function(event) {
       tournament: payload,
       grade_configs: gradeConfigs,
     });
-    await loadAdminData();
+    await refreshTournamentData_();
     if (!wasEditingInModal) {
       state.primaryTab = "tournaments";
       state.tournamentMode = "tournament-create";
@@ -786,6 +786,27 @@ async function loadAdminData() {
     throw error;
   } finally {
     setBusyState(false);
+  }
+}
+
+async function refreshTournamentData_() {
+  const tournamentData = await fetchJson("list_tournaments");
+  const overviewData = await fetchOptionalJson_(
+    "list_tournament_response_overview"
+  );
+
+  state.tournaments = tournamentData.tournaments || [];
+  state.tournamentResponseOverview = overviewData.overview || [];
+
+  renderTournamentList();
+  renderTournamentFollowupList_();
+  renderTournamentResponseOverview();
+
+  if (overviewData.ok === false) {
+    showStatus(
+      "申込概要の取得だけ失敗しました。大会一覧は更新されています。",
+      "error"
+    );
   }
 }
 
@@ -2451,7 +2472,7 @@ async function updateTournamentAppliedStatusForIds_(tournamentIds, isApplied) {
         status: nextStatus,
       });
     }));
-    await loadAdminData();
+    await refreshTournamentData_();
     showStatus(successMessage, "success");
     setBusyState(false);
     showResultOverlay_("更新しました", successMessage);
