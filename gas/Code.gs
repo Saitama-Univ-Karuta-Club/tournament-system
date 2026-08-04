@@ -39,6 +39,31 @@ function doGet(e) {
       });
     }
 
+    if (action === "get_public_page") {
+      const pageToken = e.parameter.page_token || "";
+      return jsonOutput({
+        ok: true,
+        page: getEntryPage(pageToken),
+        settings: getPublicPageSettings_(),
+      });
+    }
+
+    if (action === "list_public_tournament_items") {
+      const pageToken = e.parameter.page_token || "";
+      return jsonOutput({
+        ok: true,
+        tournaments: listPublicTournaments(pageToken),
+      });
+    }
+
+    if (action === "list_public_tournament_response_overview") {
+      const pageToken = e.parameter.page_token || "";
+      return jsonOutput({
+        ok: true,
+        overview: listPublicTournamentResponseOverview(pageToken),
+      });
+    }
+
     if (action === "list_members") {
       return jsonOutput({
         ok: true,
