@@ -369,6 +369,29 @@ async function fetchPublicTournaments(pageToken) {
   const pageParams = {
     page_token: pageToken,
   };
+
+  try {
+    const data = await fetchPublicJsonWithParams_(
+      "list_public_tournaments",
+      pageParams,
+      "大会情報の一括取得"
+    );
+
+    return {
+      ok: true,
+      page: data.page || {},
+      settings: data.settings || {},
+      members: data.members || [],
+      tournaments: data.tournaments || [],
+      tournament_response_overview: data.tournament_response_overview || [],
+    };
+  } catch (error) {
+    console.warn("一括取得に失敗したため、分割取得に切り替えます。", error);
+    return fetchPublicTournamentsFallback_(pageParams);
+  }
+}
+
+async function fetchPublicTournamentsFallback_(pageParams) {
   const pageData = await fetchPublicJsonWithParams_(
     "get_public_page",
     pageParams,

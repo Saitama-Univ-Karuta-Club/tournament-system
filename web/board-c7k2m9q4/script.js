@@ -752,18 +752,13 @@ async function loadAdminData() {
   showStatus("管理データを読み込んでいます...", "");
 
   try {
-    const settingsData = await fetchJson("list_admin_settings");
-    const tournamentData = await fetchJson("list_tournaments");
-    const memberData = await fetchJson("list_admin_members");
-    const managerData = await fetchJson("list_managers");
-    const overviewData = await fetchOptionalJson_(
-      "list_tournament_response_overview"
-    );
+    const bootstrapData = await fetchAdminBootstrap_();
+    const overviewData = bootstrapData.overviewData;
 
-    state.settings = settingsData.settings || {};
-    state.tournaments = tournamentData.tournaments || [];
-    state.members = memberData.members || [];
-    state.managers = managerData.managers || [];
+    state.settings = bootstrapData.settings || {};
+    state.tournaments = bootstrapData.tournaments || [];
+    state.members = bootstrapData.members || [];
+    state.managers = bootstrapData.managers || [];
     state.tournamentResponseOverview = overviewData.overview || [];
 
     populateManagerOptions();
@@ -787,6 +782,51 @@ async function loadAdminData() {
   } finally {
     setBusyState(false);
   }
+}
+
+async function fetchAdminBootstrap_() {
+  try {
+    const data = await fetchJson("admin_bootstrap");
+    return {
+      settings: data.settings || {},
+      tournaments: data.tournaments || [],
+      members: data.members || [],
+      managers: data.managers || [],
+      overviewData: {
+        ok: true,
+        overview: data.tournament_response_overview || [],
+      },
+    };
+  } catch (error) {
+    const errorMessage = String(error && error.message ? error.message : error);
+    if (
+      errorMessage.indexOf("Invalid admin_token") !== -1 ||
+      errorMessage.indexOf("ADMIN_CONSOLE_TOKEN is not set") !== -1
+    ) {
+      throw error;
+    }
+
+    console.warn("管理データの一括取得に失敗したため、分割取得に切り替えます。", error);
+    return fetchAdminBootstrapFallback_();
+  }
+}
+
+async function fetchAdminBootstrapFallback_() {
+  const settingsData = await fetchJson("list_admin_settings");
+  const tournamentData = await fetchJson("list_tournaments");
+  const memberData = await fetchJson("list_admin_members");
+  const managerData = await fetchJson("list_managers");
+  const overviewData = await fetchOptionalJson_(
+    "list_tournament_response_overview"
+  );
+
+  return {
+    settings: settingsData.settings || {},
+    tournaments: tournamentData.tournaments || [],
+    members: memberData.members || [],
+    managers: managerData.managers || [],
+    overviewData: overviewData,
+  };
 }
 
 async function refreshTournamentData_() {
