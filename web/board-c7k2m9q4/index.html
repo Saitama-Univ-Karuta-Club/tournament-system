@@ -10,7 +10,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="./style.css?v=20260710-1">
+  <link rel="stylesheet" href="./style.css?v=20261011-1">
 </head>
 <body>
   <main class="page">
@@ -60,7 +60,7 @@
           <div class="response-panel-header response-panel-header-with-controls">
             <div>
               <h3>登録済み一覧</h3>
-              <p>タグで絞り込みながら、申込状況の確認と大会編集をまとめて行えます。</p>
+              <p>申込状態を複数選んでから、1回の通信でまとめて保存できます。</p>
             </div>
             <div class="response-panel-controls">
               <div class="status-filter-group" aria-label="登録済み大会の表示切り替え">
@@ -84,6 +84,17 @@
                   <option value="event_start_date">大会日時順</option>
                 </select>
               </label>
+            </div>
+          </div>
+          <div id="tournament-status-batch-bar" class="tournament-status-batch-bar" aria-live="polite">
+            <span id="tournament-status-batch-count">ステータス変更はありません。</span>
+            <div class="tournament-status-batch-actions">
+              <button type="button" id="reset-tournament-status-batch-button" class="secondary-button" disabled>
+                変更を取り消す
+              </button>
+              <button type="button" id="save-tournament-status-batch-button" disabled>
+                変更をまとめて保存
+              </button>
             </div>
           </div>
           <div id="tournament-list" class="response-overview-list"></div>
@@ -724,6 +735,6 @@
     </div>
   </form>
 
-  <script src="./script.js?v=20260804-1"></script>
+  <script src="./script.js?v=20261011-1"></script>
 </body>
 </html>

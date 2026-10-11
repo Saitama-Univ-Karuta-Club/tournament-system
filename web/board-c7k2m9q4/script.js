@@ -37,6 +37,8 @@ const state = {
   internalDeadlineManuallyEdited: false,
   gradeScheduleOverrides: {},
   resultOverlayOnClose: null,
+  lastPerformanceMeasurement: null,
+  pendingTournamentStatusUpdates: {},
 };
 
 const elements = {
@@ -45,6 +47,10 @@ const elements = {
   secondaryTabs: document.querySelectorAll(".secondary-tab"),
   subpanels: document.querySelectorAll("[data-subpanel]"),
   tournamentList: document.getElementById("tournament-list"),
+  tournamentStatusBatchBar: document.getElementById("tournament-status-batch-bar"),
+  tournamentStatusBatchCount: document.getElementById("tournament-status-batch-count"),
+  resetTournamentStatusBatchButton: document.getElementById("reset-tournament-status-batch-button"),
+  saveTournamentStatusBatchButton: document.getElementById("save-tournament-status-batch-button"),
   tournamentFollowupList: document.getElementById("tournament-followup-list"),
   tournamentFollowupCount: document.getElementById("tournament-followup-count"),
   memberList: document.getElementById("member-list"),
@@ -208,6 +214,20 @@ elements.tournamentListFilters.forEach(function(input) {
     renderTournamentList();
   });
 });
+
+if (elements.resetTournamentStatusBatchButton) {
+  elements.resetTournamentStatusBatchButton.addEventListener("click", function() {
+    state.pendingTournamentStatusUpdates = {};
+    renderTournamentList();
+    showStatus("未保存のステータス変更を取り消しました。", "");
+  });
+}
+
+if (elements.saveTournamentStatusBatchButton) {
+  elements.saveTournamentStatusBatchButton.addEventListener("click", async function() {
+    await submitPendingTournamentStatusUpdates_();
+  });
+}
 
 elements.memberListFilters.forEach(function(input) {
   input.addEventListener("change", function() {
@@ -883,6 +903,7 @@ function renderTabs() {
 
 function renderTournamentList() {
   syncTournamentSortStateFromControl_();
+  syncTournamentStatusBatchControls_();
   const visibleTournaments = getGroupedTournamentListItems_();
 
   if (!visibleTournaments.length) {
@@ -896,7 +917,15 @@ function renderTournamentList() {
       item.applicant_groups :
       [];
     const applicantCount = Number(item.applicant_count || 0);
-    const isApplied = String(item.status || "").trim() === "applied";
+    const effectiveStatuses = (item.tournament_ids || []).map(function(tournamentId) {
+      return getEffectiveTournamentStatus_(tournamentId);
+    });
+    const isApplied = effectiveStatuses.length > 0 && effectiveStatuses.every(function(status) {
+      return status === "applied";
+    });
+    const hasPendingStatusChange = (item.tournament_ids || []).some(function(tournamentId) {
+      return Boolean(state.pendingTournamentStatusUpdates[tournamentId]);
+    });
     const applicantBody = applicantGroups.length ?
       applicantGroups.map(function(group) {
         return (
@@ -937,6 +966,7 @@ function renderTournamentList() {
           '<div class="response-overview-actions response-overview-actions-side">' +
             '<button type="button" class="response-toggle-button' +
               (isApplied ? " is-active" : "") +
+              (hasPendingStatusChange ? " is-pending" : "") +
               '" data-applied-toggle-ids="' +
                 escapeHtml((item.tournament_ids || []).join(",")) +
               '" aria-pressed="' + escapeHtml(String(isApplied)) + '">' +
@@ -944,7 +974,10 @@ function renderTournamentList() {
                 '<span class="response-toggle-thumb"></span>' +
               "</span>" +
               '<span class="response-toggle-label">' +
-                escapeHtml(isApplied ? "申込済" : "未申込") +
+                escapeHtml(
+                  (isApplied ? "申込済" : "未申込") +
+                  (hasPendingStatusChange ? "（未保存）" : "")
+                ) +
               "</span>" +
             "</button>" +
             '<button type="button" class="response-overview-edit-button" data-edit-tournament-ids="' +
@@ -957,8 +990,8 @@ function renderTournamentList() {
   }).join("");
 
   elements.tournamentList.querySelectorAll("[data-applied-toggle-ids]").forEach(function(button) {
-    button.addEventListener("click", async function() {
-      await updateTournamentAppliedStatusForIds_(
+    button.addEventListener("click", function() {
+      stageTournamentAppliedStatusForIds_(
         parseTournamentIds_(button.dataset.appliedToggleIds),
         !button.classList.contains("is-active")
       );
@@ -1964,7 +1997,10 @@ function renderTournamentResponseOverview() {
     .map(function(item) {
       const statusTag = getTournamentStatusTag_(item.status);
       const applicantGroups = Array.isArray(item.applicant_groups) ? item.applicant_groups : [];
-      const isApplied = String(item.status || "").trim() === "applied";
+      const isApplied = getEffectiveTournamentStatus_(item.tournament_id) === "applied";
+      const hasPendingStatusChange = Boolean(
+        state.pendingTournamentStatusUpdates[item.tournament_id]
+      );
       const applicantBody = applicantGroups.length ?
         applicantGroups.map(function(group) {
           return (
@@ -2002,13 +2038,17 @@ function renderTournamentResponseOverview() {
           '<div class="response-overview-actions response-overview-actions-compact">' +
             '<button type="button" class="response-toggle-button' +
               (isApplied ? " is-active" : "") +
+              (hasPendingStatusChange ? " is-pending" : "") +
               '" data-applied-toggle-id="' + escapeHtml(item.tournament_id || "") +
               '" aria-pressed="' + escapeHtml(String(isApplied)) + '">' +
               '<span class="response-toggle-track">' +
                 '<span class="response-toggle-thumb"></span>' +
               "</span>" +
               '<span class="response-toggle-label">' +
-                escapeHtml(isApplied ? "申込済" : "未申込") +
+                escapeHtml(
+                  (isApplied ? "申込済" : "未申込") +
+                  (hasPendingStatusChange ? "（未保存）" : "")
+                ) +
               "</span>" +
             "</button>" +
           "</div>" +
@@ -2020,9 +2060,9 @@ function renderTournamentResponseOverview() {
   elements.tournamentResponseOverviewHost
     .querySelectorAll("[data-applied-toggle-id]")
     .forEach(function(button) {
-      button.addEventListener("click", async function() {
-        await updateTournamentAppliedStatus_(
-          button.dataset.appliedToggleId,
+      button.addEventListener("click", function() {
+        stageTournamentAppliedStatusForIds_(
+          [button.dataset.appliedToggleId],
           !button.classList.contains("is-active")
         );
       });
@@ -2543,40 +2583,172 @@ function formatOverviewGradeLabel(grade) {
   return String(grade).endsWith("級") ? String(grade) : String(grade) + "級";
 }
 
-async function updateTournamentAppliedStatus_(tournamentId, isApplied) {
-  return updateTournamentAppliedStatusForIds_([tournamentId], isApplied);
+function stageTournamentAppliedStatusForIds_(tournamentIds, isApplied) {
+  const nextStatus = isApplied ? "applied" : "active";
+
+  (tournamentIds || []).filter(Boolean).forEach(function(tournamentId) {
+    const tournament = state.tournaments.find(function(item) {
+      return item.tournament_id === tournamentId;
+    });
+    const savedStatus = String(tournament && tournament.status || "").trim();
+
+    if (savedStatus === nextStatus) {
+      delete state.pendingTournamentStatusUpdates[tournamentId];
+    } else {
+      state.pendingTournamentStatusUpdates[tournamentId] = nextStatus;
+    }
+  });
+
+  renderTournamentList();
+  renderTournamentResponseOverview();
+  const pendingCount = Object.keys(state.pendingTournamentStatusUpdates).length;
+  showStatus(
+    pendingCount ?
+      "ステータス変更を" + pendingCount + "件選択しました。まとめて保存してください。" :
+      "ステータス変更はありません。",
+    ""
+  );
 }
 
-async function updateTournamentAppliedStatusForIds_(tournamentIds, isApplied) {
-  const ids = (tournamentIds || []).filter(Boolean);
-  const nextStatus = isApplied ? "applied" : "active";
-  const successMessage = isApplied ?
-    "大会を申込済にしました。23:00 の完了通知対象になります。" :
-    "大会を未申込に戻しました。";
+function getEffectiveTournamentStatus_(tournamentId) {
+  if (state.pendingTournamentStatusUpdates[tournamentId]) {
+    return state.pendingTournamentStatusUpdates[tournamentId];
+  }
 
-  if (!ids.length) {
-    showStatus("対象の大会が見つかりませんでした。", "error");
+  const tournament = state.tournaments.find(function(item) {
+    return item.tournament_id === tournamentId;
+  });
+  return String(tournament && tournament.status || "").trim();
+}
+
+function syncTournamentStatusBatchControls_() {
+  const pendingCount = Object.keys(state.pendingTournamentStatusUpdates).length;
+
+  if (elements.tournamentStatusBatchCount) {
+    elements.tournamentStatusBatchCount.textContent = pendingCount ?
+      "未保存のステータス変更: " + pendingCount + "件" :
+      "ステータス変更はありません。";
+  }
+  if (elements.tournamentStatusBatchBar) {
+    elements.tournamentStatusBatchBar.classList.toggle("has-pending", pendingCount > 0);
+  }
+  if (elements.resetTournamentStatusBatchButton) {
+    elements.resetTournamentStatusBatchButton.disabled = pendingCount === 0;
+  }
+  if (elements.saveTournamentStatusBatchButton) {
+    elements.saveTournamentStatusBatchButton.disabled = pendingCount === 0;
+  }
+}
+
+async function submitPendingTournamentStatusUpdates_() {
+  const updates = Object.keys(state.pendingTournamentStatusUpdates).map(function(tournamentId) {
+    return {
+      tournament_id: tournamentId,
+      status: state.pendingTournamentStatusUpdates[tournamentId],
+    };
+  });
+
+  if (!updates.length) {
+    showStatus("保存するステータス変更がありません。", "error");
     return;
   }
 
+  const appliedCount = updates.filter(function(update) {
+    return update.status === "applied";
+  }).length;
+  const activeCount = updates.filter(function(update) {
+    return update.status === "active";
+  }).length;
+  const successMessage =
+    updates.length + "件の大会ステータスを更新しました。" +
+    (appliedCount ? " 申込済: " + appliedCount + "件。" : "") +
+    (activeCount ? " 未申込: " + activeCount + "件。" : "");
+
   try {
-    setBusyState(true, "大会の申込状態を更新しています...");
-    await Promise.all(ids.map(function(tournamentId) {
-      return postJson({
-        action: "update_tournament_status",
-        tournament_id: tournamentId,
-        status: nextStatus,
-      });
-    }));
-    await refreshTournamentData_();
+    setBusyState(true, "大会の申込状態をまとめて更新しています...");
+    const startedAt = performance.now();
+    const result = await postTournamentStatusBatch_(updates);
+    applyTournamentStatusResultsToState_(result.results || [], updates);
+    updates.forEach(function(update) {
+      delete state.pendingTournamentStatusUpdates[update.tournament_id];
+    });
+    renderTournamentList();
+    renderTournamentFollowupList_();
+    renderTournamentResponseOverview();
+    state.lastPerformanceMeasurement = {
+      operation: "update_tournament_status_batch",
+      client_total_ms: Math.round(performance.now() - startedAt),
+      server: result.performance || null,
+    };
+    console.info(
+      "[performance] 大会ステータス一括更新",
+      state.lastPerformanceMeasurement
+    );
     showStatus(successMessage, "success");
     setBusyState(false);
     showResultOverlay_("更新しました", successMessage);
   } catch (error) {
-    showStatus(error.message || "大会の申込状態の更新に失敗しました。", "error");
+    showStatus(error.message || "大会の申込状態の一括更新に失敗しました。", "error");
     setBusyState(false);
-    showResultOverlay_("更新できませんでした", error.message || "大会の申込状態の更新に失敗しました。");
+    showResultOverlay_("更新できませんでした", error.message || "大会の申込状態の一括更新に失敗しました。");
   }
+}
+
+async function postTournamentStatusBatch_(updates) {
+  try {
+    return await postJson({
+      action: "update_tournament_status_batch",
+      updates: updates,
+    });
+  } catch (error) {
+    if (String(error && error.message || error).indexOf("Unknown action") === -1) {
+      throw error;
+    }
+
+    console.warn(
+      "一括ステータス更新APIが未デプロイのため、単件更新に切り替えます。"
+    );
+    const results = await Promise.all((updates || []).map(function(update) {
+      return postJson({
+        action: "update_tournament_status",
+        tournament_id: update.tournament_id,
+        status: update.status,
+      });
+    }));
+
+    return {
+      ok: true,
+      count: results.length,
+      results: results,
+      performance: {
+        fallback: true,
+      },
+    };
+  }
+}
+
+function applyTournamentStatusResultsToState_(results, requestedUpdates) {
+  const statusByTournamentId = {};
+
+  (requestedUpdates || []).forEach(function(update) {
+    statusByTournamentId[update.tournament_id] = update.status;
+  });
+  (results || []).forEach(function(result) {
+    if (result && result.tournament_id) {
+      statusByTournamentId[result.tournament_id] = result.status;
+    }
+  });
+
+  state.tournaments.forEach(function(tournament) {
+    if (statusByTournamentId[tournament.tournament_id]) {
+      tournament.status = statusByTournamentId[tournament.tournament_id];
+    }
+  });
+  state.tournamentResponseOverview.forEach(function(item) {
+    if (statusByTournamentId[item.tournament_id]) {
+      item.status = statusByTournamentId[item.tournament_id];
+    }
+  });
 }
 
 function showStatus(message, type) {
@@ -2604,6 +2776,10 @@ function setBusyState(isBusy, message) {
     }
     element.disabled = isBusy;
   });
+
+  if (!isBusy) {
+    syncTournamentStatusBatchControls_();
+  }
 }
 
 function showResultOverlay_(title, message, onClose) {
