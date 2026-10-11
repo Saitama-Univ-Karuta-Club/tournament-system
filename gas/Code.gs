@@ -196,6 +196,18 @@ function doPost(e) {
         tournament_id: result.tournament_id,
         status: result.status,
         calendar_sync: result.calendar_sync,
+        performance: result.performance || null,
+      });
+    }
+
+    if (action === "update_tournament_status_batch") {
+      validateAdminToken(body.admin_token || "");
+      const result = updateTournamentStatuses(body.updates || []);
+      return jsonOutput({
+        ok: true,
+        count: result.count,
+        results: result.results,
+        performance: result.performance,
       });
     }
 
@@ -1670,59 +1682,223 @@ function upsertTournamentBatch(commonTournament, gradeConfigs) {
 }
 
 function updateTournamentStatus(tournamentId, status) {
-  if (!tournamentId) {
-    throw new Error("Missing tournament_id");
-  }
+  const batchResult = updateTournamentStatuses([{
+    tournament_id: tournamentId,
+    status: status,
+  }]);
+  const result = batchResult.results[0];
 
-  validateTournamentStatusForUpdate_(status);
+  result.performance = batchResult.performance;
+  return result;
+}
 
+function updateTournamentStatuses(updates) {
+  const startedAt = Date.now();
+  const normalizedUpdates = normalizeTournamentStatusUpdates_(updates);
   const sheet = getSheetByName("Tournaments");
+  const sheetReadStartedAt = Date.now();
   const values = sheet.getDataRange().getValues();
+  const sheetReadMs = Date.now() - sheetReadStartedAt;
   const headers = values[0];
   ensureRequiredTournamentHeaders_(headers);
   const idIndex = headers.indexOf("tournament_id");
   const now = new Date();
-  let rowIndex = -1;
+  const rowIndexByTournamentId = {};
 
   for (let i = 1; i < values.length; i += 1) {
-    if (values[i][idIndex] === tournamentId) {
-      rowIndex = i + 1;
-      break;
+    const tournamentId = String(values[i][idIndex] || "").trim();
+    if (tournamentId) {
+      rowIndexByTournamentId[tournamentId] = i + 1;
     }
   }
 
-  if (rowIndex <= 0) {
-    throw new Error("Tournament not found");
-  }
+  const entries = normalizedUpdates.map(function(update) {
+    const rowIndex = rowIndexByTournamentId[update.tournament_id] || -1;
+    if (rowIndex <= 0) {
+      throw new Error("Tournament not found: " + update.tournament_id);
+    }
 
-  const existing = rowToObject(headers, values[rowIndex - 1]);
-  const record = buildTournamentRecord(
-    headers,
-    existing,
-    { status: status },
-    tournamentId,
-    now
-  );
-  const row = headers.map(function(header) {
-    return record[header] !== undefined ? record[header] : "";
+    const existing = rowToObject(headers, values[rowIndex - 1]);
+    const record = buildTournamentRecord(
+      headers,
+      existing,
+      { status: update.status },
+      update.tournament_id,
+      now
+    );
+
+    return {
+      tournament_id: update.tournament_id,
+      row_index: rowIndex,
+      existing: existing,
+      record: record,
+      row: headers.map(function(header) {
+        return record[header] !== undefined ? record[header] : "";
+      }),
+      should_sync_calendar: shouldSyncTournamentCalendarForStatusChange_(
+        existing,
+        record
+      ),
+    };
   });
 
-  sheet.getRange(rowIndex, 1, 1, row.length).setValues([row]);
-
-  const calendarSync = syncTournamentCalendarForRow(
+  const sheetWriteStartedAt = Date.now();
+  const sheetWriteCount = writeTournamentRowsInBlocks_(
     sheet,
-    headers,
-    rowIndex,
-    record
+    entries,
+    headers.length
   );
+  const sheetWriteMs = Date.now() - sheetWriteStartedAt;
 
+  const calendarSyncStartedAt = Date.now();
+  const results = entries.map(function(entry) {
+    const calendarSync = entry.should_sync_calendar ?
+      syncTournamentCalendarForRow(
+        sheet,
+        headers,
+        entry.row_index,
+        entry.record
+      ) :
+      {
+        ok: true,
+        skipped: true,
+        action: "unchanged",
+        message: "Status change does not affect Calendar events.",
+      };
+
+    return {
+      tournament_id: entry.tournament_id,
+      status: entry.record.status || "",
+      calendar_sync: calendarSync,
+    };
+  });
+  const calendarSyncMs = Date.now() - calendarSyncStartedAt;
+
+  const cacheStartedAt = Date.now();
   invalidateSheetCaches_(["Tournaments", "NotificationLogs"]);
+  const cacheInvalidationMs = Date.now() - cacheStartedAt;
 
   return {
-    tournament_id: tournamentId,
-    status: record.status || "",
-    calendar_sync: calendarSync,
+    count: results.length,
+    results: results,
+    performance: {
+      update_count: results.length,
+      sheet_read_ms: sheetReadMs,
+      sheet_write_ms: sheetWriteMs,
+      sheet_write_count: sheetWriteCount,
+      calendar_sync_ms: calendarSyncMs,
+      calendar_sync_count: entries.filter(function(entry) {
+        return entry.should_sync_calendar;
+      }).length,
+      cache_invalidation_ms: cacheInvalidationMs,
+      total_ms: Date.now() - startedAt,
+    },
   };
+}
+
+function normalizeTournamentStatusUpdates_(updates) {
+  if (!Array.isArray(updates) || !updates.length) {
+    throw new Error("Missing tournament status updates");
+  }
+
+  if (updates.length > 100) {
+    throw new Error("Too many tournament status updates");
+  }
+
+  const seenTournamentIds = {};
+
+  return updates.map(function(update) {
+    const tournamentId = String(update && update.tournament_id || "").trim();
+    const status = String(update && update.status || "").trim();
+
+    if (!tournamentId) {
+      throw new Error("Missing tournament_id");
+    }
+    if (seenTournamentIds[tournamentId]) {
+      throw new Error("Duplicate tournament_id: " + tournamentId);
+    }
+
+    validateTournamentStatusForUpdate_(status);
+    seenTournamentIds[tournamentId] = true;
+
+    return {
+      tournament_id: tournamentId,
+      status: status,
+    };
+  });
+}
+
+function writeTournamentRowsInBlocks_(sheet, entries, columnCount) {
+  const sortedEntries = entries.slice().sort(function(a, b) {
+    return a.row_index - b.row_index;
+  });
+  const blocks = [];
+
+  sortedEntries.forEach(function(entry) {
+    const currentBlock = blocks.length ? blocks[blocks.length - 1] : null;
+    const expectedNextRow = currentBlock ?
+      currentBlock.start_row + currentBlock.rows.length :
+      -1;
+
+    if (currentBlock && entry.row_index === expectedNextRow) {
+      currentBlock.rows.push(entry.row);
+      return;
+    }
+
+    blocks.push({
+      start_row: entry.row_index,
+      rows: [entry.row],
+    });
+  });
+
+  blocks.forEach(function(block) {
+    sheet.getRange(
+      block.start_row,
+      1,
+      block.rows.length,
+      columnCount
+    ).setValues(block.rows);
+  });
+
+  return blocks.length;
+}
+
+function shouldSyncTournamentCalendarForStatusChange_(existing, record) {
+  const existingClass = getTournamentCalendarStatusClass_(existing.status);
+  const nextClass = getTournamentCalendarStatusClass_(record.status);
+
+  if (existingClass !== nextClass) {
+    return true;
+  }
+
+  const calendarEventIds = [
+    record.calendar_event_id_event,
+    record.calendar_event_id_internal_deadline,
+    record.calendar_event_id_true_deadline,
+  ];
+
+  if (nextClass === "hidden") {
+    return calendarEventIds.some(function(eventId) {
+      return Boolean(String(eventId || "").trim());
+    });
+  }
+
+  return calendarEventIds.some(function(eventId) {
+    return !String(eventId || "").trim();
+  });
+}
+
+function getTournamentCalendarStatusClass_(status) {
+  const normalized = String(status || "").trim();
+
+  if (normalized === "draft" || normalized === "deleted") {
+    return "hidden";
+  }
+  if (normalized === "canceled") {
+    return "canceled";
+  }
+
+  return "visible";
 }
 
 function buildTournamentRecord(headers, existing, tournament, tournamentId, now) {

@@ -531,6 +531,32 @@ button {
   gap: 12px;
   margin-top: 18px;
 }
+.tournament-status-batch-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-top: 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: #fff;
+  color: var(--muted);
+  font-size: .9rem;
+  font-weight: 700;
+}
+.tournament-status-batch-bar.has-pending {
+  border-color: rgba(141, 59, 34, 0.42);
+  background: #fff7ed;
+  color: var(--accent-dark);
+}
+.tournament-status-batch-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
 .response-overview-card {
   border: 1px solid var(--line);
   border-radius: 18px;
@@ -707,6 +733,9 @@ button {
 .response-toggle-button.is-active {
   background: #f5e6dc;
   border-color: rgba(141, 59, 34, 0.3);
+}
+.response-toggle-button.is-pending {
+  box-shadow: 0 0 0 3px rgba(141, 59, 34, 0.14);
 }
 .response-toggle-track {
   position: relative;
@@ -940,6 +969,13 @@ button {
     align-items: start;
   }
   .response-panel-controls {
+    justify-content: flex-start;
+  }
+  .tournament-status-batch-bar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .tournament-status-batch-actions {
     justify-content: flex-start;
   }
   .member-card-actions,

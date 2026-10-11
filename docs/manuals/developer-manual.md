@@ -145,6 +145,7 @@ External Services
 | `upsert_tournament` | `admin_token` | 単一大会の作成・更新 |
 | `upsert_tournament_batch` | `admin_token` | 複数級大会の作成・更新 |
 | `update_tournament_status` | `admin_token` | 大会ステータス更新 |
+| `update_tournament_status_batch` | `admin_token` | 複数大会のステータス一括更新 |
 | `upsert_response` | `page_token` | 参加回答の保存 |
 | `upsert_member` | `admin_token` | メンバー作成・更新 |
 | `request_member_registration` | なし | メンバー追加申請 |

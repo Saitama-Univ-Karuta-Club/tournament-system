@@ -911,7 +911,7 @@ Content-Type: application/json
 
 ---
 
-## 9.7 大会ステータス更新 API
+## 9.7 大会ステータス一括更新 API
 
 ### Request
 
@@ -922,9 +922,17 @@ Content-Type: application/json
 
 ```json
 {
-  "action": "update_tournament_status",
-  "tournament_id": "T20260627_AZ8KQ2",
-  "status": "applied"
+  "action": "update_tournament_status_batch",
+  "updates": [
+    {
+      "tournament_id": "T20260627_AZ8KQ2",
+      "status": "applied"
+    },
+    {
+      "tournament_id": "T20260627_BK4M8P",
+      "status": "applied"
+    }
+  ]
 }
 ```
 
@@ -933,17 +941,41 @@ Content-Type: application/json
 ```json
 {
   "ok": true,
-  "tournament_id": "T20260627_AZ8KQ2",
-  "status": "applied",
-  "calendar_sync": {
-    "ok": true
+  "count": 2,
+  "results": [
+    {
+      "tournament_id": "T20260627_AZ8KQ2",
+      "status": "applied",
+      "calendar_sync": {
+        "ok": true,
+        "skipped": true
+      }
+    },
+    {
+      "tournament_id": "T20260627_BK4M8P",
+      "status": "applied",
+      "calendar_sync": {
+        "ok": true,
+        "skipped": true
+      }
+    }
+  ],
+  "performance": {
+    "update_count": 2,
+    "sheet_read_ms": 120,
+    "sheet_write_ms": 90,
+    "calendar_sync_ms": 0,
+    "total_ms": 230
   }
 }
 ```
 
-- 主な用途は、管理画面の申込み完了トグルから `active / applied` を切り替えること
-- `status` に応じて Google Calendar 同期も再実行する
+- 主な用途は、管理画面の申込み完了トグルから複数級の `active / applied` を一括で切り替えること
+- `updates` 全件を検証してから保存し、不正な大会IDがある場合は書込み前に中止する
+- `active / applied / closed / no_applicants` 間の変更では、既存のCalendar IDが揃っていればGoogle Calendar同期を省略する
+- `draft / deleted / canceled` との間を変更する場合はGoogle Calendar同期を実行する
 - `applied` へ切り替えた場合は `applied_at` を自動記録する
+- 既存クライアントとの互換性のため、単件用の `update_tournament_status` も引き続き利用できる
 
 ---
 
@@ -1711,7 +1743,8 @@ script.js?v=20260519-8
 - 大会管理タブの順番は `新規入力` → `申込み状況` → `登録済み一覧` である
 - `申込み状況` には終了していない大会だけを表示する
 - `申込み状況` の各大会カードには、`未申込み / 申込み済み` のスイッチ型トグルを表示する
-- トグルを切り替えると `update_tournament_status` API を呼び、`active / applied` を更新する
+- 複数のトグルを切り替えて未保存状態にし、`変更をまとめて保存` を押すと `update_tournament_status_batch` APIを1回だけ呼ぶ
+- 同一大会が級別の複数IDに分かれている場合も、他の大会と合わせて1つの `updates` 配列で `active / applied` に更新する
 - `登録済み一覧` はタグ絞り込み付きのカードUIで表示し、各カードから直接編集できる
 - 保存中は中央ポップアップで `保存中です...` を表示する
 - 保存中は他の操作を受け付けない
