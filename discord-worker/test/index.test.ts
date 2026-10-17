@@ -208,6 +208,48 @@ describe("Discord Worker", () => {
     );
   });
 
+  it("sets the current channel as the administrator reminder channel", async () => {
+    const verifier = vi.fn().mockResolvedValue(true);
+    const reminderChannelSetter = vi.fn().mockResolvedValue(undefined);
+    const configuredEnv: Env = { ...env, DISCORD_GUILD_ID: "guild-id" };
+
+    const response = await handleRequest(
+      new Request("https://example.com/interactions", {
+        method: "POST",
+        headers: {
+          "X-Signature-Ed25519": "signature",
+          "X-Signature-Timestamp": "timestamp",
+        },
+        body: JSON.stringify({
+          type: 2,
+          guild_id: "guild-id",
+          channel_id: "admin-reminder-channel-id",
+          member: { permissions: "32", user: { id: "admin-id" } },
+          data: { name: "setup-reminder-channel" },
+        }),
+      }),
+      configuredEnv,
+      verifier,
+      undefined,
+      vi.fn(),
+      vi.fn(),
+      vi.fn(),
+      vi.fn(),
+      vi.fn(),
+      reminderChannelSetter,
+    );
+
+    expect(response.status).toBe(200);
+    expect(reminderChannelSetter).toHaveBeenCalledWith(
+      configuredEnv,
+      "guild-id",
+      "admin-reminder-channel-id",
+    );
+    await expect(response.json()).resolves.toMatchObject({
+      data: { content: expect.stringContaining("締切リマインダー送信先") },
+    });
+  });
+
   it("schedules test tournament creation", async () => {
     const verifier = vi.fn().mockResolvedValue(true);
     const tournamentCreator = vi.fn().mockResolvedValue(undefined);

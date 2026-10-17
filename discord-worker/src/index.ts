@@ -18,6 +18,7 @@ import {
   type AttendanceInput,
   type TestTournamentInput,
   upsertAnnouncementChannel,
+  upsertReminderChannel,
 } from "./tournaments";
 
 export interface Env {
@@ -64,6 +65,7 @@ type AnnouncementChannelSetter = (
   guildId: string,
   channelId: string,
 ) => Promise<void>;
+type ReminderChannelSetter = AnnouncementChannelSetter;
 type TestTournamentCreator = (
   env: Env,
   input: TestTournamentInput,
@@ -169,6 +171,7 @@ export async function handleRequest(
   testTournamentCreator: TestTournamentCreator = createTestTournamentAndNotify,
   attendanceRecorder: AttendanceRecorder = recordAttendanceResponse,
   memberRegistrar: MemberRegistrar = submitMemberRegistrationRequest,
+  reminderChannelSetter: ReminderChannelSetter = upsertReminderChannel,
 ): Promise<Response> {
   const url = new URL(request.url);
 
@@ -296,6 +299,38 @@ export async function handleRequest(
     } catch (error: unknown) {
       console.error("告知チャンネル設定エラー", error);
       return ephemeralMessage("告知チャンネルの設定に失敗しました。");
+    }
+  }
+
+  if (
+    interaction.type === InteractionType.APPLICATION_COMMAND &&
+    interaction.data?.name === "setup-reminder-channel"
+  ) {
+    if (
+      !env.DISCORD_GUILD_ID ||
+      interaction.guild_id !== env.DISCORD_GUILD_ID ||
+      !interaction.channel_id ||
+      !canManageGuild(interaction)
+    ) {
+      return ephemeralMessage(
+        "このチャンネルは管理者用リマインダー送信先に設定できません。",
+      );
+    }
+
+    try {
+      await reminderChannelSetter(
+        env,
+        interaction.guild_id,
+        interaction.channel_id,
+      );
+      return ephemeralMessage(
+        "このチャンネルを管理者用の締切リマインダー送信先に設定しました。",
+      );
+    } catch (error: unknown) {
+      console.error("管理者用リマインダーチャンネル設定エラー", error);
+      return ephemeralMessage(
+        "管理者用リマインダーチャンネルの設定に失敗しました。",
+      );
     }
   }
 

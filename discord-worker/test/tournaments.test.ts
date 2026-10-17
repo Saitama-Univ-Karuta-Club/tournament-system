@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   buildAttendanceMessage,
+  buildDeadlineReminderMessage,
+  buildDeadlineReminderTargets,
   buildNotificationTargets,
   getRetryDelayMinutes,
   normalizeTournamentInput,
@@ -121,5 +123,33 @@ describe("notification queue", () => {
     expect([1, 2, 3, 4, 5].map(getRetryDelayMinutes)).toEqual([
       1, 5, 15, 60, 60,
     ]);
+  });
+
+  it("queues only deadlines that are within the next 24 hours", () => {
+    const targets = buildDeadlineReminderTargets(
+      tournament,
+      "admin-channel-1",
+      new Date("2026-10-24T12:00:00.000Z"),
+    );
+
+    expect(targets).toEqual([
+      expect.objectContaining({
+        notificationType: "deadline_reminder",
+        reminderKind: "internal_deadline",
+        destinationType: "channel",
+        destinationId: "admin-channel-1",
+      }),
+    ]);
+  });
+
+  it("builds an administrator reminder without response buttons", () => {
+    const message = buildDeadlineReminderMessage(
+      tournament,
+      "organizer_deadline",
+    );
+
+    expect(message.content).toContain("主催者締切まで24時間以内");
+    expect(message.components).toBeUndefined();
+    expect(message.allowed_mentions).toEqual({ parse: [] });
   });
 });
