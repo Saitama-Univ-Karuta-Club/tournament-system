@@ -406,8 +406,8 @@ function adminHtml(page: AdminPage): string {
         <label>大会種別<select name="tournamentType" required><option value="official">公認大会</option><option value="support">後援大会</option><option value="event">その他イベント</option></select></label>
         <label>開催開始日<input type="date" name="eventStartDate" required></label>
         <label>開催終了日<input type="date" name="eventEndDate" required></label>
-        <label>サークル内締切<input type="datetime-local" name="internalDeadline" required></label>
         <label>主催者締切<input type="datetime-local" name="trueDeadline" required></label>
+        <label>サークル内締切 <span class="optional">主催者締切の3日前を自動設定</span><input type="datetime-local" name="internalDeadline" required></label>
         <label class="wide">会場 <span class="optional">任意</span><input name="venue" maxlength="200" autocomplete="off"></label>
         <label class="wide">大会要項URL <span class="optional">任意・Google Drive等</span><input type="url" name="documentUrl" maxlength="500" placeholder="https://..."></label>
       </div>
@@ -861,11 +861,20 @@ function adminHtml(page: AdminPage): string {
       return get('year') + '-' + get('month') + '-' + get('day');
     }
 
+    function setInternalDeadlineFromOrganizer() {
+      const organizerDeadline = form.elements.trueDeadline.value;
+      if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(organizerDeadline)) return;
+      const threeDaysEarlier = new Date(organizerDeadline + ':00+09:00');
+      threeDaysEarlier.setTime(threeDaysEarlier.getTime() - 3 * 86400000);
+      form.elements.internalDeadline.value = dateValue(threeDaysEarlier) + organizerDeadline.slice(10);
+    }
+
     const now = Date.now();
     form.elements.eventStartDate.value = dateValue(new Date(now + 14 * 86400000));
     form.elements.eventEndDate.value = form.elements.eventStartDate.value;
-    form.elements.internalDeadline.value = dateValue(new Date(now + 7 * 86400000)) + 'T23:59';
     form.elements.trueDeadline.value = dateValue(new Date(now + 10 * 86400000)) + 'T23:59';
+    setInternalDeadlineFromOrganizer();
+    form.elements.trueDeadline.addEventListener('input', setInternalDeadlineFromOrganizer);
     form.elements.eventStartDate.addEventListener('change', () => {
       if (!form.elements.eventEndDate.value || form.elements.eventEndDate.value < form.elements.eventStartDate.value) form.elements.eventEndDate.value = form.elements.eventStartDate.value;
     });

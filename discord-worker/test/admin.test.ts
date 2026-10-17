@@ -70,7 +70,7 @@ describe("Admin Worker", () => {
     expect(html).not.toContain("最大10人");
   });
 
-  it("uses 23:59 as the default deadline time", async () => {
+  it("uses 23:59 as the default organizer deadline time", async () => {
     const response = await handleAdminRequest(
       new Request("https://admin.example.com/register"),
       env,
@@ -78,7 +78,28 @@ describe("Admin Worker", () => {
     );
 
     const html = await response.text();
-    expect(html.match(/T23:59/g)).toHaveLength(2);
+    expect(html).toContain("+ 'T23:59'");
+    expect(html).toContain(
+      "form.elements.internalDeadline.value = dateValue(threeDaysEarlier) + organizerDeadline.slice(10)",
+    );
+  });
+
+  it("places the organizer deadline first and derives the internal deadline three days earlier", async () => {
+    const response = await handleAdminRequest(
+      new Request("https://admin.example.com/register"),
+      env,
+      authenticatedContext(),
+    );
+
+    const html = await response.text();
+    expect(html.indexOf('name="trueDeadline"')).toBeLessThan(
+      html.indexOf('name="internalDeadline"'),
+    );
+    expect(html).toContain("主催者締切の3日前を自動設定");
+    expect(html).toContain("3 * 86400000");
+    expect(html).toContain(
+      "trueDeadline.addEventListener('input', setInternalDeadlineFromOrganizer)",
+    );
   });
 
   it("stores a valid tournament for the notification worker", async () => {
