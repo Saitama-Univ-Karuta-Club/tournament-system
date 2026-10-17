@@ -97,11 +97,45 @@ describe("Admin Worker", () => {
     expect(html.indexOf('name="trueDeadline"')).toBeLessThan(
       html.indexOf('name="internalDeadline"'),
     );
-    expect(html).toContain("主催者締切の3日前を自動設定");
+    expect(html).toContain("主催者締切の3日前を自動入力");
     expect(html).toContain("3 * 86400000");
     expect(html).toContain(
       "trueDeadline.addEventListener('input', setInternalDeadlineFromOrganizer)",
     );
+  });
+
+  it("shows one full-width field per row and uses a single event date", async () => {
+    const response = await handleAdminRequest(
+      new Request("https://admin.example.com/register"),
+      env,
+      authenticatedContext(),
+    );
+
+    const html = await response.text();
+    const formHtml = html.slice(
+      html.indexOf('<form id="tournament-form"'),
+      html.indexOf("</form>") + 7,
+    );
+    const orderedLabels = [
+      "大会名",
+      "開催級",
+      "大会種別",
+      "開催日",
+      "主催者締切",
+      "サークル内締切",
+      "会場",
+      "大会要項",
+    ];
+    const positions = orderedLabels.map((label) => formHtml.indexOf(label));
+
+    expect(positions.every((position) => position >= 0)).toBe(true);
+    expect(positions).toEqual([...positions].sort((a, b) => a - b));
+    expect(formHtml).toContain('name="eventDate"');
+    expect(formHtml).not.toContain('name="eventStartDate"');
+    expect(formHtml).not.toContain('name="eventEndDate"');
+    expect(html).toContain("grid-template-columns: minmax(0, 1fr)");
+    expect(html).toContain("payload.eventStartDate = payload.eventDate");
+    expect(html).toContain("payload.eventEndDate = payload.eventDate");
   });
 
   it("stores a valid tournament for the notification worker", async () => {

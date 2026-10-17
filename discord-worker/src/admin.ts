@@ -321,7 +321,8 @@ function adminHtml(page: AdminPage): string {
     .panel { background: white; border: 1px solid #dce1eb; border-radius: 12px; padding: 24px; box-shadow: 0 8px 24px #1720330c; }
     .panel + .panel { margin-top: 26px; }
     [hidden] { display: none !important; }
-    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+    .grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 18px; }
+    .grid > label, .grid > fieldset { width: 100%; }
     label { display: grid; gap: 7px; font-weight: 650; font-size: .9rem; }
     label.wide { grid-column: 1 / -1; }
     .optional { color: #697386; font-size: .78rem; font-weight: 500; }
@@ -410,14 +411,13 @@ function adminHtml(page: AdminPage): string {
       <h2>大会登録</h2>
       <div class="grid">
         <label class="wide">大会名<input name="title" required maxlength="100" autocomplete="off"></label>
-        <fieldset class="grade-picker"><legend>対象級 <span class="optional">複数選択可</span></legend><div class="grade-options"><label class="grade-option"><input type="checkbox" name="grades" value="all">すべて</label><label class="grade-option"><input type="checkbox" name="grades" value="A">A級</label><label class="grade-option"><input type="checkbox" name="grades" value="B">B級</label><label class="grade-option"><input type="checkbox" name="grades" value="C">C級</label><label class="grade-option"><input type="checkbox" name="grades" value="D">D級</label><label class="grade-option"><input type="checkbox" name="grades" value="E">E級</label><label class="grade-option"><input type="checkbox" name="grades" value="F">F級</label><label class="grade-option"><input type="checkbox" name="grades" value="beginner">初心者</label></div></fieldset>
+        <fieldset class="grade-picker"><legend>開催級 <span class="optional">複数選択可</span></legend><div class="grade-options"><label class="grade-option"><input type="checkbox" name="grades" value="all">すべて</label><label class="grade-option"><input type="checkbox" name="grades" value="A">A級</label><label class="grade-option"><input type="checkbox" name="grades" value="B">B級</label><label class="grade-option"><input type="checkbox" name="grades" value="C">C級</label><label class="grade-option"><input type="checkbox" name="grades" value="D">D級</label><label class="grade-option"><input type="checkbox" name="grades" value="E">E級</label><label class="grade-option"><input type="checkbox" name="grades" value="F">F級</label><label class="grade-option"><input type="checkbox" name="grades" value="beginner">初心者</label></div></fieldset>
         <label>大会種別<select name="tournamentType" required><option value="official">公認大会</option><option value="support">後援大会</option><option value="event">その他イベント</option></select></label>
-        <label>開催開始日<input type="date" name="eventStartDate" required></label>
-        <label>開催終了日<input type="date" name="eventEndDate" required></label>
+        <label>開催日<input type="date" name="eventDate" required></label>
         <label>主催者締切<input type="datetime-local" name="trueDeadline" required></label>
-        <label>サークル内締切 <span class="optional">主催者締切の3日前を自動設定</span><input type="datetime-local" name="internalDeadline" required></label>
+        <label>サークル内締切 <span class="optional">基本的に主催者締切の3日前を自動入力</span><input type="datetime-local" name="internalDeadline" required></label>
         <label class="wide">会場 <span class="optional">任意</span><input name="venue" maxlength="200" autocomplete="off"></label>
-        <label class="wide">大会要項URL <span class="optional">任意・Google Drive等</span><input type="url" name="documentUrl" maxlength="500" placeholder="https://..."></label>
+        <label class="wide">大会要項 <span class="optional">任意・URLを入力</span><input type="url" name="documentUrl" maxlength="500" placeholder="https://..."></label>
       </div>
       <div class="actions"><button id="submit" type="submit">登録して通知を開始</button><span id="result" role="status" aria-live="polite"></span></div>
       <div class="footnote">複数級を選ぶと、同じ内容で級ごとに独立した大会として一括登録します。「すべて」は1件の大会として登録し、全級のメンバーへDMを送ります。</div>
@@ -882,8 +882,7 @@ function adminHtml(page: AdminPage): string {
     }
 
     const now = Date.now();
-    form.elements.eventStartDate.value = dateValue(new Date(now + 14 * 86400000));
-    form.elements.eventEndDate.value = form.elements.eventStartDate.value;
+    form.elements.eventDate.value = dateValue(new Date(now + 14 * 86400000));
     form.elements.trueDeadline.value = dateValue(new Date(now + 10 * 86400000)) + 'T23:59';
     setInternalDeadlineFromOrganizer();
     form.elements.trueDeadline.addEventListener('input', setInternalDeadlineFromOrganizer);
@@ -899,9 +898,6 @@ function adminHtml(page: AdminPage): string {
           allGradesCheckbox.checked = false;
         }
       });
-    });
-    form.elements.eventStartDate.addEventListener('change', () => {
-      if (!form.elements.eventEndDate.value || form.elements.eventEndDate.value < form.elements.eventStartDate.value) form.elements.eventEndDate.value = form.elements.eventStartDate.value;
     });
 
     fetch('/api/session').then((response) => response.json()).then((data) => {
@@ -925,6 +921,9 @@ function adminHtml(page: AdminPage): string {
         const payload = Object.fromEntries(data.entries());
         payload.grades = data.getAll('grades');
         if (!payload.grades.length) throw new Error('対象級を1つ以上選択してください。');
+        payload.eventStartDate = payload.eventDate;
+        payload.eventEndDate = payload.eventDate;
+        delete payload.eventDate;
         payload.internalDeadline = localJstToIso(payload.internalDeadline);
         payload.trueDeadline = localJstToIso(payload.trueDeadline);
         const response = await fetch('/api/tournaments', {
