@@ -152,4 +152,15 @@ describe("notification queue", () => {
     expect(message.components).toBeUndefined();
     expect(message.allowed_mentions).toEqual({ parse: [] });
   });
+
+  it("labels a test reminder without claiming the deadline is near", () => {
+    const message = buildDeadlineReminderMessage(
+      tournament,
+      "internal_deadline",
+      true,
+    );
+
+    expect(message.content).toContain("テスト送信");
+    expect(message.content).not.toContain("24時間以内");
+  });
 });

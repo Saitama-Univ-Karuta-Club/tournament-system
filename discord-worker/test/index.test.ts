@@ -250,6 +250,49 @@ describe("Discord Worker", () => {
     });
   });
 
+  it("sends a test reminder to the configured administrator channel", async () => {
+    const verifier = vi.fn().mockResolvedValue(true);
+    const testReminderSender = vi.fn().mockResolvedValue({
+      tournamentTitle: "B級通知テスト大会",
+      reminderKind: "internal_deadline",
+    });
+    const configuredEnv: Env = { ...env, DISCORD_GUILD_ID: "guild-id" };
+
+    const response = await handleRequest(
+      new Request("https://example.com/interactions", {
+        method: "POST",
+        headers: {
+          "X-Signature-Ed25519": "signature",
+          "X-Signature-Timestamp": "timestamp",
+        },
+        body: JSON.stringify({
+          type: 2,
+          guild_id: "guild-id",
+          member: { permissions: "32", user: { id: "admin-id" } },
+          data: { name: "test-reminder" },
+        }),
+      }),
+      configuredEnv,
+      verifier,
+      undefined,
+      vi.fn(),
+      vi.fn(),
+      vi.fn(),
+      vi.fn(),
+      vi.fn(),
+      vi.fn(),
+      testReminderSender,
+    );
+
+    expect(testReminderSender).toHaveBeenCalledWith(configuredEnv);
+    await expect(response.json()).resolves.toMatchObject({
+      data: {
+        flags: 64,
+        content: expect.stringContaining("B級通知テスト大会"),
+      },
+    });
+  });
+
   it("schedules test tournament creation", async () => {
     const verifier = vi.fn().mockResolvedValue(true);
     const tournamentCreator = vi.fn().mockResolvedValue(undefined);

@@ -12,6 +12,7 @@
 - `/member-register` による新規登録・登録内容変更の申請
 - `/setup-channel` によるテスト告知先の設定
 - `/setup-reminder-channel` による管理者用締切リマインダー送信先の設定
+- `/test-reminder` による管理者用チャンネルの送信権限・表示テスト
 - `/test-tournament` による告知・対象級DM・参加回答ボタンの疎通確認
 - Cloudflare Accessで保護する大会登録Web管理画面
 - 管理画面での大会一覧、回答者別集計、ステータス確認・変更

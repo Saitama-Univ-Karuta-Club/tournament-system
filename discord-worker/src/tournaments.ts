@@ -67,6 +67,11 @@ export interface NotificationTarget {
 
 export type ReminderKind = "internal_deadline" | "organizer_deadline";
 
+export interface TestReminderResult {
+  tournamentTitle: string;
+  reminderKind: ReminderKind;
+}
+
 interface QueuedNotificationRow extends TournamentRow {
   notification_id: number;
   notification_type: "announcement" | "invitation_dm" | "deadline_reminder";
@@ -347,6 +352,7 @@ function buildAnnouncementMessage(tournament: TournamentRow): DiscordMessagePayl
 export function buildDeadlineReminderMessage(
   tournament: TournamentRow,
   reminderKind: ReminderKind,
+  isTest = false,
 ): DiscordMessagePayload {
   const isInternal = reminderKind === "internal_deadline";
   const deadlineLabel = isInternal ? "サークル内締切" : "主催者締切";
@@ -355,7 +361,9 @@ export function buildDeadlineReminderMessage(
     : tournament.true_deadline;
 
   return {
-    content: `【締切リマインダー】${deadlineLabel}まで24時間以内です。`,
+    content: isTest
+      ? `【テスト送信・締切リマインダー】${deadlineLabel}の通知表示と送信権限の確認です。`
+      : `【締切リマインダー】${deadlineLabel}まで24時間以内です。`,
     embeds: [
       {
         title: tournament.title,
@@ -502,6 +510,66 @@ export async function upsertReminderChannel(
   if (Number(result.meta.changes ?? 0) !== 1) {
     throw new Error("先に大会告知チャンネルを設定してください。");
   }
+}
+
+export async function sendTestDeadlineReminder(
+  env: TournamentEnv,
+  now = new Date(),
+): Promise<TestReminderResult> {
+  if (!env.DISCORD_GUILD_ID || !env.DISCORD_BOT_TOKEN) {
+    throw new Error("Discord設定が足りません。");
+  }
+
+  const settings = await env.DB.prepare(
+    `SELECT admin_reminder_channel_id
+     FROM discord_settings
+     WHERE guild_id = ?`,
+  )
+    .bind(env.DISCORD_GUILD_ID)
+    .first<{ admin_reminder_channel_id: string | null }>();
+  if (!settings?.admin_reminder_channel_id) {
+    throw new Error("管理者用リマインダーチャンネルが未設定です。");
+  }
+
+  const nowIso = now.toISOString();
+  const tournament = await env.DB.prepare(
+    `SELECT
+      tournament_id,
+      title,
+      event_start_date,
+      event_end_date,
+      grade,
+      tournament_type,
+      venue,
+      true_deadline,
+      internal_deadline,
+      document_url
+    FROM tournaments
+    WHERE status = 'active'
+      AND (internal_deadline > ? OR true_deadline > ?)
+    ORDER BY
+      CASE
+        WHEN internal_deadline > ? THEN internal_deadline
+        ELSE true_deadline
+      END
+    LIMIT 1`,
+  )
+    .bind(nowIso, nowIso, nowIso)
+    .first<TournamentRow>();
+  if (!tournament) {
+    throw new Error("締切前の回答受付中大会がありません。");
+  }
+
+  const reminderKind: ReminderKind =
+    tournament.internal_deadline > nowIso
+      ? "internal_deadline"
+      : "organizer_deadline";
+  await sendChannelMessage(
+    env.DISCORD_BOT_TOKEN,
+    settings.admin_reminder_channel_id,
+    buildDeadlineReminderMessage(tournament, reminderKind, true),
+  );
+  return { tournamentTitle: tournament.title, reminderKind };
 }
 
 async function insertNotificationTargets(

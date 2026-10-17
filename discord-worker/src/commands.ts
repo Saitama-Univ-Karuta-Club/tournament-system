@@ -47,6 +47,12 @@ export const commands = [
     default_member_permissions: "32",
   },
   {
+    name: "test-reminder",
+    description: "管理者用チャンネルへ締切リマインダーをテスト送信します",
+    type: 1,
+    default_member_permissions: "32",
+  },
+  {
     name: "test-tournament",
     description: "ボタン付きDMを確認するテスト大会を作成します",
     type: 1,

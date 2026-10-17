@@ -15,7 +15,9 @@ import {
   createTestTournamentAndNotify,
   notifyPendingTournaments,
   recordAttendanceResponse,
+  sendTestDeadlineReminder,
   type AttendanceInput,
+  type TestReminderResult,
   type TestTournamentInput,
   upsertAnnouncementChannel,
   upsertReminderChannel,
@@ -66,6 +68,7 @@ type AnnouncementChannelSetter = (
   channelId: string,
 ) => Promise<void>;
 type ReminderChannelSetter = AnnouncementChannelSetter;
+type TestReminderSender = (env: Env) => Promise<TestReminderResult>;
 type TestTournamentCreator = (
   env: Env,
   input: TestTournamentInput,
@@ -172,6 +175,7 @@ export async function handleRequest(
   attendanceRecorder: AttendanceRecorder = recordAttendanceResponse,
   memberRegistrar: MemberRegistrar = submitMemberRegistrationRequest,
   reminderChannelSetter: ReminderChannelSetter = upsertReminderChannel,
+  testReminderSender: TestReminderSender = sendTestDeadlineReminder,
 ): Promise<Response> {
   const url = new URL(request.url);
 
@@ -331,6 +335,31 @@ export async function handleRequest(
       return ephemeralMessage(
         "管理者用リマインダーチャンネルの設定に失敗しました。",
       );
+    }
+  }
+
+  if (
+    interaction.type === InteractionType.APPLICATION_COMMAND &&
+    interaction.data?.name === "test-reminder"
+  ) {
+    if (
+      !env.DISCORD_GUILD_ID ||
+      interaction.guild_id !== env.DISCORD_GUILD_ID ||
+      !canManageGuild(interaction)
+    ) {
+      return ephemeralMessage("このサーバーではテスト送信できません。");
+    }
+
+    try {
+      const result = await testReminderSender(env);
+      return ephemeralMessage(
+        `管理者用チャンネルへ「${result.tournamentTitle}」のテストリマインダーを送信しました。`,
+      );
+    } catch (error: unknown) {
+      console.error("締切リマインダーテスト送信エラー", error);
+      const message =
+        error instanceof Error ? error.message : "不明なエラーが発生しました。";
+      return ephemeralMessage(`テスト送信に失敗しました。\n${message}`);
     }
   }
 
