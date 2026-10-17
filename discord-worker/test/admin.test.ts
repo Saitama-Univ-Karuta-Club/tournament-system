@@ -97,7 +97,7 @@ describe("Admin Worker", () => {
     expect(html.indexOf('name="trueDeadline"')).toBeLessThan(
       html.indexOf('name="internalDeadline"'),
     );
-    expect(html).toContain("基本的に3日前を自動入力");
+    expect(html).toContain("基本的に主催締切日の3日前を自動入力");
     expect(html).toContain("3 * 86400000");
     expect(html).toContain(
       "trueDeadline.addEventListener('input', setInternalDeadlineFromOrganizer)",
@@ -121,10 +121,10 @@ describe("Admin Worker", () => {
       "開催級",
       "開催日",
       "大会種別",
-      "主催〆",
-      "サークル〆",
+      "主催締切日",
+      "サークル内締切日",
       "会場",
-      "要項",
+      "大会要項",
     ];
     const positions = orderedLabels.map((label) => formHtml.indexOf(label));
 
@@ -137,6 +137,9 @@ describe("Admin Worker", () => {
       "grid-template-columns: repeat(2, minmax(0, 1fr))",
     );
     expect(formHtml).toContain('class="grade-picker wide"');
+    expect(formHtml).toContain(
+      '<span>サークル内締切日 <span class="optional">（基本的に主催締切日の3日前を自動入力）</span></span>',
+    );
     expect(html).toContain("payload.eventStartDate = payload.eventDate");
     expect(html).toContain("payload.eventEndDate = payload.eventDate");
   });

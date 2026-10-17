@@ -414,10 +414,10 @@ function adminHtml(page: AdminPage): string {
         <fieldset class="grade-picker wide"><legend>開催級 <span class="optional">複数選択可</span></legend><div class="grade-options"><label class="grade-option"><input type="checkbox" name="grades" value="all">すべて</label><label class="grade-option"><input type="checkbox" name="grades" value="A">A級</label><label class="grade-option"><input type="checkbox" name="grades" value="B">B級</label><label class="grade-option"><input type="checkbox" name="grades" value="C">C級</label><label class="grade-option"><input type="checkbox" name="grades" value="D">D級</label><label class="grade-option"><input type="checkbox" name="grades" value="E">E級</label><label class="grade-option"><input type="checkbox" name="grades" value="F">F級</label><label class="grade-option"><input type="checkbox" name="grades" value="beginner">初心者</label></div></fieldset>
         <label>開催日<input type="date" name="eventDate" required></label>
         <label>大会種別<select name="tournamentType" required><option value="official">公認大会</option><option value="support">後援大会</option><option value="event">その他イベント</option></select></label>
-        <label>主催〆<input type="datetime-local" name="trueDeadline" required></label>
-        <label>サークル〆 <span class="optional">基本的に3日前を自動入力</span><input type="datetime-local" name="internalDeadline" required></label>
+        <label>主催締切日<input type="datetime-local" name="trueDeadline" required></label>
+        <label><span>サークル内締切日 <span class="optional">（基本的に主催締切日の3日前を自動入力）</span></span><input type="datetime-local" name="internalDeadline" required></label>
         <label class="wide">会場 <span class="optional">任意</span><input name="venue" maxlength="200" autocomplete="off"></label>
-        <label class="wide">要項 <span class="optional">任意・URLを入力</span><input type="url" name="documentUrl" maxlength="500" placeholder="https://..."></label>
+        <label class="wide">大会要項 <span class="optional">任意・URLを入力</span><input type="url" name="documentUrl" maxlength="500" placeholder="https://..."></label>
       </div>
       <div class="actions"><button id="submit" type="submit">登録して通知を開始</button><span id="result" role="status" aria-live="polite"></span></div>
       <div class="footnote">複数級を選ぶと、同じ内容で級ごとに独立した大会として一括登録します。「すべて」は1件の大会として登録し、全級のメンバーへDMを送ります。</div>
