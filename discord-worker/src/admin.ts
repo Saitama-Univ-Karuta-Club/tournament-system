@@ -633,7 +633,7 @@ function adminHtml(page: AdminPage): string {
     #tournament-list { display: grid; gap: 14px; }
     .tournament-card { border: 1px solid #dce1eb; border-radius: 10px; padding: 18px; }
     .card-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 10px 0 4px; }
-    button.success { background: #18794e; }
+    button.success { padding: 9px 14px; background: #18794e; }
     button.success:hover { background: #12633f; }
     .meta { color: #596579; margin: 8px 0 14px; font-size: .88rem; line-height: 1.6; }
     .badge { display: inline-flex; align-items: center; border-radius: 999px; padding: 5px 10px; font-size: .78rem; font-weight: 750; white-space: nowrap; }
