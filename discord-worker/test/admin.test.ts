@@ -36,7 +36,9 @@ describe("Admin Worker", () => {
     expect(response.headers.get("Content-Security-Policy")).toContain(
       "frame-ancestors 'none'",
     );
-    await expect(response.text()).resolves.toContain("大会登録（Discord版MVP）");
+    const html = await response.text();
+    expect(html).toContain("大会管理（Discord版MVP）");
+    expect(html).toContain("大会一覧・回答集計");
   });
 
   it("uses 23:59 as the default deadline time", async () => {
@@ -110,5 +112,99 @@ describe("Admin Worker", () => {
     );
 
     expect(response.status).toBe(403);
+  });
+
+  it("returns the tournament list and response summary", async () => {
+    const lister = vi.fn().mockResolvedValue([
+      {
+        tournament_id: "T-11111111-1111-4111-8111-111111111111",
+        title: "管理画面テスト大会",
+        status: "active",
+        response_yes: 1,
+        response_maybe: 0,
+        response_no: 0,
+        response_pending: 0,
+        responses: [{ display_name: "埼玉 花子", response: "yes" }],
+      },
+    ]);
+    const response = await handleAdminRequest(
+      new Request("https://admin.example.com/api/tournaments"),
+      env,
+      authenticatedContext(),
+      undefined,
+      lister,
+    );
+
+    expect(response.status).toBe(200);
+    expect(lister).toHaveBeenCalledWith(env);
+    await expect(response.json()).resolves.toMatchObject({
+      tournaments: [
+        {
+          title: "管理画面テスト大会",
+          response_yes: 1,
+          responses: [{ display_name: "埼玉 花子", response: "yes" }],
+        },
+      ],
+    });
+  });
+
+  it("updates a tournament status with the authenticated administrator", async () => {
+    const statusUpdater = vi.fn().mockResolvedValue({
+      tournamentId: "T-11111111-1111-4111-8111-111111111111",
+      previousStatus: "active",
+      status: "closed",
+      changed: true,
+    });
+    const response = await handleAdminRequest(
+      new Request(
+        "https://admin.example.com/api/tournaments/T-11111111-1111-4111-8111-111111111111/status",
+        {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            Origin: "https://admin.example.com",
+          },
+          body: JSON.stringify({ status: "closed" }),
+        },
+      ),
+      env,
+      authenticatedContext(),
+      undefined,
+      undefined,
+      statusUpdater,
+    );
+
+    expect(response.status).toBe(200);
+    expect(statusUpdater).toHaveBeenCalledWith(
+      env,
+      "T-11111111-1111-4111-8111-111111111111",
+      "closed",
+      "admin@example.com",
+    );
+  });
+
+  it("rejects an unsupported tournament status", async () => {
+    const statusUpdater = vi.fn();
+    const response = await handleAdminRequest(
+      new Request(
+        "https://admin.example.com/api/tournaments/T-11111111-1111-4111-8111-111111111111/status",
+        {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            Origin: "https://admin.example.com",
+          },
+          body: JSON.stringify({ status: "deleted" }),
+        },
+      ),
+      env,
+      authenticatedContext(),
+      undefined,
+      undefined,
+      statusUpdater,
+    );
+
+    expect(response.status).toBe(400);
+    expect(statusUpdater).not.toHaveBeenCalled();
   });
 });
