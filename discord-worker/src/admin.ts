@@ -321,10 +321,10 @@ function adminHtml(page: AdminPage): string {
     .panel { background: white; border: 1px solid #dce1eb; border-radius: 12px; padding: 24px; box-shadow: 0 8px 24px #1720330c; }
     .panel + .panel { margin-top: 26px; }
     [hidden] { display: none !important; }
-    .grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 18px; }
+    .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
     .grid > label, .grid > fieldset { width: 100%; }
     label { display: grid; gap: 7px; font-weight: 650; font-size: .9rem; }
-    label.wide { grid-column: 1 / -1; }
+    .wide { grid-column: 1 / -1; }
     .optional { color: #697386; font-size: .78rem; font-weight: 500; }
     input, select { width: 100%; border: 1px solid #b9c1d0; border-radius: 8px; padding: 11px 12px; font: inherit; color: inherit; background: white; }
     input:focus, select:focus { outline: 3px solid #7c9cff3b; border-color: #526fc4; }
@@ -393,7 +393,7 @@ function adminHtml(page: AdminPage): string {
     button.danger { color: #a12822; background: #fdecea; }
     button.danger:hover { background: #f9d9d5; }
     .empty { color: #697386; text-align: center; padding: 30px 10px; }
-    @media (max-width: 680px) { .grid, .response-groups, .member-grid, .request-comparison { grid-template-columns: 1fr; } .request-arrow { transform: rotate(90deg); text-align: center; } .stats { grid-template-columns: 1fr 1fr; } label.wide { grid-column: auto; } .panel { padding: 18px; } .header-inner { display: block; } #identity { display: block; margin-top: 6px; } .tabs { padding: 0 8px; } .tab { padding-inline: 13px; } .card-heading { align-items: flex-start; } }
+    @media (max-width: 680px) { .grid, .response-groups, .member-grid, .request-comparison { grid-template-columns: 1fr; } .request-arrow { transform: rotate(90deg); text-align: center; } .stats { grid-template-columns: 1fr 1fr; } .wide { grid-column: auto; } .panel { padding: 18px; } .header-inner { display: block; } #identity { display: block; margin-top: 6px; } .tabs { padding: 0 8px; } .tab { padding-inline: 13px; } .card-heading { align-items: flex-start; } }
   </style>
 </head>
 <body data-page="${page}">
@@ -411,13 +411,13 @@ function adminHtml(page: AdminPage): string {
       <h2>大会登録</h2>
       <div class="grid">
         <label class="wide">大会名<input name="title" required maxlength="100" autocomplete="off"></label>
-        <fieldset class="grade-picker"><legend>開催級 <span class="optional">複数選択可</span></legend><div class="grade-options"><label class="grade-option"><input type="checkbox" name="grades" value="all">すべて</label><label class="grade-option"><input type="checkbox" name="grades" value="A">A級</label><label class="grade-option"><input type="checkbox" name="grades" value="B">B級</label><label class="grade-option"><input type="checkbox" name="grades" value="C">C級</label><label class="grade-option"><input type="checkbox" name="grades" value="D">D級</label><label class="grade-option"><input type="checkbox" name="grades" value="E">E級</label><label class="grade-option"><input type="checkbox" name="grades" value="F">F級</label><label class="grade-option"><input type="checkbox" name="grades" value="beginner">初心者</label></div></fieldset>
-        <label>大会種別<select name="tournamentType" required><option value="official">公認大会</option><option value="support">後援大会</option><option value="event">その他イベント</option></select></label>
+        <fieldset class="grade-picker wide"><legend>開催級 <span class="optional">複数選択可</span></legend><div class="grade-options"><label class="grade-option"><input type="checkbox" name="grades" value="all">すべて</label><label class="grade-option"><input type="checkbox" name="grades" value="A">A級</label><label class="grade-option"><input type="checkbox" name="grades" value="B">B級</label><label class="grade-option"><input type="checkbox" name="grades" value="C">C級</label><label class="grade-option"><input type="checkbox" name="grades" value="D">D級</label><label class="grade-option"><input type="checkbox" name="grades" value="E">E級</label><label class="grade-option"><input type="checkbox" name="grades" value="F">F級</label><label class="grade-option"><input type="checkbox" name="grades" value="beginner">初心者</label></div></fieldset>
         <label>開催日<input type="date" name="eventDate" required></label>
-        <label>主催者締切<input type="datetime-local" name="trueDeadline" required></label>
-        <label>サークル内締切 <span class="optional">基本的に主催者締切の3日前を自動入力</span><input type="datetime-local" name="internalDeadline" required></label>
+        <label>大会種別<select name="tournamentType" required><option value="official">公認大会</option><option value="support">後援大会</option><option value="event">その他イベント</option></select></label>
+        <label>主催〆<input type="datetime-local" name="trueDeadline" required></label>
+        <label>サークル〆 <span class="optional">基本的に3日前を自動入力</span><input type="datetime-local" name="internalDeadline" required></label>
         <label class="wide">会場 <span class="optional">任意</span><input name="venue" maxlength="200" autocomplete="off"></label>
-        <label class="wide">大会要項 <span class="optional">任意・URLを入力</span><input type="url" name="documentUrl" maxlength="500" placeholder="https://..."></label>
+        <label class="wide">要項 <span class="optional">任意・URLを入力</span><input type="url" name="documentUrl" maxlength="500" placeholder="https://..."></label>
       </div>
       <div class="actions"><button id="submit" type="submit">登録して通知を開始</button><span id="result" role="status" aria-live="polite"></span></div>
       <div class="footnote">複数級を選ぶと、同じ内容で級ごとに独立した大会として一括登録します。「すべて」は1件の大会として登録し、全級のメンバーへDMを送ります。</div>
@@ -888,13 +888,15 @@ function adminHtml(page: AdminPage): string {
     form.elements.trueDeadline.addEventListener('input', setInternalDeadlineFromOrganizer);
     const gradeCheckboxes = Array.from(form.querySelectorAll('input[name="grades"]'));
     const allGradesCheckbox = gradeCheckboxes.find((checkbox) => checkbox.value === 'all');
-    gradeCheckboxes.forEach((checkbox) => {
+    const individualGradeCheckboxes = gradeCheckboxes.filter((checkbox) => checkbox.value !== 'all');
+    allGradesCheckbox?.addEventListener('change', () => {
+      individualGradeCheckboxes.forEach((checkbox) => {
+        checkbox.checked = allGradesCheckbox.checked;
+      });
+    });
+    individualGradeCheckboxes.forEach((checkbox) => {
       checkbox.addEventListener('change', () => {
-        if (checkbox.value === 'all' && checkbox.checked) {
-          gradeCheckboxes.forEach((candidate) => {
-            if (candidate !== checkbox) candidate.checked = false;
-          });
-        } else if (checkbox.checked && allGradesCheckbox) {
+        if (!checkbox.checked && allGradesCheckbox?.checked) {
           allGradesCheckbox.checked = false;
         }
       });
@@ -919,7 +921,9 @@ function adminHtml(page: AdminPage): string {
       const data = new FormData(form);
       try {
         const payload = Object.fromEntries(data.entries());
-        payload.grades = data.getAll('grades');
+        payload.grades = allGradesCheckbox?.checked
+          ? ['all']
+          : data.getAll('grades').filter((grade) => grade !== 'all');
         if (!payload.grades.length) throw new Error('対象級を1つ以上選択してください。');
         payload.eventStartDate = payload.eventDate;
         payload.eventEndDate = payload.eventDate;

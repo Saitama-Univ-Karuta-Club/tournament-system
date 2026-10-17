@@ -97,14 +97,14 @@ describe("Admin Worker", () => {
     expect(html.indexOf('name="trueDeadline"')).toBeLessThan(
       html.indexOf('name="internalDeadline"'),
     );
-    expect(html).toContain("主催者締切の3日前を自動入力");
+    expect(html).toContain("基本的に3日前を自動入力");
     expect(html).toContain("3 * 86400000");
     expect(html).toContain(
       "trueDeadline.addEventListener('input', setInternalDeadlineFromOrganizer)",
     );
   });
 
-  it("shows one full-width field per row and uses a single event date", async () => {
+  it("shows the requested two-column layout and uses a single event date", async () => {
     const response = await handleAdminRequest(
       new Request("https://admin.example.com/register"),
       env,
@@ -119,12 +119,12 @@ describe("Admin Worker", () => {
     const orderedLabels = [
       "大会名",
       "開催級",
-      "大会種別",
       "開催日",
-      "主催者締切",
-      "サークル内締切",
+      "大会種別",
+      "主催〆",
+      "サークル〆",
       "会場",
-      "大会要項",
+      "要項",
     ];
     const positions = orderedLabels.map((label) => formHtml.indexOf(label));
 
@@ -133,9 +133,30 @@ describe("Admin Worker", () => {
     expect(formHtml).toContain('name="eventDate"');
     expect(formHtml).not.toContain('name="eventStartDate"');
     expect(formHtml).not.toContain('name="eventEndDate"');
-    expect(html).toContain("grid-template-columns: minmax(0, 1fr)");
+    expect(html).toContain(
+      "grid-template-columns: repeat(2, minmax(0, 1fr))",
+    );
+    expect(formHtml).toContain('class="grade-picker wide"');
     expect(html).toContain("payload.eventStartDate = payload.eventDate");
     expect(html).toContain("payload.eventEndDate = payload.eventDate");
+  });
+
+  it("checks and clears every grade with the all-grades checkbox", async () => {
+    const response = await handleAdminRequest(
+      new Request("https://admin.example.com/register"),
+      env,
+      authenticatedContext(),
+    );
+
+    const html = await response.text();
+    expect(html).toContain(
+      "checkbox.checked = allGradesCheckbox.checked",
+    );
+    expect(html).toContain(
+      "allGradesCheckbox?.addEventListener('change'",
+    );
+    expect(html).toContain("allGradesCheckbox?.checked");
+    expect(html).toContain("? ['all']");
   });
 
   it("stores a valid tournament for the notification worker", async () => {
