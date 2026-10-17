@@ -15,6 +15,7 @@ This repository contains the initial implementation for a workflow that:
 docs/        Specifications, setup notes, and design decisions
 gas/         Google Apps Script backend and admin-side logic
 web/         Public-facing web pages, starting with the entry page
+discord-worker/  Discord Bot backend running on Cloudflare Workers
 ```
 
 ## Current Architecture
@@ -27,6 +28,8 @@ web/         Public-facing web pages, starting with the entry page
   Backend API, scheduled jobs, and admin-side functionality
 - `docs/`
   Source of truth for requirements and implementation notes
+- `discord-worker/`
+  Discord Bot MVP isolated from the current GAS / Google Sheets system
 
 ## Current Decisions
 
