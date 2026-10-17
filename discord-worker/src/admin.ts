@@ -258,28 +258,47 @@ function isSameOrigin(request: Request): boolean {
   return origin === new URL(request.url).origin;
 }
 
-function adminHtml(): string {
+type AdminPage = "register" | "tournaments" | "members";
+
+function adminHtml(page: AdminPage): string {
+  const pageTitle = {
+    register: "大会登録",
+    tournaments: "大会一覧・回答集計",
+    members: "メンバー管理",
+  }[page];
+  const tabClass = (tab: AdminPage): string =>
+    tab === page ? "tab active" : "tab";
+  const currentPage = (tab: AdminPage): string =>
+    tab === page ? ' aria-current="page"' : "";
+  const hiddenPage = (tab: AdminPage): string =>
+    tab === page ? "" : " hidden";
+
   return String.raw`<!doctype html>
 <html lang="ja">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>大会管理 | 埼玉大学かるた会</title>
+  <title>${pageTitle} | 埼玉大学かるた会</title>
   <style>
     :root { color-scheme: light; font-family: system-ui, -apple-system, "Hiragino Sans", "Yu Gothic UI", sans-serif; color: #172033; background: #f4f6fa; }
     * { box-sizing: border-box; }
     body { margin: 0; }
     header { background: #293c74; color: white; padding: 18px 24px; box-shadow: 0 2px 8px #17203322; }
-    header div { max-width: 1080px; margin: auto; display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }
+    .header-inner { max-width: 1080px; margin: auto; display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }
     h1 { margin: 0; font-size: 1.25rem; }
     h2 { margin: 0 0 20px; font-size: 1.15rem; }
     h3 { margin: 0; font-size: 1.05rem; }
     #identity { font-size: .82rem; opacity: .85; }
-    main { max-width: 1080px; margin: 28px auto; padding: 0 18px 48px; }
+    .tab-bar { background: white; border-bottom: 1px solid #dce1eb; box-shadow: 0 2px 8px #1720330a; }
+    .tabs { max-width: 1080px; margin: auto; padding: 0 18px; display: flex; gap: 4px; overflow-x: auto; }
+    .tab { color: #596579; text-decoration: none; font-weight: 700; white-space: nowrap; padding: 15px 18px 12px; border-bottom: 3px solid transparent; }
+    .tab:hover { color: #294796; background: #f6f8ff; }
+    .tab.active { color: #294796; border-bottom-color: #3658b2; }
+    main { max-width: 1080px; margin: 24px auto; padding: 0 18px 48px; }
     .notice { border-left: 4px solid #da8c10; background: #fff7e8; padding: 12px 16px; margin-bottom: 18px; line-height: 1.7; }
     .panel { background: white; border: 1px solid #dce1eb; border-radius: 12px; padding: 24px; box-shadow: 0 8px 24px #1720330c; }
     .panel + .panel { margin-top: 26px; }
-    #tournament-form { margin-bottom: 26px; }
+    [hidden] { display: none !important; }
     .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
     label { display: grid; gap: 7px; font-weight: 650; font-size: .9rem; }
     label.wide { grid-column: 1 / -1; }
@@ -332,14 +351,21 @@ function adminHtml(): string {
     .member-actions { display: flex; align-items: center; gap: 12px; margin-top: 12px; flex-wrap: wrap; }
     .member-link { color: #596579; font-size: .8rem; }
     .empty { color: #697386; text-align: center; padding: 30px 10px; }
-    @media (max-width: 680px) { .grid, .response-groups, .member-grid { grid-template-columns: 1fr; } .stats { grid-template-columns: 1fr 1fr; } label.wide { grid-column: auto; } .panel { padding: 18px; } header div { display: block; } #identity { margin-top: 6px; } .card-heading { align-items: flex-start; } }
+    @media (max-width: 680px) { .grid, .response-groups, .member-grid { grid-template-columns: 1fr; } .stats { grid-template-columns: 1fr 1fr; } label.wide { grid-column: auto; } .panel { padding: 18px; } .header-inner { display: block; } #identity { display: block; margin-top: 6px; } .tabs { padding: 0 8px; } .tab { padding-inline: 13px; } .card-heading { align-items: flex-start; } }
   </style>
 </head>
-<body>
-  <header><div><h1>大会管理（Discord版MVP）</h1><span id="identity">認証情報を確認中…</span></div></header>
+<body data-page="${page}">
+  <header><div class="header-inner"><h1>大会管理（Discord版MVP）</h1><span id="identity">認証情報を確認中…</span></div></header>
+  <div class="tab-bar">
+    <nav class="tabs" aria-label="管理画面メニュー">
+      <a class="${tabClass("register")}" href="/register"${currentPage("register")}>大会登録</a>
+      <a class="${tabClass("tournaments")}" href="/tournaments"${currentPage("tournaments")}>大会一覧</a>
+      <a class="${tabClass("members")}" href="/members"${currentPage("members")}>メンバー管理</a>
+    </nav>
+  </div>
   <main>
-    <div class="notice"><strong>テスト運用中です。</strong> 登録後1分以内を目安に告知チャンネルへ投稿し、該当級の登録済みメンバー全員へのDMをキューに登録します。送信失敗時は最大5回まで自動再送します。</div>
-    <form id="tournament-form" class="panel">
+    <div class="notice"${hiddenPage("register")}><strong>テスト運用中です。</strong> 登録後1分以内を目安に告知チャンネルへ投稿し、該当級の登録済みメンバー全員へのDMをキューに登録します。送信失敗時は最大5回まで自動再送します。</div>
+    <form id="tournament-form" class="panel"${hiddenPage("register")}>
       <h2>大会登録</h2>
       <div class="grid">
         <label class="wide">大会名<input name="title" required maxlength="100" autocomplete="off"></label>
@@ -355,7 +381,7 @@ function adminHtml(): string {
       <div class="actions"><button id="submit" type="submit">登録して通知を開始</button><span id="result" role="status" aria-live="polite"></span></div>
       <div class="footnote">現段階では1回の登録につき1級です。級ごとに日程・締切が異なる大会を正確に扱えるよう、D1では級別の大会として保存します。</div>
     </form>
-    <section class="panel" aria-labelledby="tournament-list-title">
+    <section class="panel" aria-labelledby="tournament-list-title"${hiddenPage("tournaments")}>
       <div class="list-heading">
         <h2 id="tournament-list-title">大会一覧・回答集計</h2>
         <button id="refresh-list" type="button" class="secondary">再読み込み</button>
@@ -363,7 +389,7 @@ function adminHtml(): string {
       <div id="list-status" role="status" aria-live="polite">読み込み中…</div>
       <div id="tournament-list"></div>
     </section>
-    <section class="panel" aria-labelledby="member-list-title">
+    <section class="panel" aria-labelledby="member-list-title"${hiddenPage("members")}>
       <div class="list-heading">
         <h2 id="member-list-title">メンバー管理</h2>
         <button id="refresh-members" type="button" class="secondary">再読み込み</button>
@@ -374,6 +400,7 @@ function adminHtml(): string {
     </section>
   </main>
   <script>
+    const currentPage = document.body.dataset.page;
     const form = document.querySelector('#tournament-form');
     const submit = document.querySelector('#submit');
     const result = document.querySelector('#result');
@@ -700,7 +727,6 @@ function adminHtml(): string {
         form.elements.title.value = '';
         form.elements.venue.value = '';
         form.elements.documentUrl.value = '';
-        await loadTournaments();
       } catch (error) {
         result.className = 'error';
         result.textContent = error instanceof Error ? error.message : '登録に失敗しました。';
@@ -708,10 +734,14 @@ function adminHtml(): string {
         submit.disabled = false;
       }
     });
-    refreshList.addEventListener('click', loadTournaments);
-    refreshMembers.addEventListener('click', loadMembers);
-    loadTournaments();
-    loadMembers();
+    if (currentPage === 'tournaments') {
+      refreshList.addEventListener('click', loadTournaments);
+      loadTournaments();
+    }
+    if (currentPage === 'members') {
+      refreshMembers.addEventListener('click', loadMembers);
+      loadMembers();
+    }
   </script>
 </body>
 </html>`;
@@ -739,7 +769,19 @@ export async function handleAdminRequest(
 
   const url = new URL(request.url);
   if (request.method === "GET" && url.pathname === "/") {
-    return new Response(adminHtml(), {
+    return new Response(null, {
+      status: 302,
+      headers: { ...securityHeaders, Location: "/register" },
+    });
+  }
+
+  const page = {
+    "/register": "register",
+    "/tournaments": "tournaments",
+    "/members": "members",
+  }[url.pathname] as AdminPage | undefined;
+  if (request.method === "GET" && page) {
+    return new Response(adminHtml(page), {
       headers: { ...securityHeaders, "Content-Type": "text/html; charset=utf-8" },
     });
   }

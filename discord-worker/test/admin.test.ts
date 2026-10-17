@@ -25,9 +25,24 @@ describe("Admin Worker", () => {
     expect(response.status).toBe(403);
   });
 
-  it("serves the tournament form to an authenticated admin", async () => {
+  it("redirects the root to the tournament registration page", async () => {
     const response = await handleAdminRequest(
       new Request("https://admin.example.com/"),
+      env,
+      authenticatedContext(),
+    );
+
+    expect(response.status).toBe(302);
+    expect(response.headers.get("Location")).toBe("/register");
+  });
+
+  it.each([
+    ["register", "大会登録"],
+    ["tournaments", "大会一覧"],
+    ["members", "メンバー管理"],
+  ])("serves the %s page with tab navigation", async (path, label) => {
+    const response = await handleAdminRequest(
+      new Request(`https://admin.example.com/${path}`),
       env,
       authenticatedContext(),
     );
@@ -38,15 +53,26 @@ describe("Admin Worker", () => {
     );
     const html = await response.text();
     expect(html).toContain("大会管理（Discord版MVP）");
-    expect(html).toContain("大会一覧・回答集計");
-    expect(html).toContain("メンバー管理");
+    expect(html).toContain(`>${label}</a>`);
+    expect(html).toContain(`href="/${path}" aria-current="page"`);
+    expect(html).toContain(`data-page="${path}"`);
+  });
+
+  it("shows the queue notice only on the registration page", async () => {
+    const response = await handleAdminRequest(
+      new Request("https://admin.example.com/register"),
+      env,
+      authenticatedContext(),
+    );
+
+    const html = await response.text();
     expect(html).toContain("登録済みメンバー全員");
     expect(html).not.toContain("最大10人");
   });
 
   it("uses 23:59 as the default deadline time", async () => {
     const response = await handleAdminRequest(
-      new Request("https://admin.example.com/"),
+      new Request("https://admin.example.com/register"),
       env,
       authenticatedContext(),
     );
