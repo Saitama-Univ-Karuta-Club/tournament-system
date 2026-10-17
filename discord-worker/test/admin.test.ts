@@ -53,7 +53,7 @@ describe("Admin Worker", () => {
     );
     const html = await response.text();
     expect(html).toContain("大会管理（Discord版MVP）");
-    expect(html).toContain(`>${label}</a>`);
+    expect(html).toContain(`>${label}`);
     expect(html).toContain(`href="/${path}" aria-current="page"`);
     expect(html).toContain(`data-page="${path}"`);
   });
@@ -381,5 +381,39 @@ describe("Admin Worker", () => {
       "approved",
       "admin@example.com",
     );
+  });
+
+  it("returns the pending registration count for the tab badge", async () => {
+    const registrationCounter = vi.fn().mockResolvedValue(3);
+    const response = await handleAdminRequest(
+      new Request("https://admin.example.com/api/member-requests/count"),
+      env,
+      authenticatedContext(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      registrationCounter,
+    );
+
+    expect(response.status).toBe(200);
+    expect(registrationCounter).toHaveBeenCalledWith(env);
+    await expect(response.json()).resolves.toEqual({ count: 3 });
+  });
+
+  it("includes the pending-request badge in the member tab", async () => {
+    const response = await handleAdminRequest(
+      new Request("https://admin.example.com/tournaments"),
+      env,
+      authenticatedContext(),
+    );
+
+    const html = await response.text();
+    expect(html).toContain('id="pending-request-badge"');
+    expect(html).toContain('class="request-badge"');
+    expect(html).toContain("/api/member-requests/count");
   });
 });

@@ -163,6 +163,17 @@ export async function listPendingMemberRegistrations(
   }));
 }
 
+export async function countPendingMemberRegistrations(
+  env: TournamentEnv,
+): Promise<number> {
+  const result = await env.DB.prepare(
+    `SELECT COUNT(*) AS count
+     FROM member_registration_requests
+     WHERE status = 'pending'`,
+  ).first<{ count: number }>();
+  return Number(result?.count ?? 0);
+}
+
 export async function decideMemberRegistration(
   env: TournamentEnv,
   requestId: string,

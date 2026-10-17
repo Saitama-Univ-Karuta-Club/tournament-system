@@ -6,6 +6,7 @@ import {
   type TournamentRow,
 } from "./tournaments";
 import {
+  countPendingMemberRegistrations,
   decideMemberRegistration,
   listAdminMembers,
   listPendingMemberRegistrations,
@@ -47,6 +48,7 @@ type MemberRegistrationDecider = (
   decision: string,
   decidedByEmail: string,
 ) => Promise<MemberRegistrationDecision>;
+type MemberRegistrationCounter = (env: AdminEnv) => Promise<number>;
 
 interface AdminTournamentRow extends TournamentRow {
   status: string;
@@ -304,9 +306,10 @@ function adminHtml(page: AdminPage): string {
     #identity { font-size: .82rem; opacity: .85; }
     .tab-bar { background: white; border-bottom: 1px solid #dce1eb; box-shadow: 0 2px 8px #1720330a; }
     .tabs { max-width: 1080px; margin: auto; padding: 0 18px; display: flex; gap: 4px; overflow-x: auto; }
-    .tab { color: #596579; text-decoration: none; font-weight: 700; white-space: nowrap; padding: 15px 18px 12px; border-bottom: 3px solid transparent; }
+    .tab { position: relative; display: inline-flex; align-items: center; color: #596579; text-decoration: none; font-weight: 700; white-space: nowrap; padding: 15px 18px 12px; border-bottom: 3px solid transparent; }
     .tab:hover { color: #294796; background: #f6f8ff; }
     .tab.active { color: #294796; border-bottom-color: #3658b2; }
+    .request-badge { position: absolute; top: 2px; right: 1px; min-width: 20px; height: 20px; padding: 0 5px; border-radius: 999px; display: inline-flex; align-items: center; justify-content: center; color: white; background: #d92d20; box-shadow: 0 0 0 2px white; font-size: .72rem; font-weight: 800; line-height: 1; }
     main { max-width: 1080px; margin: 24px auto; padding: 0 18px 48px; }
     .notice { border-left: 4px solid #da8c10; background: #fff7e8; padding: 12px 16px; margin-bottom: 18px; line-height: 1.7; }
     .panel { background: white; border: 1px solid #dce1eb; border-radius: 12px; padding: 24px; box-shadow: 0 8px 24px #1720330c; }
@@ -386,7 +389,7 @@ function adminHtml(page: AdminPage): string {
     <nav class="tabs" aria-label="管理画面メニュー">
       <a class="${tabClass("register")}" href="/register"${currentPage("register")}>大会登録</a>
       <a class="${tabClass("tournaments")}" href="/tournaments"${currentPage("tournaments")}>大会一覧</a>
-      <a class="${tabClass("members")}" href="/members"${currentPage("members")}>メンバー管理</a>
+      <a class="${tabClass("members")}" href="/members"${currentPage("members")}>メンバー管理<span id="pending-request-badge" class="request-badge" role="status" aria-live="polite" hidden>0</span></a>
     </nav>
   </div>
   <main>
@@ -444,6 +447,7 @@ function adminHtml(page: AdminPage): string {
     const refreshMembers = document.querySelector('#refresh-members');
     const requestList = document.querySelector('#request-list');
     const requestStatus = document.querySelector('#request-status');
+    const pendingRequestBadge = document.querySelector('#pending-request-badge');
     const statusLabels = {
       draft: '下書き',
       active: '回答受付中',
@@ -468,6 +472,24 @@ function adminHtml(page: AdminPage): string {
       if (className) node.className = className;
       if (text !== undefined) node.textContent = text;
       return node;
+    }
+
+    function setPendingRequestBadge(count) {
+      const normalized = Number.isFinite(Number(count)) ? Math.max(0, Number(count)) : 0;
+      pendingRequestBadge.hidden = normalized === 0;
+      pendingRequestBadge.textContent = normalized > 99 ? '99+' : String(normalized);
+      pendingRequestBadge.setAttribute('aria-label', '未処理の登録申請 ' + normalized + '件');
+    }
+
+    async function loadPendingRequestCount() {
+      try {
+        const response = await fetch('/api/member-requests/count');
+        const body = await response.json();
+        if (!response.ok) throw new Error();
+        setPendingRequestBadge(body.count);
+      } catch {
+        // 一時的な取得失敗時は直前の表示を維持する。
+      }
     }
 
     function gradeLabel(grade) {
@@ -781,6 +803,7 @@ function adminHtml(page: AdminPage): string {
           requestBody.requests.forEach((request) => requestList.append(renderRegistrationRequest(request)));
         }
         requestStatus.textContent = '未処理 ' + requestBody.requests.length + '件';
+        setPendingRequestBadge(requestBody.requests.length);
         memberList.replaceChildren();
         if (!body.members.length) {
           memberList.append(element('div', 'empty', '登録されたメンバーはいません。'));
@@ -822,6 +845,13 @@ function adminHtml(page: AdminPage): string {
     fetch('/api/session').then((response) => response.json()).then((data) => {
       identity.textContent = data.email || '認証済み';
     }).catch(() => { identity.textContent = '認証済み'; });
+    loadPendingRequestCount();
+    setInterval(() => {
+      if (!document.hidden) loadPendingRequestCount();
+    }, 30000);
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) loadPendingRequestCount();
+    });
 
     form.addEventListener('submit', async (event) => {
       event.preventDefault();
@@ -876,6 +906,7 @@ export async function handleAdminRequest(
   memberUpdater: MemberUpdater = updateAdminMember,
   memberRegistrationLister: MemberRegistrationLister = listPendingMemberRegistrations,
   memberRegistrationDecider: MemberRegistrationDecider = decideMemberRegistration,
+  memberRegistrationCounter: MemberRegistrationCounter = countPendingMemberRegistrations,
 ): Promise<Response> {
   if (!ctx.access) {
     return json({ error: "Cloudflare Accessによる認証が必要です。" }, 403);
@@ -934,6 +965,15 @@ export async function handleAdminRequest(
     } catch (error: unknown) {
       console.error("メンバー登録申請一覧の取得エラー", error);
       return json({ error: "メンバー登録申請を取得できませんでした。" }, 500);
+    }
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/member-requests/count") {
+    try {
+      return json({ count: await memberRegistrationCounter(env) });
+    } catch (error: unknown) {
+      console.error("未処理メンバー登録申請数の取得エラー", error);
+      return json({ error: "未処理申請数を取得できませんでした。" }, 500);
     }
   }
 
