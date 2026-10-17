@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  editTournaments,
   handleAdminRequest,
   listAdminTournaments,
   type AdminEnv,
@@ -73,7 +74,7 @@ describe("Admin Worker", () => {
     expect(html).toContain("登録済みメンバー全員");
     expect(html).not.toContain("最大10人");
     expect(html).toContain('name="grades" value="all"');
-    expect(html).toContain("data.getAll('grades')");
+    expect(html).toContain("selectedRegistrationGrades()");
   });
 
   it("renders compact response lists with grouping, sorting, and status filters", async () => {
@@ -141,7 +142,7 @@ describe("Admin Worker", () => {
     );
   });
 
-  it("shows the requested two-column layout and uses a single event date", async () => {
+  it("shows the requested two-column layout with optional per-grade dates", async () => {
     const response = await handleAdminRequest(
       new Request("https://admin.example.com/register"),
       env,
@@ -179,6 +180,8 @@ describe("Admin Worker", () => {
     );
     expect(html).toContain("payload.eventStartDate = payload.eventDate");
     expect(html).toContain("payload.eventEndDate = payload.eventDate");
+    expect(formHtml).toContain('id="grade-date-settings"');
+    expect(html).toContain("payload.eventDatesByGrade");
   });
 
   it("checks and clears every grade with the all-grades checkbox", async () => {
@@ -196,7 +199,20 @@ describe("Admin Worker", () => {
       "allGradesCheckbox?.addEventListener('change'",
     );
     expect(html).toContain("allGradesCheckbox?.checked");
-    expect(html).toContain("? ['all']");
+    expect(html).toContain("return ['all']");
+  });
+
+  it("offers direct PDF upload for registration and editing", async () => {
+    const response = await handleAdminRequest(
+      new Request("https://admin.example.com/register"),
+      env,
+      authenticatedContext(),
+    );
+
+    const html = await response.text();
+    expect(html.match(/type="file" name="documentFile"/g)).toHaveLength(2);
+    expect(html).toContain("PDF形式、20MBまで");
+    expect(html).toContain("fetch('/api/documents'");
   });
 
   it("stores a valid tournament for the notification worker", async () => {
@@ -266,6 +282,7 @@ describe("Admin Worker", () => {
           tournamentType: "official",
           eventStartDate: "2026-11-01",
           eventEndDate: "2026-11-01",
+          eventDatesByGrade: { B: "2026-11-01", C: "2026-11-08" },
           internalDeadline: "2026-10-25T23:59:00+09:00",
           trueDeadline: "2026-10-28T23:59:00+09:00",
         }),
@@ -279,8 +296,8 @@ describe("Admin Worker", () => {
     expect(creator).toHaveBeenCalledWith(
       env,
       [
-        expect.objectContaining({ grade: "B", title: "複数級大会" }),
-        expect.objectContaining({ grade: "C", title: "複数級大会" }),
+        expect.objectContaining({ grade: "B", title: "複数級大会", eventStartDate: "2026-11-01" }),
+        expect.objectContaining({ grade: "C", title: "複数級大会", eventStartDate: "2026-11-08" }),
       ],
     );
     await expect(response.json()).resolves.toMatchObject({
@@ -565,6 +582,79 @@ describe("Admin Worker", () => {
     await expect(response.json()).resolves.toMatchObject({
       message: expect.stringContaining("更新通知を予約"),
     });
+  });
+
+  it("keeps a grouped tournament while saving a different date for each grade", async () => {
+    const updates: Array<{ sql: string; values: unknown[] }> = [];
+    const tournaments = [
+      {
+        tournament_id: "T-11111111-1111-4111-8111-111111111111",
+        registration_group_id: "TG-11111111-1111-4111-8111-111111111111",
+        title: "複数日大会",
+        event_start_date: "2026-11-01",
+        event_end_date: "2026-11-01",
+        grade: "B",
+        all_grades: 0,
+        tournament_type: "official",
+        venue: null,
+        true_deadline: "2026-10-28T14:59:00.000Z",
+        internal_deadline: "2026-10-25T14:59:00.000Z",
+        document_url: null,
+        status: "draft",
+      },
+      {
+        tournament_id: "T-22222222-2222-4222-8222-222222222222",
+        registration_group_id: "TG-11111111-1111-4111-8111-111111111111",
+        title: "複数日大会",
+        event_start_date: "2026-11-01",
+        event_end_date: "2026-11-01",
+        grade: "C",
+        all_grades: 0,
+        tournament_type: "official",
+        venue: null,
+        true_deadline: "2026-10-28T14:59:00.000Z",
+        internal_deadline: "2026-10-25T14:59:00.000Z",
+        document_url: null,
+        status: "draft",
+      },
+    ];
+    const prepare = vi.fn((sql: string) => ({
+      bind: vi.fn((...values: unknown[]) => ({
+        all: vi.fn().mockResolvedValue({ results: tournaments }),
+        first: vi.fn().mockResolvedValue({ count: 2 }),
+        sql,
+        values,
+      })),
+    }));
+    const batch = vi.fn(async (statements: Array<{ sql: string; values: unknown[] }>) => {
+      updates.push(...statements);
+      return statements.map(() => ({ success: true }));
+    });
+    const editEnv = { DB: { prepare, batch } as unknown as D1Database };
+
+    const result = await editTournaments(
+      editEnv,
+      tournaments.map((item) => item.tournament_id),
+      {
+        title: "複数日大会",
+        eventStartDate: "2026-11-01",
+        eventDatesByTournament: {
+          [tournaments[0].tournament_id]: "2026-11-01",
+          [tournaments[1].tournament_id]: "2026-11-08",
+        },
+        tournamentType: "official",
+        trueDeadline: "2026-10-28T14:59:00.000Z",
+        internalDeadline: "2026-10-25T14:59:00.000Z",
+      },
+      "admin@example.com",
+    );
+
+    expect(result.tournaments.map((item) => item.event_start_date)).toEqual([
+      "2026-11-01",
+      "2026-11-08",
+    ]);
+    const updateStatement = updates.find((item) => item.sql.includes("UPDATE tournaments"));
+    expect(updateStatement?.values.slice(0, 2)).toEqual(["複数日大会", "2026-11-08"]);
   });
 
   it("rejects an unsupported tournament status", async () => {

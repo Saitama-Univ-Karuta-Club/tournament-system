@@ -6,6 +6,9 @@
   "observability": {
     "enabled": true
   },
+  "vars": {
+    "DOCUMENT_PUBLIC_BASE_URL": "https://sukc-tournament-discord-bot.saitama-univ-karuta-club.workers.dev"
+  },
   "access": {
     "dev": {
       "aud": "local-sukc-tournament-admin",
@@ -20,6 +23,12 @@
       "database_name": "sukc-tournament-discord-db",
       "database_id": "d1e159c8-0bc9-4065-a00b-15f8edd21d82",
       "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "DOCUMENTS",
+      "bucket_name": "sukc-tournament-documents"
     }
   ]
 }

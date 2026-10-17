@@ -4,6 +4,7 @@ import {
   verifyKey,
 } from "discord-interactions";
 import { commands } from "./commands";
+import { serveTournamentDocument } from "./documents";
 import {
   formatGrade,
   formatRank,
@@ -26,6 +27,7 @@ import {
 
 export interface Env {
   DB: D1Database;
+  DOCUMENTS?: R2Bucket;
   DISCORD_PUBLIC_KEY: string;
   DISCORD_APPLICATION_ID?: string;
   DISCORD_GUILD_ID?: string;
@@ -189,6 +191,9 @@ export async function handleRequest(
   testReminderSender: TestReminderSender = sendTestDeadlineReminder,
 ): Promise<Response> {
   const url = new URL(request.url);
+
+  const documentResponse = await serveTournamentDocument(request, env.DOCUMENTS);
+  if (documentResponse) return documentResponse;
 
   if (request.method === "GET" && url.pathname === "/health") {
     try {

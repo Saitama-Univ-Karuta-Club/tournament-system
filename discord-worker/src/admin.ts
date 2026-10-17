@@ -20,8 +20,13 @@ import {
   type MemberRegistrationDecision,
   type MemberUpdateInput,
 } from "./admin-members";
+import {
+  DocumentUploadError,
+  uploadTournamentDocument,
+  type DocumentEnv,
+} from "./documents";
 
-export interface AdminEnv extends TournamentEnv {}
+export interface AdminEnv extends TournamentEnv, DocumentEnv {}
 
 type AdminContext = Pick<ExecutionContext, "access" | "waitUntil">;
 type TournamentCreator = (
@@ -111,6 +116,7 @@ export interface TournamentStatusBatchUpdate {
 export interface TournamentEditInput {
   title: string;
   eventStartDate: string;
+  eventDatesByTournament?: Record<string, string>;
   tournamentType: string;
   venue?: string;
   trueDeadline: string;
@@ -203,7 +209,7 @@ async function loadEditableTournaments(
   return rows.results;
 }
 
-async function editFingerprint(input: TournamentEditInput): Promise<string> {
+async function editFingerprint(input: unknown): Promise<string> {
   const digest = await crypto.subtle.digest(
     "SHA-256",
     new TextEncoder().encode(JSON.stringify(input)),
@@ -440,25 +446,57 @@ export async function editTournaments(
     rawTournamentIds,
     rawTournamentIds.length > 1,
   );
+  const suppliedDates = rawInput.eventDatesByTournament;
+  if (
+    suppliedDates !== undefined &&
+    (typeof suppliedDates !== "object" || suppliedDates === null || Array.isArray(suppliedDates))
+  ) {
+    throw new AdminRequestError("級別の開催日が不正です。", 400);
+  }
+  const tournamentIds = new Set(tournaments.map((tournament) => tournament.tournament_id));
+  if (
+    suppliedDates &&
+    Object.keys(suppliedDates).some((tournamentId) => !tournamentIds.has(tournamentId))
+  ) {
+    throw new AdminRequestError("対象外の大会の開催日は変更できません。", 400);
+  }
+  const eventDatesByTournament = Object.fromEntries(
+    tournaments.map((tournament) => [
+      tournament.tournament_id,
+      suppliedDates?.[tournament.tournament_id] ?? rawInput.eventStartDate,
+    ]),
+  );
   const normalized = normalizeTournamentInput({
     ...rawInput,
-    eventEndDate: rawInput.eventStartDate,
+    eventStartDate: eventDatesByTournament[tournaments[0].tournament_id],
+    eventEndDate: eventDatesByTournament[tournaments[0].tournament_id],
     grade: tournaments[0].all_grades === 1 ? "all" : tournaments[0].grade,
     createdByEmail: changedByEmail,
   });
   const editableData = {
     title: normalized.title,
-    eventStartDate: normalized.eventStartDate,
     tournamentType: normalized.tournamentType,
     venue: normalized.venue || "",
     trueDeadline: normalized.trueDeadline,
     internalDeadline: normalized.internalDeadline,
     documentUrl: normalized.documentUrl || "",
   };
+  const normalizedEventDates = Object.fromEntries(
+    tournaments.map((tournament) => {
+      const date = eventDatesByTournament[tournament.tournament_id];
+      const normalizedDate = normalizeTournamentInput({
+        ...normalized,
+        grade: tournament.all_grades === 1 ? "all" : tournament.grade,
+        eventStartDate: date,
+        eventEndDate: date,
+      }).eventStartDate;
+      return [tournament.tournament_id, normalizedDate];
+    }),
+  );
   const changed = tournaments.filter((tournament) =>
     tournament.title !== editableData.title ||
-    tournament.event_start_date !== editableData.eventStartDate ||
-    tournament.event_end_date !== editableData.eventStartDate ||
+    tournament.event_start_date !== normalizedEventDates[tournament.tournament_id] ||
+    tournament.event_end_date !== normalizedEventDates[tournament.tournament_id] ||
     tournament.tournament_type !== editableData.tournamentType ||
     (tournament.venue ?? "") !== editableData.venue ||
     tournament.true_deadline !== editableData.trueDeadline ||
@@ -472,6 +510,7 @@ export async function editTournaments(
   const now = new Date().toISOString();
   await env.DB.batch(
     changed.flatMap((tournament) => {
+      const eventStartDate = normalizedEventDates[tournament.tournament_id];
       const previousData = {
         title: tournament.title,
         eventStartDate: tournament.event_start_date,
@@ -481,6 +520,7 @@ export async function editTournaments(
         internalDeadline: tournament.internal_deadline,
         documentUrl: tournament.document_url ?? "",
       };
+      const newData = { ...editableData, eventStartDate };
       return [
         env.DB.prepare(
           `UPDATE tournaments
@@ -491,8 +531,8 @@ export async function editTournaments(
            WHERE tournament_id = ? AND status <> 'deleted'`,
         ).bind(
           editableData.title,
-          editableData.eventStartDate,
-          editableData.eventStartDate,
+          eventStartDate,
+          eventStartDate,
           editableData.tournamentType,
           editableData.tournamentType === "official" ? 1 : 0,
           editableData.venue || null,
@@ -509,7 +549,7 @@ export async function editTournaments(
         ).bind(
           tournament.tournament_id,
           JSON.stringify(previousData),
-          JSON.stringify(editableData),
+          JSON.stringify(newData),
           changedByEmail,
           now,
         ),
@@ -520,15 +560,15 @@ export async function editTournaments(
   const updated = tournaments.map((tournament) => ({
     ...tournament,
     title: editableData.title,
-    event_start_date: editableData.eventStartDate,
-    event_end_date: editableData.eventStartDate,
+    event_start_date: normalizedEventDates[tournament.tournament_id],
+    event_end_date: normalizedEventDates[tournament.tournament_id],
     tournament_type: editableData.tournamentType,
     venue: editableData.venue || null,
     true_deadline: editableData.trueDeadline,
     internal_deadline: editableData.internalDeadline,
     document_url: editableData.documentUrl || null,
   }));
-  const revision = await editFingerprint(editableData);
+  const revision = await editFingerprint({ editableData, normalizedEventDates });
   let notificationsQueued = 0;
   for (const tournament of updated) {
     if (tournament.status === "active") {
@@ -615,6 +655,10 @@ function adminHtml(page: AdminPage): string {
     .grade-option { display: inline-flex; grid-template-columns: none; align-items: center; gap: 6px; padding: 3px 7px; border-radius: 6px; font-weight: 600; white-space: nowrap; }
     .grade-option:has(input:checked) { color: #294796; background: #edf1ff; }
     .grade-option input { width: auto; margin: 0; }
+    .grade-date-settings { grid-column: 1 / -1; padding: 14px; border-radius: 9px; background: #f5f7fb; }
+    .grade-date-settings > strong { display: block; margin-bottom: 10px; font-size: .9rem; }
+    .grade-date-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .file-note { color: #697386; font-size: .78rem; font-weight: 500; }
     .actions { margin-top: 24px; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
     button { border: 0; border-radius: 8px; padding: 12px 20px; background: #3658b2; color: white; font: inherit; font-weight: 700; cursor: pointer; }
     button:hover { background: #294796; }
@@ -683,7 +727,7 @@ function adminHtml(page: AdminPage): string {
     .dialog-note { margin: 0 0 18px; color: #697386; font-size: .84rem; }
     .dialog-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; margin-top: 22px; flex-wrap: wrap; }
     .dialog-actions .status-message { margin-right: auto; }
-    @media (max-width: 680px) { .grid, .response-sections, .member-grid, .request-comparison { grid-template-columns: 1fr; } .request-arrow { transform: rotate(90deg); text-align: center; } .wide { grid-column: auto; } .panel { padding: 18px; } .header-inner { display: block; } #identity { display: block; margin-top: 6px; } .tabs { padding: 0 8px; } .tab { padding-inline: 13px; } .card-heading { align-items: flex-start; } .list-controls { align-items: stretch; } .list-controls label { flex: 1 1 100%; } }
+    @media (max-width: 680px) { .grid, .grade-date-grid, .response-sections, .member-grid, .request-comparison { grid-template-columns: 1fr; } .request-arrow { transform: rotate(90deg); text-align: center; } .wide, .grade-date-settings { grid-column: auto; } .panel { padding: 18px; } .header-inner { display: block; } #identity { display: block; margin-top: 6px; } .tabs { padding: 0 8px; } .tab { padding-inline: 13px; } .card-heading { align-items: flex-start; } .list-controls { align-items: stretch; } .list-controls label { flex: 1 1 100%; } }
   </style>
 </head>
 <body data-page="${page}">
@@ -704,13 +748,15 @@ function adminHtml(page: AdminPage): string {
         <fieldset class="grade-picker wide"><legend>開催級 <span class="optional">複数選択可</span></legend><div class="grade-options"><label class="grade-option"><input type="checkbox" name="grades" value="all">すべて</label><label class="grade-option"><input type="checkbox" name="grades" value="A">A級</label><label class="grade-option"><input type="checkbox" name="grades" value="B">B級</label><label class="grade-option"><input type="checkbox" name="grades" value="C">C級</label><label class="grade-option"><input type="checkbox" name="grades" value="D">D級</label><label class="grade-option"><input type="checkbox" name="grades" value="E">E級</label><label class="grade-option"><input type="checkbox" name="grades" value="F">F級</label><label class="grade-option"><input type="checkbox" name="grades" value="beginner">初心者</label></div></fieldset>
         <label>開催日<input type="date" name="eventDate" required></label>
         <label>大会種別<select name="tournamentType" required><option value="official">公認大会</option><option value="support">後援大会</option><option value="event">その他イベント</option></select></label>
+        <div id="grade-date-settings" class="grade-date-settings" hidden><strong>級ごとの開催日 <span class="optional">同じ大会で日程が異なる級だけ変更してください</span></strong><div id="grade-date-grid" class="grade-date-grid"></div></div>
         <label>主催締切日<input type="datetime-local" name="trueDeadline" required></label>
         <label><span>サークル内締切日 <span class="optional">（基本的に主催締切日の3日前を自動入力）</span></span><input type="datetime-local" name="internalDeadline" required></label>
         <label class="wide">会場 <span class="optional">任意</span><input name="venue" maxlength="200" autocomplete="off"></label>
-        <label class="wide">大会要項 <span class="optional">任意・URLを入力</span><input type="url" name="documentUrl" maxlength="500" placeholder="https://..."></label>
+        <label class="wide">大会要項PDF <span class="file-note">任意・PDF形式、20MBまで。開催月・大会名・級に自動でリネームします</span><input type="file" name="documentFile" accept="application/pdf,.pdf"></label>
+        <label class="wide">大会要項URL <span class="optional">任意・外部リンクを使う場合</span><input type="url" name="documentUrl" maxlength="500" placeholder="https://..."></label>
       </div>
       <div class="actions"><button id="submit" type="submit">登録して通知を開始</button><span id="result" role="status" aria-live="polite"></span></div>
-      <div class="footnote">複数級を選ぶと、同じ内容で級ごとに独立した大会として一括登録します。「すべて」は1件の大会として登録し、全級のメンバーへDMを送ります。</div>
+      <div class="footnote">複数級を選ぶと、共通の申込フロー・締切を持つ同一大会として登録します。級ごとに開催日を変えることもできます。「すべて」は1件の大会として登録し、全級のメンバーへDMを送ります。</div>
     </form>
     <section class="panel" aria-labelledby="tournament-list-title"${hiddenPage("tournaments")}>
       <div class="list-heading">
@@ -745,12 +791,13 @@ function adminHtml(page: AdminPage): string {
       <p id="edit-tournament-grade" class="dialog-note"></p>
       <div class="grid">
         <label class="wide">大会名<input name="title" required maxlength="100" autocomplete="off"></label>
-        <label>開催日<input type="date" name="eventStartDate" required></label>
+        <div id="edit-event-dates" class="grade-date-settings wide"><strong>開催日</strong><div id="edit-event-date-grid" class="grade-date-grid"></div></div>
         <label>大会種別<select name="tournamentType" required><option value="official">公認大会</option><option value="support">後援大会</option><option value="event">その他イベント</option></select></label>
         <label>主催締切日<input type="datetime-local" name="trueDeadline" required></label>
         <label>サークル内締切日<input type="datetime-local" name="internalDeadline" required></label>
         <label class="wide">会場 <span class="optional">任意</span><input name="venue" maxlength="200" autocomplete="off"></label>
-        <label class="wide">大会要項 <span class="optional">任意・URLを入力</span><input type="url" name="documentUrl" maxlength="500" placeholder="https://..."></label>
+        <label class="wide">大会要項PDF <span class="file-note">新しいPDFを選ぶと現在の要項を差し替えます</span><input type="file" name="documentFile" accept="application/pdf,.pdf"></label>
+        <label class="wide">大会要項URL <span class="optional">現在のリンク。空欄にすると要項なし</span><input type="url" name="documentUrl" maxlength="500" placeholder="https://..."></label>
       </div>
       <div class="dialog-actions"><span id="edit-tournament-result" class="status-message" role="status" aria-live="polite"></span><button id="cancel-tournament-edit" type="button" class="secondary">キャンセル</button><button id="save-tournament-edit" type="submit">変更を保存</button></div>
     </form>
@@ -769,6 +816,7 @@ function adminHtml(page: AdminPage): string {
     const editTournamentDialog = document.querySelector('#edit-tournament-dialog');
     const editTournamentForm = document.querySelector('#edit-tournament-form');
     const editTournamentGrade = document.querySelector('#edit-tournament-grade');
+    const editEventDateGrid = document.querySelector('#edit-event-date-grid');
     const editTournamentResult = document.querySelector('#edit-tournament-result');
     const saveTournamentEdit = document.querySelector('#save-tournament-edit');
     const cancelTournamentEdit = document.querySelector('#cancel-tournament-edit');
@@ -778,6 +826,8 @@ function adminHtml(page: AdminPage): string {
     const requestList = document.querySelector('#request-list');
     const requestStatus = document.querySelector('#request-status');
     const pendingRequestBadge = document.querySelector('#pending-request-badge');
+    const gradeDateSettings = document.querySelector('#grade-date-settings');
+    const gradeDateGrid = document.querySelector('#grade-date-grid');
     const statusLabels = {
       draft: '下書き',
       active: '回答受付中',
@@ -831,6 +881,50 @@ function adminHtml(page: AdminPage): string {
 
     function tournamentGradeLabel(tournament) {
       return tournament.all_grades === 1 ? 'すべて' : gradeLabel(tournament.grade);
+    }
+
+    function selectedRegistrationGrades() {
+      if (allGradesCheckbox?.checked) return ['all'];
+      return individualGradeCheckboxes.filter((checkbox) => checkbox.checked).map((checkbox) => checkbox.value);
+    }
+
+    function refreshRegistrationGradeDates(previousCommonDate) {
+      const grades = selectedRegistrationGrades();
+      const currentValues = new Map(Array.from(gradeDateGrid.querySelectorAll('input[data-grade]')).map((input) => [input.dataset.grade, input.value]));
+      gradeDateGrid.replaceChildren();
+      gradeDateSettings.hidden = grades.length < 2 || grades.includes('all');
+      if (gradeDateSettings.hidden) return;
+      grades.forEach((grade) => {
+        const label = element('label', '', gradeLabel(grade) + 'の開催日');
+        const input = document.createElement('input');
+        input.type = 'date';
+        input.required = true;
+        input.dataset.grade = grade;
+        const existing = currentValues.get(grade);
+        input.value = existing && existing !== previousCommonDate ? existing : form.elements.eventDate.value;
+        label.append(input);
+        gradeDateGrid.append(label);
+      });
+    }
+
+    function registrationEventDatesByGrade(grades) {
+      return Object.fromEntries(grades.map((grade) => {
+        const input = gradeDateGrid.querySelector('input[data-grade="' + grade + '"]');
+        return [grade, input?.value || form.elements.eventDate.value];
+      }));
+    }
+
+    async function uploadPdf(file, title, grades, eventDates) {
+      if (!file || file.size === 0) return '';
+      const upload = new FormData();
+      upload.append('file', file);
+      upload.append('title', title);
+      upload.append('grades', JSON.stringify(grades));
+      upload.append('eventDates', JSON.stringify(eventDates));
+      const response = await fetch('/api/documents', { method: 'POST', body: upload });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || 'PDFをアップロードできませんでした。');
+      return body.url;
     }
 
     function rankLabel(rank) {
@@ -891,12 +985,23 @@ function adminHtml(page: AdminPage): string {
       editingTournaments = tournaments;
       editTournamentGrade.textContent = '開催級：' + tournaments.map(tournamentGradeLabel).join('・') + '（開催級はこの画面では変更できません）';
       editTournamentForm.elements.title.value = tournament.title;
-      editTournamentForm.elements.eventStartDate.value = tournament.event_start_date;
+      editEventDateGrid.replaceChildren();
+      tournaments.forEach((item) => {
+        const label = element('label', '', tournamentGradeLabel(item) + (tournaments.length > 1 ? 'の開催日' : ''));
+        const input = document.createElement('input');
+        input.type = 'date';
+        input.required = true;
+        input.dataset.tournamentId = item.tournament_id;
+        input.value = item.event_start_date;
+        label.append(input);
+        editEventDateGrid.append(label);
+      });
       editTournamentForm.elements.tournamentType.value = tournament.tournament_type;
       editTournamentForm.elements.trueDeadline.value = dateTimeInputValue(tournament.true_deadline);
       editTournamentForm.elements.internalDeadline.value = dateTimeInputValue(tournament.internal_deadline);
       editTournamentForm.elements.venue.value = tournament.venue || '';
       editTournamentForm.elements.documentUrl.value = tournament.document_url || '';
+      editTournamentForm.elements.documentFile.value = '';
       editTournamentResult.className = 'status-message';
       editTournamentResult.textContent = '';
       editTournamentDialog.showModal();
@@ -984,14 +1089,11 @@ function adminHtml(page: AdminPage): string {
       );
       card.append(heading);
 
-      const eventDates = tournament.event_start_date === tournament.event_end_date
-        ? tournament.event_start_date
-        : tournament.event_start_date + '〜' + tournament.event_end_date;
-      const metaParts = [
-        tournaments.map(tournamentGradeLabel).join('・'),
-        eventDates,
-        'サークル内締切 ' + dateTimeLabel(tournament.internal_deadline),
-      ];
+      const distinctEventDates = [...new Set(tournaments.map((item) => item.event_start_date))];
+      const dateDescription = distinctEventDates.length === 1
+        ? tournaments.map(tournamentGradeLabel).join('・') + ' ／ ' + distinctEventDates[0]
+        : tournaments.map((item) => tournamentGradeLabel(item) + ' ' + item.event_start_date).join('・');
+      const metaParts = [dateDescription, 'サークル内締切 ' + dateTimeLabel(tournament.internal_deadline)];
       if (tournament.venue) metaParts.push(tournament.venue);
       const meta = element('div', 'meta', metaParts.join(' ／ '));
       card.append(meta);
@@ -1345,13 +1447,20 @@ function adminHtml(page: AdminPage): string {
       individualGradeCheckboxes.forEach((checkbox) => {
         checkbox.checked = allGradesCheckbox.checked;
       });
+      refreshRegistrationGradeDates();
     });
     individualGradeCheckboxes.forEach((checkbox) => {
       checkbox.addEventListener('change', () => {
         if (!checkbox.checked && allGradesCheckbox?.checked) {
           allGradesCheckbox.checked = false;
         }
+        refreshRegistrationGradeDates();
       });
+    });
+    let previousCommonEventDate = form.elements.eventDate.value;
+    form.elements.eventDate.addEventListener('input', () => {
+      refreshRegistrationGradeDates(previousCommonEventDate);
+      previousCommonEventDate = form.elements.eventDate.value;
     });
 
     fetch('/api/session').then((response) => response.json()).then((data) => {
@@ -1373,15 +1482,26 @@ function adminHtml(page: AdminPage): string {
       const data = new FormData(form);
       try {
         const payload = Object.fromEntries(data.entries());
-        payload.grades = allGradesCheckbox?.checked
-          ? ['all']
-          : data.getAll('grades').filter((grade) => grade !== 'all');
+        delete payload.documentFile;
+        payload.grades = selectedRegistrationGrades();
         if (!payload.grades.length) throw new Error('対象級を1つ以上選択してください。');
+        payload.eventDatesByGrade = registrationEventDatesByGrade(payload.grades);
         payload.eventStartDate = payload.eventDate;
         payload.eventEndDate = payload.eventDate;
         delete payload.eventDate;
         payload.internalDeadline = localJstToIso(payload.internalDeadline);
         payload.trueDeadline = localJstToIso(payload.trueDeadline);
+        const documentFile = form.elements.documentFile.files?.[0];
+        if (documentFile) {
+          result.textContent = 'PDFをアップロード中…';
+          payload.documentUrl = await uploadPdf(
+            documentFile,
+            payload.title,
+            payload.grades,
+            Object.values(payload.eventDatesByGrade),
+          );
+          result.textContent = '大会を保存中…';
+        }
         const response = await fetch('/api/tournaments', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1394,6 +1514,7 @@ function adminHtml(page: AdminPage): string {
         form.elements.title.value = '';
         form.elements.venue.value = '';
         form.elements.documentUrl.value = '';
+        form.elements.documentFile.value = '';
       } catch (error) {
         result.className = 'error';
         result.textContent = error instanceof Error ? error.message : '登録に失敗しました。';
@@ -1410,9 +1531,26 @@ function adminHtml(page: AdminPage): string {
       editTournamentResult.textContent = '保存中…';
       try {
         const payload = Object.fromEntries(new FormData(editTournamentForm).entries());
+        delete payload.documentFile;
         payload.tournamentIds = editingTournaments.map((tournament) => tournament.tournament_id);
+        payload.eventDatesByTournament = Object.fromEntries(
+          Array.from(editEventDateGrid.querySelectorAll('input[data-tournament-id]')).map((input) => [input.dataset.tournamentId, input.value]),
+        );
+        payload.eventStartDate = payload.eventDatesByTournament[payload.tournamentIds[0]];
         payload.internalDeadline = localJstToIso(payload.internalDeadline);
         payload.trueDeadline = localJstToIso(payload.trueDeadline);
+        const documentFile = editTournamentForm.elements.documentFile.files?.[0];
+        if (documentFile) {
+          editTournamentResult.textContent = 'PDFをアップロード中…';
+          const grades = editingTournaments.map((tournament) => tournament.all_grades === 1 ? 'all' : tournament.grade);
+          payload.documentUrl = await uploadPdf(
+            documentFile,
+            payload.title,
+            grades,
+            Object.values(payload.eventDatesByTournament),
+          );
+          editTournamentResult.textContent = '大会情報を保存中…';
+        }
         const response = await fetch('/api/tournaments', {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
@@ -1492,6 +1630,24 @@ export async function handleAdminRequest(
 
   if (request.method === "GET" && url.pathname === "/api/session") {
     return json({ email });
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/documents") {
+    if (!isSameOrigin(request)) {
+      return json({ error: "不正な送信元です。" }, 403);
+    }
+    if (!request.headers.get("Content-Type")?.toLowerCase().startsWith("multipart/form-data")) {
+      return json({ error: "PDFをフォーム形式で送信してください。" }, 415);
+    }
+    try {
+      return json(await uploadTournamentDocument(request, env, email), 201);
+    } catch (error: unknown) {
+      if (error instanceof DocumentUploadError) {
+        return json({ error: error.message }, 400);
+      }
+      console.error("大会要項PDFの保存エラー", error);
+      return json({ error: "PDFを保存できませんでした。" }, 500);
+    }
   }
 
   if (request.method === "GET" && url.pathname === "/api/tournaments") {
@@ -1606,12 +1762,24 @@ export async function handleAdminRequest(
     try {
       const body = (await request.json()) as Partial<TournamentInput> & {
         grades?: unknown;
+        eventDatesByGrade?: unknown;
       };
       const grades = normalizeTournamentGrades(body.grades ?? body.grade);
+      if (
+        body.eventDatesByGrade !== undefined &&
+        (typeof body.eventDatesByGrade !== "object" ||
+          body.eventDatesByGrade === null ||
+          Array.isArray(body.eventDatesByGrade))
+      ) {
+        throw new Error("級別の開催日が不正です。");
+      }
+      const eventDatesByGrade = body.eventDatesByGrade as Record<string, unknown> | undefined;
       inputs = grades.map((grade) =>
         normalizeTournamentInput({
           ...body,
           grade,
+          eventStartDate: String(eventDatesByGrade?.[grade] ?? body.eventStartDate ?? ""),
+          eventEndDate: String(eventDatesByGrade?.[grade] ?? body.eventStartDate ?? ""),
           createdByEmail: email,
         } as TournamentInput),
       );

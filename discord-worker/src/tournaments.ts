@@ -433,6 +433,15 @@ export function buildApplicationCompletedMessage(
   const grades = tournaments
     .map((tournament) => formatTournamentGrade(tournament))
     .join("・");
+  const distinctEventDates = new Set(
+    tournaments.map((tournament) => tournament.event_start_date),
+  );
+  const eventDateValue = distinctEventDates.size === 1
+    ? first.event_start_date
+    : tournaments
+      .map((tournament) =>
+        `${formatTournamentGrade(tournament)}: ${tournament.event_start_date}`)
+      .join("\n");
   const sortedParticipants = [...participants].sort((left, right) => {
     const gradeDifference =
       (gradeOrder.get(left.grade) ?? 99) - (gradeOrder.get(right.grade) ?? 99);
@@ -466,10 +475,7 @@ export function buildApplicationCompletedMessage(
           { name: "申込完了した級", value: grades, inline: true },
           {
             name: "開催日",
-            value:
-              first.event_start_date === first.event_end_date
-                ? first.event_start_date
-                : `${first.event_start_date}〜${first.event_end_date}`,
+            value: eventDateValue,
             inline: true,
           },
           ...participantChunks.map((value, index) => ({

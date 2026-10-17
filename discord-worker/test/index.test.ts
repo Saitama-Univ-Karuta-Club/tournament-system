@@ -25,6 +25,26 @@ describe("Discord Worker", () => {
     });
   });
 
+  it("serves a PDF stored in the private document bucket", async () => {
+    const get = vi.fn().mockResolvedValue({
+      body: new Blob(["%PDF-1.7\nbody"]),
+      httpEtag: '"etag"',
+      httpMetadata: { contentType: "application/pdf" },
+    });
+    const response = await handleRequest(
+      new Request(
+        "https://example.com/documents/11111111-1111-4111-8111-111111111111/test.pdf",
+      ),
+      { ...env, DOCUMENTS: { get } as unknown as R2Bucket },
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Content-Type")).toBe("application/pdf");
+    expect(get).toHaveBeenCalledWith(
+      "documents/11111111-1111-4111-8111-111111111111/test.pdf",
+    );
+  });
+
   it("rejects unsigned interaction requests", async () => {
     const response = await handleRequest(
       new Request("https://example.com/interactions", {

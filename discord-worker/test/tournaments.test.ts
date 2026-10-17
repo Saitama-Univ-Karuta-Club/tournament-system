@@ -229,6 +229,20 @@ describe("notification queue", () => {
     expect(message.components).toBeUndefined();
   });
 
+  it("shows each grade date when one grouped tournament spans multiple dates", () => {
+    const message = buildApplicationCompletedMessage(
+      [
+        { ...tournament, tournament_id: "T-b", grade: "B", event_start_date: "2026-11-01" },
+        { ...tournament, tournament_id: "T-c", grade: "C", event_start_date: "2026-11-08" },
+      ],
+      [],
+    );
+
+    expect(message.embeds?.[0]?.fields?.[1]?.value).toBe(
+      "B級: 2026-11-01\nC級: 2026-11-08",
+    );
+  });
+
   it("サークル内締切の翌日0時に集計リマインダーをキューに入れる", () => {
     const targets = buildDeadlineReminderTargets(
       tournament,
