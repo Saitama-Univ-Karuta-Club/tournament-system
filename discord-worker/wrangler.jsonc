@@ -1,0 +1,17 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "sukc-tournament-discord-bot",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-17",
+  "observability": {
+    "enabled": true
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "sukc-tournament-discord-db",
+      "database_id": "d1e159c8-0bc9-4065-a00b-15f8edd21d82",
+      "migrations_dir": "migrations"
+    }
+  ]
+}

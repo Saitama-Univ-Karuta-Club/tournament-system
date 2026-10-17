@@ -1,0 +1,5 @@
+# 実値を入れた .dev.vars はGitには追加されません。
+DISCORD_PUBLIC_KEY="Discord Developer Portalの公開鍵"
+DISCORD_APPLICATION_ID="Discord Developer PortalのアプリケーションID"
+DISCORD_GUILD_ID="開発用DiscordサーバーのID"
+DISCORD_BOT_TOKEN="Botトークン"
