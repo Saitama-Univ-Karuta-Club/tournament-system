@@ -149,6 +149,8 @@ describe("tournament input", () => {
 
     expect(created.map((item) => item.grade)).toEqual(["B", "C"]);
     expect(created[0].tournament_id).not.toBe(created[1].tournament_id);
+    expect(created[0].registration_group_id).toMatch(/^TG-[0-9a-f-]{36}$/);
+    expect(created[1].registration_group_id).toBe(created[0].registration_group_id);
     expect(created.every((item) => /^T-[0-9a-f-]{36}$/.test(item.tournament_id)))
       .toBe(true);
     expect(statements).toHaveLength(2);
@@ -157,7 +159,11 @@ describe("tournament input", () => {
       { DB: { prepare, batch } as unknown as D1Database },
       [{ ...common, grade: "all" }],
     );
-    expect(allGrades).toMatchObject({ grade: "A", all_grades: 1 });
+    expect(allGrades).toMatchObject({
+      grade: "A",
+      all_grades: 1,
+      registration_group_id: null,
+    });
     expect(statements).toHaveLength(3);
   });
 });

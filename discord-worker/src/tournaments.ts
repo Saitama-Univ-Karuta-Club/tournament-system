@@ -39,6 +39,7 @@ export interface TournamentInput {
 
 export interface TournamentRow {
   tournament_id: string;
+  registration_group_id?: string | null;
   title: string;
   event_start_date: string;
   event_end_date: string;
@@ -781,8 +782,12 @@ export async function createTournaments(
   }
   const inputs = rawInputs.map(normalizeTournamentInput);
   const now = new Date();
+  const registrationGroupId = inputs.length > 1
+    ? `TG-${crypto.randomUUID()}`
+    : null;
   const tournaments = inputs.map<TournamentRow>((input) => ({
     tournament_id: `T-${crypto.randomUUID()}`,
+    registration_group_id: registrationGroupId,
     title: input.title,
     event_start_date: input.eventStartDate,
     event_end_date: input.eventEndDate,
@@ -801,6 +806,7 @@ export async function createTournaments(
       return env.DB.prepare(
         `INSERT INTO tournaments (
           tournament_id,
+          registration_group_id,
           title,
           event_start_date,
           event_end_date,
@@ -817,9 +823,10 @@ export async function createTournaments(
           created_by_email,
           created_at,
           updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)`,
       ).bind(
         tournament.tournament_id,
+        tournament.registration_group_id,
         tournament.title,
         tournament.event_start_date,
         tournament.event_end_date,

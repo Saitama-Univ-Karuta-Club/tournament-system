@@ -54,10 +54,6 @@ type MemberRegistrationCounter = (env: AdminEnv) => Promise<number>;
 interface AdminTournamentRow extends TournamentRow {
   status: string;
   created_at: string;
-  response_yes: number;
-  response_maybe: number;
-  response_no: number;
-  eligible_members: number;
   announcements_sent: number;
   invitation_dms_sent: number;
   notifications_queued: number;
@@ -68,10 +64,17 @@ interface AdminResponseRow {
   tournament_id: string;
   response: string;
   display_name: string;
+  display_name_kana: string;
+  grade: string;
+  is_eligible: number;
   updated_at: string;
 }
 
 export interface AdminTournament extends AdminTournamentRow {
+  response_yes: number;
+  response_maybe: number;
+  response_no: number;
+  eligible_members: number;
   response_total: number;
   response_pending: number;
   responses: AdminResponseRow[];
@@ -104,6 +107,7 @@ export async function listAdminTournaments(
   const tournaments = await env.DB.prepare(
     `SELECT
       tournaments.tournament_id,
+      tournaments.registration_group_id,
       tournaments.title,
       tournaments.event_start_date,
       tournaments.event_end_date,
@@ -116,23 +120,6 @@ export async function listAdminTournaments(
       tournaments.document_url,
       tournaments.status,
       tournaments.created_at,
-      (SELECT COUNT(*) FROM responses
-        WHERE responses.tournament_id = tournaments.tournament_id
-          AND responses.is_valid = 1
-          AND responses.response = 'yes') AS response_yes,
-      (SELECT COUNT(*) FROM responses
-        WHERE responses.tournament_id = tournaments.tournament_id
-          AND responses.is_valid = 1
-          AND responses.response = 'maybe') AS response_maybe,
-      (SELECT COUNT(*) FROM responses
-        WHERE responses.tournament_id = tournaments.tournament_id
-          AND responses.is_valid = 1
-          AND responses.response = 'no') AS response_no,
-      (SELECT COUNT(*) FROM members
-        WHERE members.status = 'active'
-          AND members.dm_enabled = 1
-          AND (tournaments.all_grades = 1 OR members.grade = tournaments.grade)
-          AND members.discord_user_id IS NOT NULL) AS eligible_members,
       (SELECT COUNT(*) FROM notification_deliveries
         WHERE notification_deliveries.tournament_id = tournaments.tournament_id
           AND notification_deliveries.notification_type = 'announcement'
@@ -162,17 +149,54 @@ export async function listAdminTournaments(
 
   const responseRows = await env.DB.prepare(
     `SELECT
-      responses.tournament_id,
-      responses.response,
+      tournaments.tournament_id,
+      COALESCE(responses.response, 'pending') AS response,
       members.display_name,
-      responses.updated_at
-    FROM responses
-    INNER JOIN members ON members.member_id = responses.member_id
-    INNER JOIN tournaments
-      ON tournaments.tournament_id = responses.tournament_id
-    WHERE tournaments.status <> 'deleted'
+      COALESCE(
+        NULLIF(members.display_name_kana, ''),
+        NULLIF(TRIM(members.last_name_kana || ' ' || members.first_name_kana), ''),
+        ''
+      ) AS display_name_kana,
+      members.grade,
+      CASE WHEN
+        members.status = 'active'
+        AND members.dm_enabled = 1
+        AND members.discord_user_id IS NOT NULL
+        AND (
+          tournaments.all_grades = 1
+          OR members.grade = tournaments.grade
+        )
+      THEN 1 ELSE 0 END AS is_eligible,
+      COALESCE(responses.updated_at, members.updated_at) AS updated_at
+    FROM tournaments
+    INNER JOIN members
+      ON (
+        (
+          members.status = 'active'
+          AND members.dm_enabled = 1
+          AND members.discord_user_id IS NOT NULL
+          AND (
+            tournaments.all_grades = 1
+            OR members.grade = tournaments.grade
+          )
+        )
+        OR EXISTS (
+          SELECT 1 FROM responses AS valid_response
+          WHERE valid_response.tournament_id = tournaments.tournament_id
+            AND valid_response.member_id = members.member_id
+            AND valid_response.is_valid = 1
+        )
+      )
+    LEFT JOIN responses
+      ON responses.tournament_id = tournaments.tournament_id
+      AND responses.member_id = members.member_id
       AND responses.is_valid = 1
-    ORDER BY responses.updated_at DESC`,
+    WHERE tournaments.status <> 'deleted'
+    ORDER BY
+      tournaments.tournament_id,
+      members.grade,
+      display_name_kana,
+      members.display_name`,
   ).all<AdminResponseRow>();
 
   const responsesByTournament = new Map<string, AdminResponseRow[]>();
@@ -183,26 +207,25 @@ export async function listAdminTournaments(
   }
 
   return tournaments.results.map((tournament) => {
-    const responseTotal =
-      Number(tournament.response_yes) +
-      Number(tournament.response_maybe) +
-      Number(tournament.response_no);
+    const responses = responsesByTournament.get(tournament.tournament_id) ?? [];
+    const responseYes = responses.filter((item) => item.response === "yes").length;
+    const responseMaybe = responses.filter((item) => item.response === "maybe").length;
+    const responseNo = responses.filter((item) => item.response === "no").length;
+    const responsePending = responses.filter((item) => item.response === "pending").length;
+    const responseTotal = responseYes + responseMaybe + responseNo;
     return {
       ...tournament,
-      response_yes: Number(tournament.response_yes),
-      response_maybe: Number(tournament.response_maybe),
-      response_no: Number(tournament.response_no),
-      eligible_members: Number(tournament.eligible_members),
+      response_yes: responseYes,
+      response_maybe: responseMaybe,
+      response_no: responseNo,
+      eligible_members: responses.filter((item) => Number(item.is_eligible) === 1).length,
       announcements_sent: Number(tournament.announcements_sent),
       invitation_dms_sent: Number(tournament.invitation_dms_sent),
       notifications_queued: Number(tournament.notifications_queued),
       notification_failures: Number(tournament.notification_failures),
       response_total: responseTotal,
-      response_pending: Math.max(
-        Number(tournament.eligible_members) - responseTotal,
-        0,
-      ),
-      responses: responsesByTournament.get(tournament.tournament_id) ?? [],
+      response_pending: responsePending,
+      responses,
     };
   });
 }
@@ -345,6 +368,9 @@ function adminHtml(page: AdminPage): string {
     #result.error { color: #b42318; }
     .footnote { margin-top: 16px; color: #697386; font-size: .84rem; line-height: 1.6; }
     .list-heading, .card-heading, .status-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+    .list-controls { display: flex; align-items: end; gap: 12px; margin: 4px 0 14px; padding: 12px; border-radius: 9px; background: #f5f7fb; flex-wrap: wrap; }
+    .list-controls label { min-width: 190px; }
+    .list-controls select { padding: 9px 10px; }
     #list-status { color: #697386; margin-bottom: 12px; }
     #tournament-list { display: grid; gap: 14px; }
     .tournament-card { border: 1px solid #dce1eb; border-radius: 10px; padding: 18px; }
@@ -355,16 +381,12 @@ function adminHtml(page: AdminPage): string {
     .badge.closed { color: #596579; background: #edf0f5; }
     .badge.canceled { color: #a12822; background: #fdecea; }
     .badge.draft { color: #875c12; background: #fff2d8; }
-    .stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin: 14px 0; }
-    .stat { border-radius: 8px; padding: 10px; background: #f5f7fb; text-align: center; }
-    .stat strong { display: block; font-size: 1.25rem; }
-    .stat span { color: #697386; font-size: .78rem; }
-    details { margin-top: 12px; border-top: 1px solid #e7eaf0; padding-top: 12px; }
-    summary { cursor: pointer; font-weight: 700; }
-    .response-groups { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 12px; }
-    .response-group { background: #f8f9fc; border-radius: 8px; padding: 10px; min-height: 72px; }
-    .response-group strong { display: block; margin-bottom: 6px; font-size: .84rem; }
-    .response-group div { color: #465166; font-size: .85rem; line-height: 1.6; }
+    .response-sections { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 14px 0; }
+    .response-section { min-width: 0; border-radius: 8px; padding: 11px 12px; background: #f5f7fb; }
+    .response-section h4 { margin: 0 0 7px; font-size: .88rem; }
+    .response-person { display: grid; grid-template-columns: 3.5em minmax(0, 1fr); gap: 7px; color: #465166; font-size: .84rem; line-height: 1.65; }
+    .response-grade { color: #294796; font-weight: 750; }
+    .response-empty { color: #8992a3; font-size: .84rem; }
     .status-row { margin-top: 15px; padding-top: 14px; border-top: 1px solid #e7eaf0; justify-content: flex-start; flex-wrap: wrap; }
     .status-row label { display: flex; align-items: center; gap: 9px; }
     .status-row select { width: auto; min-width: 145px; padding: 8px 10px; }
@@ -393,7 +415,7 @@ function adminHtml(page: AdminPage): string {
     button.danger { color: #a12822; background: #fdecea; }
     button.danger:hover { background: #f9d9d5; }
     .empty { color: #697386; text-align: center; padding: 30px 10px; }
-    @media (max-width: 680px) { .grid, .response-groups, .member-grid, .request-comparison { grid-template-columns: 1fr; } .request-arrow { transform: rotate(90deg); text-align: center; } .stats { grid-template-columns: 1fr 1fr; } .wide { grid-column: auto; } .panel { padding: 18px; } .header-inner { display: block; } #identity { display: block; margin-top: 6px; } .tabs { padding: 0 8px; } .tab { padding-inline: 13px; } .card-heading { align-items: flex-start; } }
+    @media (max-width: 680px) { .grid, .response-sections, .member-grid, .request-comparison { grid-template-columns: 1fr; } .request-arrow { transform: rotate(90deg); text-align: center; } .wide { grid-column: auto; } .panel { padding: 18px; } .header-inner { display: block; } #identity { display: block; margin-top: 6px; } .tabs { padding: 0 8px; } .tab { padding-inline: 13px; } .card-heading { align-items: flex-start; } .list-controls { align-items: stretch; } .list-controls label { flex: 1 1 100%; } }
   </style>
 </head>
 <body data-page="${page}">
@@ -427,6 +449,10 @@ function adminHtml(page: AdminPage): string {
         <h2 id="tournament-list-title">大会一覧・回答集計</h2>
         <button id="refresh-list" type="button" class="secondary">再読み込み</button>
       </div>
+      <div class="list-controls">
+        <label>並び順<select id="tournament-sort"><option value="deadline_asc">締切日が近い順</option><option value="event_asc">開催日が近い順</option><option value="created_desc">登録日が新しい順</option><option value="created_asc">登録日が古い順</option></select></label>
+        <label>ステータス<select id="tournament-status-filter"><option value="all">すべて</option><option value="active">回答受付中</option><option value="applied">申込完了</option><option value="closed">締切済み</option><option value="canceled">中止</option><option value="draft">下書き</option></select></label>
+      </div>
       <div id="list-status" role="status" aria-live="polite">読み込み中…</div>
       <div id="tournament-list"></div>
     </section>
@@ -454,6 +480,8 @@ function adminHtml(page: AdminPage): string {
     const tournamentList = document.querySelector('#tournament-list');
     const listStatus = document.querySelector('#list-status');
     const refreshList = document.querySelector('#refresh-list');
+    const tournamentSort = document.querySelector('#tournament-sort');
+    const tournamentStatusFilter = document.querySelector('#tournament-status-filter');
     const memberList = document.querySelector('#member-list');
     const memberStatus = document.querySelector('#member-status');
     const refreshMembers = document.querySelector('#refresh-members');
@@ -471,7 +499,9 @@ function adminHtml(page: AdminPage): string {
       yes: '参加',
       maybe: '未定',
       no: '不参加',
+      pending: '未回答',
     };
+    let loadedTournaments = [];
     const memberStatusLabels = {
       active: '有効',
       inactive: '無効',
@@ -524,72 +554,72 @@ function adminHtml(page: AdminPage): string {
       }).format(new Date(value));
     }
 
-    function stat(label, count) {
-      const item = element('div', 'stat');
-      item.append(element('strong', '', String(count)), element('span', '', label));
-      return item;
+    const gradeOrder = new Map(['A', 'B', 'C', 'D', 'E', 'F', 'beginner'].map((grade, index) => [grade, index]));
+
+    function tournamentFallbackGroupKey(tournament) {
+      return [
+        tournament.title,
+        tournament.event_start_date,
+        tournament.event_end_date,
+        tournament.tournament_type || '',
+        tournament.internal_deadline,
+        tournament.true_deadline,
+        tournament.venue || '',
+        tournament.document_url || '',
+        tournament.all_grades === 1 ? 'all' : 'individual',
+        tournament.created_at,
+      ].join('\u001f');
     }
 
-    function responseGroup(tournament, response) {
-      const group = element('div', 'response-group');
-      group.append(element('strong', '', responseLabels[response]));
-      const names = tournament.responses
-        .filter((item) => item.response === response)
-        .map((item) => item.display_name);
-      group.append(element('div', '', names.length ? names.join('、') : 'なし'));
-      return group;
+    function groupTournaments(tournaments) {
+      const groups = new Map();
+      tournaments.forEach((tournament) => {
+        const key = tournament.registration_group_id
+          ? 'group:' + tournament.registration_group_id
+          : 'legacy:' + tournamentFallbackGroupKey(tournament);
+        const current = groups.get(key) || [];
+        current.push(tournament);
+        groups.set(key, current);
+      });
+      return Array.from(groups.values()).map((group) => group.sort((left, right) => {
+        return (gradeOrder.get(left.grade) ?? 99) - (gradeOrder.get(right.grade) ?? 99);
+      }));
     }
 
-    function renderTournament(tournament) {
-      const card = element('article', 'tournament-card');
-      const heading = element('div', 'card-heading');
-      heading.append(
-        element('h3', '', tournament.title),
-        element('span', 'badge ' + tournament.status, statusLabels[tournament.status] || tournament.status),
-      );
-      card.append(heading);
-
-      const eventDates = tournament.event_start_date === tournament.event_end_date
-        ? tournament.event_start_date
-        : tournament.event_start_date + '〜' + tournament.event_end_date;
-      const metaParts = [
-        tournamentGradeLabel(tournament),
-        eventDates,
-        'サークル内締切 ' + dateTimeLabel(tournament.internal_deadline),
-      ];
-      if (tournament.venue) metaParts.push(tournament.venue);
-      const meta = element('div', 'meta', metaParts.join(' ／ '));
-      card.append(meta);
-      if (tournament.document_url) {
-        const link = element('a', '', '大会要項を開く');
-        link.href = tournament.document_url;
-        link.target = '_blank';
-        link.rel = 'noopener noreferrer';
-        meta.append(document.createTextNode(' ／ '), link);
+    function responseSection(tournaments, response) {
+      const section = element('section', 'response-section');
+      const people = tournaments.flatMap((tournament) => {
+        return tournament.responses
+          .filter((item) => item.response === response)
+          .map((item) => ({ ...item, grade: tournament.all_grades === 1 ? item.grade : tournament.grade }));
+      }).sort((left, right) => {
+        const gradeDifference = (gradeOrder.get(left.grade) ?? 99) - (gradeOrder.get(right.grade) ?? 99);
+        if (gradeDifference) return gradeDifference;
+        return (left.display_name_kana || left.display_name).localeCompare(right.display_name_kana || right.display_name, 'ja');
+      });
+      section.append(element('h4', '', responseLabels[response] + '(' + people.length + '人)'));
+      if (!people.length) {
+        section.append(element('div', 'response-empty', 'なし'));
+        return section;
       }
+      let previousGrade = '';
+      people.forEach((person) => {
+        const row = element('div', 'response-person');
+        const currentGrade = gradeLabel(person.grade);
+        row.append(
+          element('span', 'response-grade', currentGrade === previousGrade ? '' : currentGrade),
+          element('span', '', person.display_name + ' (' + (person.display_name_kana || 'よみがな未登録') + ')'),
+        );
+        previousGrade = currentGrade;
+        section.append(row);
+      });
+      return section;
+    }
 
-      const stats = element('div', 'stats');
-      stats.append(
-        stat('参加', tournament.response_yes),
-        stat('未定', tournament.response_maybe),
-        stat('不参加', tournament.response_no),
-        stat('未回答', tournament.response_pending),
-      );
-      card.append(stats);
-
-      const details = document.createElement('details');
-      details.append(element('summary', '', '回答者の内訳（回答 ' + tournament.response_total + ' / 対象 ' + tournament.eligible_members + '）'));
-      const groups = element('div', 'response-groups');
-      groups.append(
-        responseGroup(tournament, 'yes'),
-        responseGroup(tournament, 'maybe'),
-        responseGroup(tournament, 'no'),
-      );
-      details.append(groups);
-      card.append(details);
-
+    function renderTournamentStatusControl(tournament) {
       const statusRow = element('div', 'status-row');
-      const statusLabel = element('label', '', 'ステータス');
+      const labelText = tournament.all_grades === 1 ? 'すべて' : gradeLabel(tournament.grade);
+      const statusLabel = element('label', '', labelText + ' ステータス');
       const select = document.createElement('select');
       Object.entries(statusLabels).forEach(([value, label]) => {
         const option = document.createElement('option');
@@ -624,14 +654,58 @@ function adminHtml(page: AdminPage): string {
         }
       });
       statusRow.append(statusLabel, updateButton, statusMessage);
-      card.append(statusRow);
+      return statusRow;
+    }
+
+    function renderTournament(tournaments) {
+      const tournament = tournaments[0];
+      const card = element('article', 'tournament-card');
+      const heading = element('div', 'card-heading');
+      const statuses = [...new Set(tournaments.map((item) => item.status))];
+      heading.append(
+        element('h3', '', tournament.title),
+        element('span', 'badge ' + (statuses.length === 1 ? statuses[0] : 'draft'), statuses.length === 1 ? (statusLabels[statuses[0]] || statuses[0]) : '複数ステータス'),
+      );
+      card.append(heading);
+
+      const eventDates = tournament.event_start_date === tournament.event_end_date
+        ? tournament.event_start_date
+        : tournament.event_start_date + '〜' + tournament.event_end_date;
+      const metaParts = [
+        tournaments.map(tournamentGradeLabel).join('・'),
+        eventDates,
+        'サークル内締切 ' + dateTimeLabel(tournament.internal_deadline),
+      ];
+      if (tournament.venue) metaParts.push(tournament.venue);
+      const meta = element('div', 'meta', metaParts.join(' ／ '));
+      card.append(meta);
+      if (tournament.document_url) {
+        const link = element('a', '', '大会要項を開く');
+        link.href = tournament.document_url;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        meta.append(document.createTextNode(' ／ '), link);
+      }
+
+      const responseSections = element('div', 'response-sections');
+      responseSections.append(
+        responseSection(tournaments, 'yes'),
+        responseSection(tournaments, 'maybe'),
+        responseSection(tournaments, 'no'),
+        responseSection(tournaments, 'pending'),
+      );
+      card.append(responseSections);
+
+      tournaments.forEach((item) => card.append(renderTournamentStatusControl(item)));
 
       const notificationParts = [
-        '告知 ' + tournament.announcements_sent + '件',
-        'DM ' + tournament.invitation_dms_sent + '件送信済み',
+        '告知 ' + tournaments.reduce((sum, item) => sum + Number(item.announcements_sent), 0) + '件',
+        'DM ' + tournaments.reduce((sum, item) => sum + Number(item.invitation_dms_sent), 0) + '件送信済み',
       ];
-      if (tournament.notifications_queued) notificationParts.push('キュー・再送待ち ' + tournament.notifications_queued + '件');
-      if (tournament.notification_failures) notificationParts.push('送信失敗 ' + tournament.notification_failures + '件');
+      const queued = tournaments.reduce((sum, item) => sum + Number(item.notifications_queued), 0);
+      const failures = tournaments.reduce((sum, item) => sum + Number(item.notification_failures), 0);
+      if (queued) notificationParts.push('キュー・再送待ち ' + queued + '件');
+      if (failures) notificationParts.push('送信失敗 ' + failures + '件');
       const notificationText = notificationParts.join('・');
       card.append(element('div', 'notification-note', notificationText));
       return card;
@@ -800,6 +874,39 @@ function adminHtml(page: AdminPage): string {
       return card;
     }
 
+    function groupSortValue(group, sort) {
+      const values = group.map((tournament) => {
+        if (sort === 'event_asc') return Date.parse(tournament.event_start_date + 'T00:00:00+09:00');
+        if (sort === 'created_desc' || sort === 'created_asc') return Date.parse(tournament.created_at);
+        return Date.parse(tournament.internal_deadline);
+      });
+      return sort === 'created_desc' ? Math.max(...values) : Math.min(...values);
+    }
+
+    function renderTournamentList() {
+      const status = tournamentStatusFilter.value;
+      const filtered = status === 'all'
+        ? loadedTournaments
+        : loadedTournaments.filter((tournament) => tournament.status === status);
+      const groups = groupTournaments(filtered);
+      const sort = tournamentSort.value;
+      groups.sort((left, right) => {
+        const difference = groupSortValue(left, sort) - groupSortValue(right, sort);
+        return sort === 'created_desc' ? -difference : difference;
+      });
+
+      tournamentList.replaceChildren();
+      if (!groups.length) {
+        tournamentList.append(element('div', 'empty', status === 'all' ? '登録された大会はありません。' : '該当する大会はありません。'));
+      } else {
+        groups.forEach((group) => tournamentList.append(renderTournament(group)));
+      }
+      const groupDescription = groups.length === filtered.length
+        ? filtered.length + '件の大会'
+        : filtered.length + '件の開催級を' + groups.length + '大会にまとめて表示';
+      listStatus.textContent = groupDescription;
+    }
+
     async function loadTournaments() {
       refreshList.disabled = true;
       listStatus.textContent = '読み込み中…';
@@ -807,13 +914,8 @@ function adminHtml(page: AdminPage): string {
         const response = await fetch('/api/tournaments');
         const body = await response.json();
         if (!response.ok) throw new Error(body.error || '大会一覧を取得できませんでした。');
-        tournamentList.replaceChildren();
-        if (!body.tournaments.length) {
-          tournamentList.append(element('div', 'empty', '登録された大会はありません。'));
-        } else {
-          body.tournaments.forEach((tournament) => tournamentList.append(renderTournament(tournament)));
-        }
-        listStatus.textContent = body.tournaments.length + '件の大会';
+        loadedTournaments = body.tournaments;
+        renderTournamentList();
       } catch (error) {
         listStatus.textContent = error instanceof Error ? error.message : '大会一覧を取得できませんでした。';
       } finally {
@@ -951,6 +1053,8 @@ function adminHtml(page: AdminPage): string {
     });
     if (currentPage === 'tournaments') {
       refreshList.addEventListener('click', loadTournaments);
+      tournamentSort.addEventListener('change', renderTournamentList);
+      tournamentStatusFilter.addEventListener('change', renderTournamentList);
       loadTournaments();
     }
     if (currentPage === 'members') {

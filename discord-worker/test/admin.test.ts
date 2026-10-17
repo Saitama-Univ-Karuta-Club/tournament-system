@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { handleAdminRequest, type AdminEnv } from "../src/admin";
+import {
+  handleAdminRequest,
+  listAdminTournaments,
+  type AdminEnv,
+} from "../src/admin";
 
 const env = {
   DB: {} as D1Database,
@@ -70,6 +74,24 @@ describe("Admin Worker", () => {
     expect(html).not.toContain("最大10人");
     expect(html).toContain('name="grades" value="all"');
     expect(html).toContain("data.getAll('grades')");
+  });
+
+  it("renders compact response lists with grouping, sorting, and status filters", async () => {
+    const response = await handleAdminRequest(
+      new Request("https://admin.example.com/tournaments"),
+      env,
+      authenticatedContext(),
+    );
+
+    const html = await response.text();
+    expect(html).toContain('id="tournament-sort"');
+    expect(html).toContain('<option value="deadline_asc">締切日が近い順</option>');
+    expect(html).toContain('id="tournament-status-filter"');
+    expect(html).toContain("responseLabels[response] + '(' + people.length + '人)'");
+    expect(html).toContain("groupTournaments(filtered)");
+    expect(html).toContain("person.display_name_kana || 'よみがな未登録'");
+    expect(html).not.toContain("回答者の内訳");
+    expect(html).not.toContain('class="stats"');
   });
 
   it("uses 23:59 as the default organizer deadline time", async () => {
@@ -322,6 +344,71 @@ describe("Admin Worker", () => {
           response_yes: 1,
           responses: [{ display_name: "埼玉 花子", response: "yes" }],
         },
+      ],
+    });
+  });
+
+  it("includes unanswered eligible members with their grade and reading", async () => {
+    const prepare = vi.fn((sql: string) => ({
+      all: vi.fn(async () => ({
+        results: sql.includes("INNER JOIN members")
+          ? [
+              {
+                tournament_id: "T-11111111-1111-4111-8111-111111111111",
+                response: "yes",
+                display_name: "石田洋音",
+                display_name_kana: "いしだひろね",
+                grade: "C",
+                is_eligible: 1,
+                updated_at: "2026-10-18T00:00:00.000Z",
+              },
+              {
+                tournament_id: "T-11111111-1111-4111-8111-111111111111",
+                response: "pending",
+                display_name: "山田花子",
+                display_name_kana: "やまだはなこ",
+                grade: "C",
+                is_eligible: 1,
+                updated_at: "2026-10-18T00:00:00.000Z",
+              },
+            ]
+          : [
+              {
+                tournament_id: "T-11111111-1111-4111-8111-111111111111",
+                registration_group_id: null,
+                title: "一覧テスト大会",
+                event_start_date: "2026-11-01",
+                event_end_date: "2026-11-01",
+                grade: "C",
+                all_grades: 0,
+                tournament_type: "official",
+                venue: null,
+                true_deadline: "2026-10-28T14:59:00.000Z",
+                internal_deadline: "2026-10-25T14:59:00.000Z",
+                document_url: null,
+                status: "active",
+                created_at: "2026-10-18T00:00:00.000Z",
+                announcements_sent: 1,
+                invitation_dms_sent: 2,
+                notifications_queued: 0,
+                notification_failures: 0,
+              },
+            ],
+      })),
+    }));
+
+    const [tournament] = await listAdminTournaments({
+      DB: { prepare } as unknown as D1Database,
+    });
+
+    expect(tournament).toMatchObject({
+      response_yes: 1,
+      response_pending: 1,
+      response_total: 1,
+      eligible_members: 2,
+      responses: [
+        { display_name: "石田洋音", display_name_kana: "いしだひろね", response: "yes" },
+        { display_name: "山田花子", display_name_kana: "やまだはなこ", response: "pending" },
       ],
     });
   });
