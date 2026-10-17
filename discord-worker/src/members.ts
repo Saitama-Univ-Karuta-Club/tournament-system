@@ -14,6 +14,19 @@ export interface RegisterMemberInput {
   grade: string;
 }
 
+export interface MemberRegistrationRequestResult extends RegisterMemberInput {
+  requestId: string;
+  requestType: "new" | "update";
+  currentDisplayName?: string;
+  currentGrade?: string;
+}
+
+interface ExistingMemberRow {
+  member_id: string;
+  display_name: string;
+  grade: string;
+}
+
 export function normalizeMemberRegistration(
   input: RegisterMemberInput,
 ): RegisterMemberInput {
@@ -38,48 +51,75 @@ export function formatGrade(grade: string): string {
   return grade === "beginner" ? "初心者" : `${grade}級`;
 }
 
-export async function upsertDiscordMember(
+export async function submitMemberRegistrationRequest(
   db: D1Database,
   rawInput: RegisterMemberInput,
-): Promise<RegisterMemberInput> {
+): Promise<MemberRegistrationRequestResult> {
   const input = normalizeMemberRegistration(rawInput);
   const now = new Date().toISOString();
-  const memberId = `M-${crypto.randomUUID()}`;
+  const existing = await db.prepare(
+    `SELECT member_id, display_name, grade
+     FROM members
+     WHERE discord_user_id = ?`,
+  )
+    .bind(input.discordUserId)
+    .first<ExistingMemberRow>();
+  const requestType = existing ? "update" : "new";
+  const pending = await db.prepare(
+    `SELECT request_id
+     FROM member_registration_requests
+     WHERE discord_user_id = ? AND status = 'pending'`,
+  )
+    .bind(input.discordUserId)
+    .first<{ request_id: string }>();
+  const requestId = pending?.request_id ?? `MR-${crypto.randomUUID()}`;
 
-  await db
-    .prepare(
-      `INSERT INTO members (
+  if (pending) {
+    await db.prepare(
+      `UPDATE member_registration_requests
+       SET member_id = ?, request_type = ?, requested_display_name = ?,
+         requested_grade = ?, submitted_at = ?
+       WHERE request_id = ? AND status = 'pending'`,
+    )
+      .bind(
+        existing?.member_id ?? null,
+        requestType,
+        input.displayName,
+        input.grade,
+        now,
+        requestId,
+      )
+      .run();
+  } else {
+    await db.prepare(
+      `INSERT INTO member_registration_requests (
+        request_id,
         member_id,
         discord_user_id,
-        last_name,
-        last_name_kana,
-        first_name,
-        first_name_kana,
-        display_name,
-        rank,
-        grade,
+        request_type,
+        requested_display_name,
+        requested_grade,
         status,
-        dm_enabled,
-        created_at,
-        updated_at
-      ) VALUES (?, ?, ?, '', '', '', ?, 0, ?, 'active', 1, ?, ?)
-      ON CONFLICT(discord_user_id) DO UPDATE SET
-        display_name = excluded.display_name,
-        grade = excluded.grade,
-        status = 'active',
-        dm_enabled = 1,
-        updated_at = excluded.updated_at`,
+        submitted_at
+      ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)`,
     )
-    .bind(
-      memberId,
-      input.discordUserId,
-      input.displayName,
-      input.displayName,
-      input.grade,
-      now,
-      now,
-    )
-    .run();
+      .bind(
+        requestId,
+        existing?.member_id ?? null,
+        input.discordUserId,
+        requestType,
+        input.displayName,
+        input.grade,
+        now,
+      )
+      .run();
+  }
 
-  return input;
+  return {
+    ...input,
+    requestId,
+    requestType,
+    currentDisplayName: existing?.display_name,
+    currentGrade: existing?.grade,
+  };
 }

@@ -109,14 +109,19 @@ describe("Discord Worker", () => {
     });
   });
 
-  it("registers the invoking Discord user as a member", async () => {
-    const run = vi.fn().mockResolvedValue({ success: true });
-    const bind = vi.fn().mockReturnValue({ run });
-    const prepare = vi.fn().mockReturnValue({ bind });
+  it("submits an update request for an existing Discord member", async () => {
     const verifier = vi.fn().mockResolvedValue(true);
+    const memberRegistrar = vi.fn().mockResolvedValue({
+      requestId: "MR-test",
+      requestType: "update",
+      discordUserId: "discord-user-id",
+      displayName: "埼玉 花子",
+      grade: "B",
+      currentDisplayName: "埼玉 花子",
+      currentGrade: "C",
+    });
     const configuredEnv: Env = {
       ...env,
-      DB: { prepare } as unknown as D1Database,
       DISCORD_GUILD_ID: "guild-id",
     };
 
@@ -135,32 +140,35 @@ describe("Discord Worker", () => {
             name: "member-register",
             options: [
               { name: "name", value: "埼玉 花子" },
-              { name: "grade", value: "C" },
+              { name: "grade", value: "B" },
             ],
           },
         }),
       }),
       configuredEnv,
       verifier,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      memberRegistrar,
     );
 
     expect(response.status).toBe(200);
-    expect(prepare).toHaveBeenCalledOnce();
-    expect(bind).toHaveBeenCalledWith(
-      expect.stringMatching(/^M-/),
-      "discord-user-id",
-      "埼玉 花子",
-      "埼玉 花子",
-      "C",
-      expect.any(String),
-      expect.any(String),
+    expect(memberRegistrar).toHaveBeenCalledWith(
+      env.DB,
+      {
+        discordUserId: "discord-user-id",
+        displayName: "埼玉 花子",
+        grade: "B",
+      },
     );
-    expect(run).toHaveBeenCalledOnce();
     await expect(response.json()).resolves.toMatchObject({
       type: 4,
       data: {
         flags: 64,
-        content: expect.stringContaining("出場級: C級"),
+        content: expect.stringContaining("登録内容変更の申請"),
       },
     });
   });

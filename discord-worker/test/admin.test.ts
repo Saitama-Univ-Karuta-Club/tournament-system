@@ -311,4 +311,75 @@ describe("Admin Worker", () => {
       "admin@example.com",
     );
   });
+
+  it("returns pending registration requests without exposing Discord user IDs", async () => {
+    const registrationLister = vi.fn().mockResolvedValue([
+      {
+        requestId: "MR-11111111-1111-4111-8111-111111111111",
+        requestType: "update",
+        requestedDisplayName: "石田洋音",
+        requestedGrade: "B",
+        currentDisplayName: "石田洋音",
+        currentGrade: "C",
+        currentStatus: "active",
+        submittedAt: "2026-10-18T00:00:00.000Z",
+      },
+    ]);
+    const response = await handleAdminRequest(
+      new Request("https://admin.example.com/api/member-requests"),
+      env,
+      authenticatedContext(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      registrationLister,
+    );
+
+    expect(response.status).toBe(200);
+    const body = await response.json() as { requests: Array<Record<string, unknown>> };
+    expect(body.requests[0]).toMatchObject({
+      requestType: "update",
+      currentGrade: "C",
+      requestedGrade: "B",
+    });
+    expect(body.requests[0]).not.toHaveProperty("discordUserId");
+  });
+
+  it("approves a registration request with the authenticated administrator", async () => {
+    const requestId = "MR-11111111-1111-4111-8111-111111111111";
+    const registrationDecider = vi.fn().mockResolvedValue({
+      requestId,
+      decision: "approved",
+      memberId: "M-11111111-1111-4111-8111-111111111111",
+    });
+    const response = await handleAdminRequest(
+      new Request(`https://admin.example.com/api/member-requests/${requestId}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Origin: "https://admin.example.com",
+        },
+        body: JSON.stringify({ decision: "approved" }),
+      }),
+      env,
+      authenticatedContext(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      registrationDecider,
+    );
+
+    expect(response.status).toBe(200);
+    expect(registrationDecider).toHaveBeenCalledWith(
+      env,
+      requestId,
+      "approved",
+      "admin@example.com",
+    );
+  });
 });

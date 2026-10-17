@@ -6,7 +6,7 @@ export const commands = [
   },
   {
     name: "member-register",
-    description: "自分を大会管理Botのテストメンバーとして登録・更新します",
+    description: "メンバー登録・登録内容変更を管理者へ申請します",
     type: 1,
     options: [
       {

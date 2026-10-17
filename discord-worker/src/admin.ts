@@ -6,10 +6,14 @@ import {
   type TournamentRow,
 } from "./tournaments";
 import {
+  decideMemberRegistration,
   listAdminMembers,
+  listPendingMemberRegistrations,
   MemberAdminError,
   updateAdminMember,
   type AdminMember,
+  type AdminMemberRegistrationRequest,
+  type MemberRegistrationDecision,
   type MemberUpdateInput,
 } from "./admin-members";
 
@@ -34,6 +38,15 @@ type MemberUpdater = (
   input: MemberUpdateInput,
   changedByEmail: string,
 ) => Promise<AdminMember>;
+type MemberRegistrationLister = (
+  env: AdminEnv,
+) => Promise<AdminMemberRegistrationRequest[]>;
+type MemberRegistrationDecider = (
+  env: AdminEnv,
+  requestId: string,
+  decision: string,
+  decidedByEmail: string,
+) => Promise<MemberRegistrationDecision>;
 
 interface AdminTournamentRow extends TournamentRow {
   status: string;
@@ -350,8 +363,21 @@ function adminHtml(page: AdminPage): string {
     .member-grid .checkbox input { width: auto; }
     .member-actions { display: flex; align-items: center; gap: 12px; margin-top: 12px; flex-wrap: wrap; }
     .member-link { color: #596579; font-size: .8rem; }
+    #request-status { color: #697386; margin-bottom: 12px; }
+    #request-list { display: grid; gap: 12px; }
+    .request-card { border: 1px solid #dce1eb; border-radius: 10px; padding: 16px; }
+    .request-card.update { border-left: 4px solid #3658b2; }
+    .request-card.new { border-left: 4px solid #23905a; }
+    .request-title { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .request-comparison { display: grid; grid-template-columns: 1fr auto 1fr; gap: 12px; align-items: center; margin-top: 14px; }
+    .request-value { background: #f5f7fb; border-radius: 8px; padding: 12px; line-height: 1.6; }
+    .request-value strong { display: block; font-size: .78rem; color: #697386; }
+    .request-arrow { color: #697386; font-weight: 800; }
+    .request-note { color: #596579; font-size: .82rem; margin-top: 10px; }
+    button.danger { color: #a12822; background: #fdecea; }
+    button.danger:hover { background: #f9d9d5; }
     .empty { color: #697386; text-align: center; padding: 30px 10px; }
-    @media (max-width: 680px) { .grid, .response-groups, .member-grid { grid-template-columns: 1fr; } .stats { grid-template-columns: 1fr 1fr; } label.wide { grid-column: auto; } .panel { padding: 18px; } .header-inner { display: block; } #identity { display: block; margin-top: 6px; } .tabs { padding: 0 8px; } .tab { padding-inline: 13px; } .card-heading { align-items: flex-start; } }
+    @media (max-width: 680px) { .grid, .response-groups, .member-grid, .request-comparison { grid-template-columns: 1fr; } .request-arrow { transform: rotate(90deg); text-align: center; } .stats { grid-template-columns: 1fr 1fr; } label.wide { grid-column: auto; } .panel { padding: 18px; } .header-inner { display: block; } #identity { display: block; margin-top: 6px; } .tabs { padding: 0 8px; } .tab { padding-inline: 13px; } .card-heading { align-items: flex-start; } }
   </style>
 </head>
 <body data-page="${page}">
@@ -389,6 +415,11 @@ function adminHtml(page: AdminPage): string {
       <div id="list-status" role="status" aria-live="polite">読み込み中…</div>
       <div id="tournament-list"></div>
     </section>
+    <section class="panel" aria-labelledby="request-list-title"${hiddenPage("members")}>
+      <h2 id="request-list-title">登録・変更申請</h2>
+      <div id="request-status" role="status" aria-live="polite">読み込み中…</div>
+      <div id="request-list"></div>
+    </section>
     <section class="panel" aria-labelledby="member-list-title"${hiddenPage("members")}>
       <div class="list-heading">
         <h2 id="member-list-title">メンバー管理</h2>
@@ -411,6 +442,8 @@ function adminHtml(page: AdminPage): string {
     const memberList = document.querySelector('#member-list');
     const memberStatus = document.querySelector('#member-status');
     const refreshMembers = document.querySelector('#refresh-members');
+    const requestList = document.querySelector('#request-list');
+    const requestStatus = document.querySelector('#request-status');
     const statusLabels = {
       draft: '下書き',
       active: '回答受付中',
@@ -637,6 +670,74 @@ function adminHtml(page: AdminPage): string {
       return card;
     }
 
+    function renderRegistrationRequest(request) {
+      const card = element('article', 'request-card ' + request.requestType);
+      const title = element('div', 'request-title');
+      title.append(
+        element('h3', '', request.requestedDisplayName),
+        element('span', 'badge ' + (request.requestType === 'update' ? 'applied' : 'active'), request.requestType === 'update' ? '登録内容変更' : '新規登録'),
+      );
+      card.append(title);
+
+      const comparison = element('div', 'request-comparison');
+      const requested = element('div', 'request-value');
+      requested.append(
+        element('strong', '', request.requestType === 'update' ? '変更後' : '登録内容'),
+        document.createTextNode(request.requestedDisplayName + ' ／ ' + gradeLabel(request.requestedGrade)),
+      );
+      if (request.requestType === 'update') {
+        const current = element('div', 'request-value');
+        current.append(
+          element('strong', '', '現在'),
+          document.createTextNode((request.currentDisplayName || '不明') + ' ／ ' + gradeLabel(request.currentGrade || '')),
+        );
+        comparison.append(current, element('div', 'request-arrow', '→'), requested);
+      } else {
+        requested.style.gridColumn = '1 / -1';
+        comparison.append(requested);
+      }
+      card.append(comparison);
+      const note = request.requestType === 'update'
+        ? 'Discordの一意なユーザーIDで既存メンバーと照合済み'
+        : 'Discordの一意なユーザーIDに一致する既存メンバーはありません';
+      card.append(element('div', 'request-note', note + ' ／ 申請 ' + dateTimeLabel(request.submittedAt)));
+
+      const actions = element('div', 'member-actions');
+      const approve = element('button', 'secondary', '承認する');
+      approve.type = 'button';
+      const reject = element('button', 'danger', '却下する');
+      reject.type = 'button';
+      const message = element('span', 'status-message', '');
+      const decide = async (decision) => {
+        approve.disabled = true;
+        reject.disabled = true;
+        message.className = 'status-message';
+        message.textContent = decision === 'approved' ? '承認中…' : '却下中…';
+        try {
+          const response = await fetch('/api/member-requests/' + encodeURIComponent(request.requestId), {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ decision }),
+          });
+          const body = await response.json();
+          if (!response.ok) throw new Error(body.error || '申請を処理できませんでした。');
+          await loadMembers();
+        } catch (error) {
+          message.className = 'status-message error';
+          message.textContent = error instanceof Error ? error.message : '申請を処理できませんでした。';
+          approve.disabled = false;
+          reject.disabled = false;
+        }
+      };
+      approve.addEventListener('click', () => decide('approved'));
+      reject.addEventListener('click', () => {
+        if (confirm('この申請を却下しますか？')) decide('rejected');
+      });
+      actions.append(approve, reject, message);
+      card.append(actions);
+      return card;
+    }
+
     async function loadTournaments() {
       refreshList.disabled = true;
       listStatus.textContent = '読み込み中…';
@@ -661,10 +762,25 @@ function adminHtml(page: AdminPage): string {
     async function loadMembers() {
       refreshMembers.disabled = true;
       memberStatus.textContent = '読み込み中…';
+      requestStatus.textContent = '読み込み中…';
       try {
-        const response = await fetch('/api/members');
-        const body = await response.json();
-        if (!response.ok) throw new Error(body.error || 'メンバー一覧を取得できませんでした。');
+        const [memberResponse, requestResponse] = await Promise.all([
+          fetch('/api/members'),
+          fetch('/api/member-requests'),
+        ]);
+        const [body, requestBody] = await Promise.all([
+          memberResponse.json(),
+          requestResponse.json(),
+        ]);
+        if (!memberResponse.ok) throw new Error(body.error || 'メンバー一覧を取得できませんでした。');
+        if (!requestResponse.ok) throw new Error(requestBody.error || '登録申請を取得できませんでした。');
+        requestList.replaceChildren();
+        if (!requestBody.requests.length) {
+          requestList.append(element('div', 'empty', '未処理の申請はありません。'));
+        } else {
+          requestBody.requests.forEach((request) => requestList.append(renderRegistrationRequest(request)));
+        }
+        requestStatus.textContent = '未処理 ' + requestBody.requests.length + '件';
         memberList.replaceChildren();
         if (!body.members.length) {
           memberList.append(element('div', 'empty', '登録されたメンバーはいません。'));
@@ -675,7 +791,9 @@ function adminHtml(page: AdminPage): string {
         const dmEnabled = body.members.filter((member) => member.status === 'active' && member.dmEnabled).length;
         memberStatus.textContent = body.members.length + '人（有効 ' + active + '人・DM対象 ' + dmEnabled + '人）';
       } catch (error) {
-        memberStatus.textContent = error instanceof Error ? error.message : 'メンバー一覧を取得できませんでした。';
+        const message = error instanceof Error ? error.message : 'メンバー情報を取得できませんでした。';
+        memberStatus.textContent = message;
+        requestStatus.textContent = message;
       } finally {
         refreshMembers.disabled = false;
       }
@@ -756,6 +874,8 @@ export async function handleAdminRequest(
   statusUpdater: TournamentStatusUpdater = updateTournamentStatus,
   memberLister: MemberLister = listAdminMembers,
   memberUpdater: MemberUpdater = updateAdminMember,
+  memberRegistrationLister: MemberRegistrationLister = listPendingMemberRegistrations,
+  memberRegistrationDecider: MemberRegistrationDecider = decideMemberRegistration,
 ): Promise<Response> {
   if (!ctx.access) {
     return json({ error: "Cloudflare Accessによる認証が必要です。" }, 403);
@@ -805,6 +925,51 @@ export async function handleAdminRequest(
     } catch (error: unknown) {
       console.error("メンバー一覧の取得エラー", error);
       return json({ error: "メンバー一覧を取得できませんでした。" }, 500);
+    }
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/member-requests") {
+    try {
+      return json({ requests: await memberRegistrationLister(env) });
+    } catch (error: unknown) {
+      console.error("メンバー登録申請一覧の取得エラー", error);
+      return json({ error: "メンバー登録申請を取得できませんでした。" }, 500);
+    }
+  }
+
+  const memberRequestPath = url.pathname.match(
+    /^\/api\/member-requests\/(MR-[0-9a-f-]{36})$/,
+  );
+  if (request.method === "PATCH" && memberRequestPath) {
+    if (!isSameOrigin(request)) {
+      return json({ error: "不正な送信元です。" }, 403);
+    }
+    if (!request.headers.get("Content-Type")?.toLowerCase().startsWith("application/json")) {
+      return json({ error: "JSON形式で送信してください。" }, 415);
+    }
+    let decision = "";
+    try {
+      const body = (await request.json()) as { decision?: unknown };
+      decision = typeof body.decision === "string" ? body.decision : "";
+    } catch {
+      return json({ error: "入力内容を確認してください。" }, 400);
+    }
+
+    try {
+      return json(
+        await memberRegistrationDecider(
+          env,
+          memberRequestPath[1],
+          decision,
+          email,
+        ),
+      );
+    } catch (error: unknown) {
+      if (error instanceof MemberAdminError) {
+        return json({ error: error.message }, error.statusCode);
+      }
+      console.error("メンバー登録申請の承認エラー", error);
+      return json({ error: "登録申請を処理できませんでした。" }, 500);
     }
   }
 

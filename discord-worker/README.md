@@ -9,12 +9,13 @@
 - DiscordリクエストのEd25519署名検証
 - DiscordのInteraction Endpoint確認用PING/PONG
 - 開発用サーバーの `/ping` コマンド
-- `/member-register` によるDiscordユーザーとテストメンバーの紐付け
+- `/member-register` による新規登録・登録内容変更の申請
 - `/setup-channel` によるテスト告知先の設定
 - `/test-tournament` による告知・対象級DM・参加回答ボタンの疎通確認
 - Cloudflare Accessで保護する大会登録Web管理画面
 - 管理画面での大会一覧、回答者別集計、ステータス確認・変更
 - 管理画面でのメンバー一覧、氏名・級・状態・DM設定の変更
+- 管理画面でのメンバー登録申請の確認・承認・却下
 - 管理者メールを記録する大会登録・ステータス変更の監査情報
 - Web登録された未通知大会を1分ごとに取得するDiscord通知処理
 - 署名付きPING受信時の開発用サーバーへのコマンド登録

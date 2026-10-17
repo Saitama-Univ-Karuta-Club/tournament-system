@@ -7,7 +7,9 @@ import { commands } from "./commands";
 import {
   formatGrade,
   normalizeMemberRegistration,
-  upsertDiscordMember,
+  submitMemberRegistrationRequest,
+  type MemberRegistrationRequestResult,
+  type RegisterMemberInput,
 } from "./members";
 import {
   createTestTournamentAndNotify,
@@ -70,6 +72,10 @@ type AttendanceRecorder = (
   env: Env,
   input: AttendanceInput,
 ) => Promise<import("./discord-api").DiscordMessagePayload>;
+type MemberRegistrar = (
+  db: D1Database,
+  input: RegisterMemberInput,
+) => Promise<MemberRegistrationRequestResult>;
 
 export async function registerGuildCommands(env: Env): Promise<void> {
   if (
@@ -162,6 +168,7 @@ export async function handleRequest(
   announcementChannelSetter: AnnouncementChannelSetter = upsertAnnouncementChannel,
   testTournamentCreator: TestTournamentCreator = createTestTournamentAndNotify,
   attendanceRecorder: AttendanceRecorder = recordAttendanceResponse,
+  memberRegistrar: MemberRegistrar = submitMemberRegistrationRequest,
 ): Promise<Response> {
   const url = new URL(request.url);
 
@@ -241,21 +248,26 @@ export async function handleRequest(
     }
 
     try {
-      const member = await upsertDiscordMember(env.DB, {
+      const registration = await memberRegistrar(env.DB, {
         discordUserId:
           interaction.member?.user?.id ?? interaction.user?.id ?? "",
         displayName: getStringOption(interaction, "name"),
         grade: getStringOption(interaction, "grade"),
       });
 
+      if (registration.requestType === "update") {
+        return ephemeralMessage(
+          `登録内容変更の申請を受け付けました。\n現在: ${registration.currentDisplayName}・${formatGrade(registration.currentGrade ?? "")}\n申請内容: ${registration.displayName}・${formatGrade(registration.grade)}\n管理者の承認後に反映されます。`,
+        );
+      }
       return ephemeralMessage(
-        `テストメンバーとして登録しました。\n氏名: ${member.displayName}\n出場級: ${formatGrade(member.grade)}`,
+        `メンバー登録の申請を受け付けました。\n氏名: ${registration.displayName}\n出場級: ${formatGrade(registration.grade)}\n管理者の承認後に有効になります。`,
       );
     } catch (error: unknown) {
-      console.error("メンバー登録エラー", error);
+      console.error("メンバー登録申請エラー", error);
       const message =
         error instanceof Error ? error.message : "不明なエラーが発生しました。";
-      return ephemeralMessage(`メンバー登録に失敗しました。\n${message}`);
+      return ephemeralMessage(`メンバー登録申請に失敗しました。\n${message}`);
     }
   }
 
