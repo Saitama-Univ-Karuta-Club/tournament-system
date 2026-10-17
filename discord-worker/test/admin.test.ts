@@ -215,6 +215,22 @@ describe("Admin Worker", () => {
     expect(html).toContain("fetch('/api/documents'");
   });
 
+  it("clears the complete registration form after a successful submission", async () => {
+    const response = await handleAdminRequest(
+      new Request("https://admin.example.com/register"),
+      env,
+      authenticatedContext(),
+    );
+
+    const html = await response.text();
+    expect(html).toContain("function resetTournamentForm()");
+    expect(html).toContain("form.reset()");
+    expect(html).toContain("gradeDateGrid.replaceChildren()");
+    expect(html).toContain("gradeDateSettings.hidden = true");
+    expect(html).toContain("previousCommonEventDate = ''");
+    expect(html).toContain("resetTournamentForm()");
+  });
+
   it("stores a valid tournament for the notification worker", async () => {
     const waitUntil = vi.fn();
     const creator = vi.fn().mockResolvedValue([

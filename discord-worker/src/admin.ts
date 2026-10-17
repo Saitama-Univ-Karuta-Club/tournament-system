@@ -1463,6 +1463,13 @@ function adminHtml(page: AdminPage): string {
       previousCommonEventDate = form.elements.eventDate.value;
     });
 
+    function resetTournamentForm() {
+      form.reset();
+      gradeDateGrid.replaceChildren();
+      gradeDateSettings.hidden = true;
+      previousCommonEventDate = '';
+    }
+
     fetch('/api/session').then((response) => response.json()).then((data) => {
       identity.textContent = data.email || '認証済み';
     }).catch(() => { identity.textContent = '認証済み'; });
@@ -1511,10 +1518,7 @@ function adminHtml(page: AdminPage): string {
         if (!response.ok) throw new Error(body.error || '登録に失敗しました。');
         result.className = 'ok';
         result.textContent = body.message || '登録しました。Discord通知を予約しました。';
-        form.elements.title.value = '';
-        form.elements.venue.value = '';
-        form.elements.documentUrl.value = '';
-        form.elements.documentFile.value = '';
+        resetTournamentForm();
       } catch (error) {
         result.className = 'error';
         result.textContent = error instanceof Error ? error.message : '登録に失敗しました。';
