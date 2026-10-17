@@ -105,6 +105,30 @@ function toAdminMember(row: MemberDatabaseRow): AdminMember {
     updatedAt: row.updated_at,
   };
 }
+
+function invalidateResponsesForGrade(
+  env: TournamentEnv,
+  memberId: string,
+  previousGrade: string,
+  invalidatedAt: string,
+) {
+  return env.DB.prepare(
+    `UPDATE responses
+     SET
+       is_valid = 0,
+       invalidated_at = ?,
+       invalidated_reason = 'member_grade_changed'
+     WHERE member_id = ?
+       AND is_valid = 1
+       AND EXISTS (
+         SELECT 1
+         FROM tournaments
+         WHERE tournaments.tournament_id = responses.tournament_id
+           AND tournaments.grade = ?
+       )`,
+  ).bind(invalidatedAt, memberId, previousGrade);
+}
+
 export async function listAdminMembers(
   env: TournamentEnv,
 ): Promise<AdminMember[]> {
@@ -226,7 +250,7 @@ export async function decideMemberRegistration(
 
   if (request.member_id) {
     const previousDmEnabled = request.current_dm_enabled ?? 1;
-    await env.DB.batch([
+    const statements = [
       env.DB.prepare(
         `UPDATE members
          SET display_name = ?, grade = ?, status = 'active', updated_at = ?
@@ -263,12 +287,28 @@ export async function decideMemberRegistration(
         decidedByEmail,
         now,
       ),
+    ];
+    if (
+      request.current_grade &&
+      request.current_grade !== request.requested_grade
+    ) {
+      statements.push(
+        invalidateResponsesForGrade(
+          env,
+          request.member_id,
+          request.current_grade,
+          now,
+        ),
+      );
+    }
+    statements.push(
       env.DB.prepare(
         `UPDATE member_registration_requests
          SET status = 'approved', decided_at = ?, decided_by_email = ?
          WHERE request_id = ? AND status = 'pending'`,
       ).bind(now, decidedByEmail, requestId),
-    ]);
+    );
+    await env.DB.batch(statements);
     return { requestId, decision: "approved", memberId: request.member_id };
   }
 
@@ -348,7 +388,7 @@ export async function updateAdminMember(
   }
 
   const now = new Date().toISOString();
-  await env.DB.batch([
+  const statements = [
     env.DB.prepare(
       `UPDATE members
        SET display_name = ?, grade = ?, status = ?, dm_enabled = ?, updated_at = ?
@@ -388,7 +428,13 @@ export async function updateAdminMember(
       changedByEmail,
       now,
     ),
-  ]);
+  ];
+  if (existing.grade !== input.grade) {
+    statements.push(
+      invalidateResponsesForGrade(env, memberId, existing.grade, now),
+    );
+  }
+  await env.DB.batch(statements);
 
   return {
     ...toAdminMember(existing),

@@ -116,12 +116,15 @@ export async function listAdminTournaments(
       tournaments.created_at,
       (SELECT COUNT(*) FROM responses
         WHERE responses.tournament_id = tournaments.tournament_id
+          AND responses.is_valid = 1
           AND responses.response = 'yes') AS response_yes,
       (SELECT COUNT(*) FROM responses
         WHERE responses.tournament_id = tournaments.tournament_id
+          AND responses.is_valid = 1
           AND responses.response = 'maybe') AS response_maybe,
       (SELECT COUNT(*) FROM responses
         WHERE responses.tournament_id = tournaments.tournament_id
+          AND responses.is_valid = 1
           AND responses.response = 'no') AS response_no,
       (SELECT COUNT(*) FROM members
         WHERE members.status = 'active'
@@ -166,6 +169,7 @@ export async function listAdminTournaments(
     INNER JOIN tournaments
       ON tournaments.tournament_id = responses.tournament_id
     WHERE tournaments.status <> 'deleted'
+      AND responses.is_valid = 1
     ORDER BY responses.updated_at DESC`,
   ).all<AdminResponseRow>();
 

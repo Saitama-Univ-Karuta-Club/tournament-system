@@ -1,9 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   buildAttendanceMessage,
   buildNotificationTargets,
   getRetryDelayMinutes,
   normalizeTournamentInput,
+  recordAttendanceResponse,
 } from "../src/tournaments";
 
 const tournament = {
@@ -32,6 +33,41 @@ describe("attendance DM", () => {
     const message = buildAttendanceMessage(tournament, "yes");
 
     expect(message.content).toContain("現在の回答: **参加希望**");
+  });
+
+  it("reactivates a previously invalidated response when an eligible member answers", async () => {
+    const sqlStatements: string[] = [];
+    const run = vi.fn().mockResolvedValue({ success: true });
+    const prepare = vi.fn((sql: string) => {
+      sqlStatements.push(sql);
+      return {
+        bind: vi.fn(() => ({
+          first: vi.fn().mockResolvedValue({
+            ...tournament,
+            member_id: "M-test",
+            internal_deadline: "2099-10-25T12:00:00.000Z",
+          }),
+          run,
+        })),
+      };
+    });
+
+    await recordAttendanceResponse(
+      { DB: { prepare } as unknown as D1Database },
+      {
+        tournamentId: "T-test",
+        discordUserId: "discord-test",
+        response: "yes",
+      },
+    );
+
+    const upsert = sqlStatements.find((sql) =>
+      sql.includes("INSERT INTO responses"),
+    );
+    expect(upsert).toContain("is_valid = 1");
+    expect(upsert).toContain("invalidated_at = NULL");
+    expect(upsert).toContain("invalidated_reason = NULL");
+    expect(run).toHaveBeenCalledOnce();
   });
 });
 

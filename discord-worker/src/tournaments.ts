@@ -798,11 +798,14 @@ export async function recordAttendanceResponse(
   const now = new Date().toISOString();
   await env.DB.prepare(
     `INSERT INTO responses (
-      tournament_id, member_id, response, source, created_at, updated_at
-    ) VALUES (?, ?, ?, 'discord', ?, ?)
+      tournament_id, member_id, response, source, is_valid, created_at, updated_at
+    ) VALUES (?, ?, ?, 'discord', 1, ?, ?)
     ON CONFLICT(tournament_id, member_id) DO UPDATE SET
       response = excluded.response,
       source = 'discord',
+      is_valid = 1,
+      invalidated_at = NULL,
+      invalidated_reason = NULL,
       updated_at = excluded.updated_at`,
   )
     .bind(target.tournament_id, target.member_id, input.response, now, now)
