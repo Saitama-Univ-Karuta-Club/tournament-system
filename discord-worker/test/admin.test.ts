@@ -242,7 +242,9 @@ describe("Admin Worker", () => {
       {
         memberId: "M-11111111-1111-4111-8111-111111111111",
         displayName: "石田 洋音",
+        displayNameKana: "いしだ ようおん",
         grade: "C",
+        rank: 2,
         status: "active",
         dmEnabled: true,
         discordLinked: true,
@@ -264,6 +266,7 @@ describe("Admin Worker", () => {
     const body = await response.json() as { members: Array<Record<string, unknown>> };
     expect(body.members[0]).toMatchObject({
       displayName: "石田 洋音",
+      displayNameKana: "いしだ ようおん",
       discordLinked: true,
     });
     expect(body.members[0]).not.toHaveProperty("discordUserId");
@@ -274,14 +277,18 @@ describe("Admin Worker", () => {
     const memberUpdater = vi.fn().mockResolvedValue({
       memberId,
       displayName: "石田 洋音",
+      displayNameKana: "いしだ ようおん",
       grade: "B",
+      rank: 3,
       status: "active",
       dmEnabled: false,
       discordLinked: true,
     });
     const input = {
       displayName: "石田 洋音",
+      displayNameKana: "いしだ ようおん",
       grade: "B",
+      rank: 3,
       status: "active",
       dmEnabled: false,
     };
@@ -318,9 +325,13 @@ describe("Admin Worker", () => {
         requestId: "MR-11111111-1111-4111-8111-111111111111",
         requestType: "update",
         requestedDisplayName: "石田洋音",
+        requestedDisplayNameKana: "いしだ ようおん",
         requestedGrade: "B",
+        requestedRank: 3,
         currentDisplayName: "石田洋音",
+        currentDisplayNameKana: "いしだ ようおん",
         currentGrade: "C",
+        currentRank: 2,
         currentStatus: "active",
         submittedAt: "2026-10-18T00:00:00.000Z",
       },
@@ -415,5 +426,7 @@ describe("Admin Worker", () => {
     expect(html).toContain('id="pending-request-badge"');
     expect(html).toContain('class="request-badge"');
     expect(html).toContain("/api/member-requests/count");
+    expect(html).toContain("よみがな");
+    expect(html).toContain("displayNameKana: nameKanaInput.value");
   });
 });

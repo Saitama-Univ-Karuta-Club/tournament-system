@@ -365,7 +365,7 @@ function adminHtml(page: AdminPage): string {
     #member-status { color: #697386; margin-bottom: 12px; }
     #member-list { display: grid; gap: 12px; }
     .member-card { border: 1px solid #dce1eb; border-radius: 10px; padding: 16px; }
-    .member-grid { display: grid; grid-template-columns: minmax(180px, 2fr) minmax(105px, .8fr) minmax(130px, 1fr) auto; gap: 12px; align-items: end; }
+    .member-grid { display: grid; grid-template-columns: minmax(145px, 1.3fr) minmax(145px, 1.3fr) minmax(90px, .65fr) minmax(90px, .65fr) minmax(115px, .8fr) auto; gap: 12px; align-items: end; }
     .member-grid .checkbox { display: flex; align-items: center; gap: 8px; min-height: 42px; }
     .member-grid .checkbox input { width: auto; }
     .member-actions { display: flex; align-items: center; gap: 12px; margin-top: 12px; flex-wrap: wrap; }
@@ -434,7 +434,7 @@ function adminHtml(page: AdminPage): string {
       </div>
       <div id="member-status" role="status" aria-live="polite">読み込み中…</div>
       <div id="member-list"></div>
-      <div class="footnote">Discord IDそのものは管理画面に表示しません。氏名・出場級・在籍状態・DM送信設定の変更履歴は管理者メールとともに保存されます。</div>
+      <div class="footnote">Discord IDそのものは管理画面に表示しません。氏名・よみがな・出場級・段位・在籍状態・DM送信設定の変更履歴は管理者メールとともに保存されます。</div>
     </section>
   </main>
   <script>
@@ -498,6 +498,10 @@ function adminHtml(page: AdminPage): string {
 
     function gradeLabel(grade) {
       return grade === 'beginner' ? '初心者' : grade + '級';
+    }
+
+    function rankLabel(rank) {
+      return ['無段', '初段', '二段', '三段', '四段', '五段', '六段', '七段', '八段', '九段', '十段'][Number(rank)] || '段位不明';
     }
 
     function dateTimeLabel(value) {
@@ -630,6 +634,13 @@ function adminHtml(page: AdminPage): string {
       nameInput.maxLength = 50;
       nameLabel.append(nameInput);
 
+      const nameKanaLabel = element('label', '', 'よみがな');
+      const nameKanaInput = document.createElement('input');
+      nameKanaInput.value = member.displayNameKana || '';
+      nameKanaInput.maxLength = 100;
+      nameKanaInput.placeholder = 'いしだ ようおん';
+      nameKanaLabel.append(nameKanaInput);
+
       const gradeLabelNode = element('label', '', '出場級');
       const gradeSelect = document.createElement('select');
       ['A', 'B', 'C', 'D', 'E', 'F', 'beginner'].forEach((grade) => {
@@ -640,6 +651,17 @@ function adminHtml(page: AdminPage): string {
         gradeSelect.append(option);
       });
       gradeLabelNode.append(gradeSelect);
+
+      const rankLabelNode = element('label', '', '段位');
+      const rankSelect = document.createElement('select');
+      Array.from({ length: 11 }, (_, rank) => rank).forEach((rank) => {
+        const option = document.createElement('option');
+        option.value = String(rank);
+        option.textContent = rankLabel(rank);
+        option.selected = rank === Number(member.rank);
+        rankSelect.append(option);
+      });
+      rankLabelNode.append(rankSelect);
 
       const statusLabel = element('label', '', '状態');
       const statusSelect = document.createElement('select');
@@ -657,7 +679,7 @@ function adminHtml(page: AdminPage): string {
       dmCheckbox.type = 'checkbox';
       dmCheckbox.checked = member.dmEnabled;
       dmLabel.append(dmCheckbox, document.createTextNode('DMを送る'));
-      grid.append(nameLabel, gradeLabelNode, statusLabel, dmLabel);
+      grid.append(nameLabel, nameKanaLabel, gradeLabelNode, rankLabelNode, statusLabel, dmLabel);
       card.append(grid);
 
       const actions = element('div', 'member-actions');
@@ -675,7 +697,9 @@ function adminHtml(page: AdminPage): string {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               displayName: nameInput.value,
+              displayNameKana: nameKanaInput.value,
               grade: gradeSelect.value,
+              rank: Number(rankSelect.value),
               status: statusSelect.value,
               dmEnabled: dmCheckbox.checked,
             }),
@@ -709,13 +733,13 @@ function adminHtml(page: AdminPage): string {
       const requested = element('div', 'request-value');
       requested.append(
         element('strong', '', request.requestType === 'update' ? '変更後' : '登録内容'),
-        document.createTextNode(request.requestedDisplayName + ' ／ ' + gradeLabel(request.requestedGrade)),
+        document.createTextNode(request.requestedDisplayName + '（' + (request.requestedDisplayNameKana || 'よみがな未登録') + '） ／ ' + gradeLabel(request.requestedGrade) + ' ／ ' + rankLabel(request.requestedRank)),
       );
       if (request.requestType === 'update') {
         const current = element('div', 'request-value');
         current.append(
           element('strong', '', '現在'),
-          document.createTextNode((request.currentDisplayName || '不明') + ' ／ ' + gradeLabel(request.currentGrade || '')),
+          document.createTextNode((request.currentDisplayName || '不明') + '（' + (request.currentDisplayNameKana || 'よみがな未登録') + '） ／ ' + gradeLabel(request.currentGrade || '') + ' ／ ' + rankLabel(request.currentRank)),
         );
         comparison.append(current, element('div', 'request-arrow', '→'), requested);
       } else {

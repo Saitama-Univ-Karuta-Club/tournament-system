@@ -6,7 +6,9 @@ const MEMBER_STATUSES = new Set(["active", "inactive", "pending", "rejected"]);
 interface MemberDatabaseRow {
   member_id: string;
   display_name: string;
+  display_name_kana: string;
   grade: string;
+  rank: number;
   status: string;
   dm_enabled: number;
   discord_user_id: string | null;
@@ -20,10 +22,14 @@ interface RegistrationRequestDatabaseRow {
   discord_user_id: string;
   request_type: "new" | "update";
   requested_display_name: string;
+  requested_display_name_kana: string;
   requested_grade: string;
+  requested_rank: number;
   submitted_at: string;
   current_display_name: string | null;
+  current_display_name_kana: string | null;
   current_grade: string | null;
+  current_rank: number | null;
   current_status: string | null;
   current_dm_enabled: number | null;
 }
@@ -31,7 +37,9 @@ interface RegistrationRequestDatabaseRow {
 export interface AdminMember {
   memberId: string;
   displayName: string;
+  displayNameKana: string;
   grade: string;
+  rank: number;
   status: string;
   dmEnabled: boolean;
   discordLinked: boolean;
@@ -41,7 +49,9 @@ export interface AdminMember {
 
 export interface MemberUpdateInput {
   displayName: string;
+  displayNameKana: string;
   grade: string;
+  rank: number;
   status: string;
   dmEnabled: boolean;
 }
@@ -50,10 +60,14 @@ export interface AdminMemberRegistrationRequest {
   requestId: string;
   requestType: "new" | "update";
   requestedDisplayName: string;
+  requestedDisplayNameKana: string;
   requestedGrade: string;
+  requestedRank: number;
   submittedAt: string;
   currentDisplayName?: string;
+  currentDisplayNameKana?: string;
   currentGrade?: string;
+  currentRank?: number;
   currentStatus?: string;
 }
 
@@ -74,14 +88,28 @@ function normalizeMemberUpdate(raw: MemberUpdateInput): MemberUpdateInput {
     typeof raw.displayName === "string"
       ? raw.displayName.trim().replace(/\s+/g, " ")
       : "";
+  const displayNameKana =
+    typeof raw.displayNameKana === "string"
+      ? raw.displayNameKana.trim().replace(/\s+/g, " ")
+      : "";
   const grade = typeof raw.grade === "string" ? raw.grade.trim() : "";
+  const rank = Number(raw.rank);
   const status = typeof raw.status === "string" ? raw.status.trim() : "";
 
   if (!displayName || displayName.length > 50) {
     throw new MemberAdminError("氏名は1〜50文字で入力してください。", 400);
   }
+  if (!displayNameKana || displayNameKana.length > 100) {
+    throw new MemberAdminError(
+      "氏名のよみがなは1〜100文字で入力してください。",
+      400,
+    );
+  }
   if (!MEMBER_GRADES.has(grade)) {
     throw new MemberAdminError("出場級が不正です。", 400);
+  }
+  if (!Number.isInteger(rank) || rank < 0 || rank > 10) {
+    throw new MemberAdminError("段位が不正です。", 400);
   }
   if (!MEMBER_STATUSES.has(status)) {
     throw new MemberAdminError("メンバーステータスが不正です。", 400);
@@ -90,14 +118,23 @@ function normalizeMemberUpdate(raw: MemberUpdateInput): MemberUpdateInput {
     throw new MemberAdminError("DM設定が不正です。", 400);
   }
 
-  return { displayName, grade, status, dmEnabled: raw.dmEnabled };
+  return {
+    displayName,
+    displayNameKana,
+    grade,
+    rank,
+    status,
+    dmEnabled: raw.dmEnabled,
+  };
 }
 
 function toAdminMember(row: MemberDatabaseRow): AdminMember {
   return {
     memberId: row.member_id,
     displayName: row.display_name,
+    displayNameKana: row.display_name_kana,
     grade: row.grade,
+    rank: row.rank,
     status: row.status,
     dmEnabled: row.dm_enabled === 1,
     discordLinked: Boolean(row.discord_user_id),
@@ -136,7 +173,9 @@ export async function listAdminMembers(
     `SELECT
       member_id,
       display_name,
+      display_name_kana,
       grade,
+      rank,
       status,
       dm_enabled,
       discord_user_id,
@@ -162,10 +201,14 @@ export async function listPendingMemberRegistrations(
       member_registration_requests.discord_user_id,
       member_registration_requests.request_type,
       member_registration_requests.requested_display_name,
+      member_registration_requests.requested_display_name_kana,
       member_registration_requests.requested_grade,
+      member_registration_requests.requested_rank,
       member_registration_requests.submitted_at,
       members.display_name AS current_display_name,
+      members.display_name_kana AS current_display_name_kana,
       members.grade AS current_grade,
+      members.rank AS current_rank,
       members.status AS current_status,
       members.dm_enabled AS current_dm_enabled
     FROM member_registration_requests
@@ -179,10 +222,15 @@ export async function listPendingMemberRegistrations(
     requestId: request.request_id,
     requestType: request.request_type,
     requestedDisplayName: request.requested_display_name,
+    requestedDisplayNameKana: request.requested_display_name_kana,
     requestedGrade: request.requested_grade,
+    requestedRank: Number(request.requested_rank),
     submittedAt: request.submitted_at,
     currentDisplayName: request.current_display_name ?? undefined,
+    currentDisplayNameKana: request.current_display_name_kana ?? undefined,
     currentGrade: request.current_grade ?? undefined,
+    currentRank:
+      request.current_rank === null ? undefined : Number(request.current_rank),
     currentStatus: request.current_status ?? undefined,
   }));
 }
@@ -218,10 +266,14 @@ export async function decideMemberRegistration(
       member_registration_requests.discord_user_id,
       member_registration_requests.request_type,
       member_registration_requests.requested_display_name,
+      member_registration_requests.requested_display_name_kana,
       member_registration_requests.requested_grade,
+      member_registration_requests.requested_rank,
       member_registration_requests.submitted_at,
       members.display_name AS current_display_name,
+      members.display_name_kana AS current_display_name_kana,
       members.grade AS current_grade,
+      members.rank AS current_rank,
       members.status AS current_status,
       members.dm_enabled AS current_dm_enabled
     FROM member_registration_requests
@@ -253,11 +305,14 @@ export async function decideMemberRegistration(
     const statements = [
       env.DB.prepare(
         `UPDATE members
-         SET display_name = ?, grade = ?, status = 'active', updated_at = ?
+         SET display_name = ?, display_name_kana = ?, grade = ?, rank = ?,
+           status = 'active', updated_at = ?
          WHERE member_id = ?`,
       ).bind(
         request.requested_display_name,
+        request.requested_display_name_kana,
         request.requested_grade,
+        request.requested_rank,
         now,
         request.member_id,
       ),
@@ -266,6 +321,10 @@ export async function decideMemberRegistration(
           member_id,
           previous_display_name,
           new_display_name,
+          previous_display_name_kana,
+          new_display_name_kana,
+          previous_rank,
+          new_rank,
           previous_grade,
           new_grade,
           previous_status,
@@ -274,11 +333,15 @@ export async function decideMemberRegistration(
           new_dm_enabled,
           changed_by_email,
           changed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)`,
       ).bind(
         request.member_id,
         request.current_display_name ?? request.requested_display_name,
         request.requested_display_name,
+        request.current_display_name_kana ?? "",
+        request.requested_display_name_kana,
+        request.current_rank ?? request.requested_rank,
+        request.requested_rank,
         request.current_grade ?? request.requested_grade,
         request.requested_grade,
         request.current_status ?? "pending",
@@ -323,18 +386,21 @@ export async function decideMemberRegistration(
         first_name,
         first_name_kana,
         display_name,
+        display_name_kana,
         rank,
         grade,
         status,
         dm_enabled,
         created_at,
         updated_at
-      ) VALUES (?, ?, ?, '', '', '', ?, 0, ?, 'active', 1, ?, ?)`,
+      ) VALUES (?, ?, ?, '', '', '', ?, ?, ?, ?, 'active', 1, ?, ?)`,
     ).bind(
       memberId,
       request.discord_user_id,
       request.requested_display_name,
       request.requested_display_name,
+      request.requested_display_name_kana,
+      request.requested_rank,
       request.requested_grade,
       now,
       now,
@@ -362,7 +428,9 @@ export async function updateAdminMember(
     `SELECT
       member_id,
       display_name,
+      display_name_kana,
       grade,
+      rank,
       status,
       dm_enabled,
       discord_user_id,
@@ -380,7 +448,9 @@ export async function updateAdminMember(
   const nextDmEnabled = input.dmEnabled ? 1 : 0;
   const changed =
     existing.display_name !== input.displayName ||
+    existing.display_name_kana !== input.displayNameKana ||
     existing.grade !== input.grade ||
+    existing.rank !== input.rank ||
     existing.status !== input.status ||
     existing.dm_enabled !== nextDmEnabled;
   if (!changed) {
@@ -391,11 +461,14 @@ export async function updateAdminMember(
   const statements = [
     env.DB.prepare(
       `UPDATE members
-       SET display_name = ?, grade = ?, status = ?, dm_enabled = ?, updated_at = ?
+       SET display_name = ?, display_name_kana = ?, grade = ?, rank = ?, status = ?,
+         dm_enabled = ?, updated_at = ?
        WHERE member_id = ?`,
     ).bind(
       input.displayName,
+      input.displayNameKana,
       input.grade,
+      input.rank,
       input.status,
       nextDmEnabled,
       now,
@@ -406,6 +479,10 @@ export async function updateAdminMember(
         member_id,
         previous_display_name,
         new_display_name,
+        previous_display_name_kana,
+        new_display_name_kana,
+        previous_rank,
+        new_rank,
         previous_grade,
         new_grade,
         previous_status,
@@ -414,11 +491,15 @@ export async function updateAdminMember(
         new_dm_enabled,
         changed_by_email,
         changed_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).bind(
       memberId,
       existing.display_name,
       input.displayName,
+      existing.display_name_kana,
+      input.displayNameKana,
+      existing.rank,
+      input.rank,
       existing.grade,
       input.grade,
       existing.status,
@@ -439,7 +520,9 @@ export async function updateAdminMember(
   return {
     ...toAdminMember(existing),
     displayName: input.displayName,
+    displayNameKana: input.displayNameKana,
     grade: input.grade,
+    rank: input.rank,
     status: input.status,
     dmEnabled: input.dmEnabled,
     updatedAt: now,

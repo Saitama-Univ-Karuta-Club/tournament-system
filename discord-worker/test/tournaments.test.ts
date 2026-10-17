@@ -4,6 +4,7 @@ import {
   buildDeadlineReminderMessage,
   buildDeadlineReminderTargets,
   buildNotificationTargets,
+  getDeadlineReminderSchedule,
   getRetryDelayMinutes,
   normalizeTournamentInput,
   recordAttendanceResponse,
@@ -125,11 +126,12 @@ describe("notification queue", () => {
     ]);
   });
 
-  it("queues only deadlines that are within the next 24 hours", () => {
+  it("サークル内締切の翌日0時に集計リマインダーをキューに入れる", () => {
     const targets = buildDeadlineReminderTargets(
       tournament,
       "admin-channel-1",
-      new Date("2026-10-24T12:00:00.000Z"),
+      1,
+      new Date("2026-10-25T15:00:00.000Z"),
     );
 
     expect(targets).toEqual([
@@ -142,13 +144,58 @@ describe("notification queue", () => {
     ]);
   });
 
+  it("主催者締切日0の0時は参加希望者がいる場合のみキューに入れる", () => {
+    const now = new Date("2026-10-27T15:00:00.000Z");
+    const withParticipant = buildDeadlineReminderTargets(
+      tournament,
+      "admin-channel-1",
+      1,
+      now,
+    );
+    const withoutParticipant = buildDeadlineReminderTargets(
+      tournament,
+      "admin-channel-1",
+      0,
+      now,
+    );
+
+    expect(
+      withParticipant.some(
+        (target) => target.reminderKind === "organizer_deadline",
+      ),
+    ).toBe(true);
+    expect(
+      withoutParticipant.some(
+        (target) => target.reminderKind === "organizer_deadline",
+      ),
+    ).toBe(false);
+  });
+
+  it("JSTの日付境界から両方の送信時刻を求める", () => {
+    expect(
+      getDeadlineReminderSchedule(tournament, "internal_deadline").toISOString(),
+    ).toBe("2026-10-25T15:00:00.000Z");
+    expect(
+      getDeadlineReminderSchedule(tournament, "organizer_deadline").toISOString(),
+    ).toBe("2026-10-27T15:00:00.000Z");
+  });
+
   it("builds an administrator reminder without response buttons", () => {
     const message = buildDeadlineReminderMessage(
       tournament,
       "organizer_deadline",
+      [
+        {
+          displayName: "石田洋音",
+          displayNameKana: "いしだ ようおん",
+        },
+      ],
     );
 
-    expect(message.content).toContain("主催者締切まで24時間以内");
+    expect(message.content).toContain("本日が主催者締切");
+    expect(message.embeds?.[0]?.fields?.at(-1)?.value).toContain(
+      "石田洋音（いしだ ようおん）",
+    );
     expect(message.components).toBeUndefined();
     expect(message.allowed_mentions).toEqual({ parse: [] });
   });
@@ -157,6 +204,7 @@ describe("notification queue", () => {
     const message = buildDeadlineReminderMessage(
       tournament,
       "internal_deadline",
+      [],
       true,
     );
 

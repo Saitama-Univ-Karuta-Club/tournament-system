@@ -1,8 +1,17 @@
 import { describe, expect, it, vi } from "vitest";
-import { submitMemberRegistrationRequest } from "../src/members";
+import {
+  normalizeMemberRegistration,
+  submitMemberRegistrationRequest,
+} from "../src/members";
 
 function registrationDatabase(options: {
-  existing?: { member_id: string; display_name: string; grade: string };
+  existing?: {
+    member_id: string;
+    display_name: string;
+    display_name_kana: string;
+    grade: string;
+    rank: number;
+  };
   pendingRequestId?: string;
 }) {
   const sqlStatements: string[] = [];
@@ -32,27 +41,46 @@ function registrationDatabase(options: {
 }
 
 describe("member registration requests", () => {
+  it("氏名のよみがなを必須にする", () => {
+    expect(() =>
+      normalizeMemberRegistration({
+        discordUserId: "discord-ishida",
+        displayName: "石田洋音",
+        displayNameKana: "",
+        grade: "C",
+        rank: 2,
+      }),
+    ).toThrow("よみがなは1〜100文字");
+  });
+
   it("recognizes an existing Discord ID as a registration update", async () => {
     const database = registrationDatabase({
       existing: {
         member_id: "M-existing",
         display_name: "石田洋音",
+        display_name_kana: "いしだ ようおん",
         grade: "C",
+        rank: 2,
       },
     });
 
     const result = await submitMemberRegistrationRequest(database.db, {
       discordUserId: "discord-ishida",
       displayName: "石田洋音",
+      displayNameKana: "いしだ ようおん",
       grade: "B",
+      rank: 3,
     });
 
     expect(result).toMatchObject({
       requestType: "update",
       currentDisplayName: "石田洋音",
+      currentDisplayNameKana: "いしだ ようおん",
       currentGrade: "C",
+      currentRank: 2,
       displayName: "石田洋音",
       grade: "B",
+      rank: 3,
     });
     expect(database.sqlStatements.some((sql) => sql.includes("UPDATE members\n")))
       .toBe(false);
@@ -64,7 +92,9 @@ describe("member registration requests", () => {
     const result = await submitMemberRegistrationRequest(database.db, {
       discordUserId: "discord-new",
       displayName: "埼玉花子",
+      displayNameKana: "さいたま はなこ",
       grade: "D",
+      rank: 1,
     });
 
     expect(result.requestType).toBe("new");
@@ -76,7 +106,9 @@ describe("member registration requests", () => {
       existing: {
         member_id: "M-existing",
         display_name: "石田洋音",
+        display_name_kana: "いしだ ようおん",
         grade: "C",
+        rank: 2,
       },
       pendingRequestId: "MR-pending",
     });
@@ -84,7 +116,9 @@ describe("member registration requests", () => {
     const result = await submitMemberRegistrationRequest(database.db, {
       discordUserId: "discord-ishida",
       displayName: "石田洋音",
+      displayNameKana: "いしだ ようおん",
       grade: "B",
+      rank: 3,
     });
 
     expect(result.requestId).toBe("MR-pending");

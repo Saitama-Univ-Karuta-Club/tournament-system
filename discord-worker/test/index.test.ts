@@ -116,7 +116,9 @@ describe("Discord Worker", () => {
       requestType: "update",
       discordUserId: "discord-user-id",
       displayName: "埼玉 花子",
+      displayNameKana: "さいたま はなこ",
       grade: "B",
+      rank: 2,
       currentDisplayName: "埼玉 花子",
       currentGrade: "C",
     });
@@ -140,7 +142,9 @@ describe("Discord Worker", () => {
             name: "member-register",
             options: [
               { name: "name", value: "埼玉 花子" },
+              { name: "name-kana", value: "さいたま はなこ" },
               { name: "grade", value: "B" },
+              { name: "rank", value: 2 },
             ],
           },
         }),
@@ -161,7 +165,9 @@ describe("Discord Worker", () => {
       {
         discordUserId: "discord-user-id",
         displayName: "埼玉 花子",
+        displayNameKana: "さいたま はなこ",
         grade: "B",
+        rank: 2,
       },
     );
     await expect(response.json()).resolves.toMatchObject({

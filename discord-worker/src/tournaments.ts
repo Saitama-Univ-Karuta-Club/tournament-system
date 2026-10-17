@@ -81,6 +81,20 @@ interface QueuedNotificationRow extends TournamentRow {
   reminder_kind: ReminderKind | null;
 }
 
+interface ReminderTournamentRow extends TournamentRow {
+  response_yes: number;
+}
+
+export interface ReminderParticipant {
+  displayName: string;
+  displayNameKana: string;
+}
+
+interface ReminderParticipantRow {
+  display_name: string;
+  display_name_kana: string;
+}
+
 interface AttendanceTargetRow extends TournamentRow {
   member_id: string;
 }
@@ -95,7 +109,7 @@ const QUEUE_BATCH_SIZE = 20;
 const MAX_NOTIFICATION_ATTEMPTS = 5;
 const QUEUE_LEASE_MILLISECONDS = 5 * 60 * 1000;
 const INSERT_BATCH_SIZE = 50;
-const DEADLINE_REMINDER_LEAD_MILLISECONDS = 24 * 60 * 60 * 1000;
+const JST_OFFSET_MILLISECONDS = 9 * 60 * 60 * 1000;
 const TOURNAMENT_GRADES = new Set(["A", "B", "C", "D", "E", "F", "beginner"]);
 const TOURNAMENT_TYPES = new Set(["official", "support", "event"]);
 
@@ -352,6 +366,7 @@ function buildAnnouncementMessage(tournament: TournamentRow): DiscordMessagePayl
 export function buildDeadlineReminderMessage(
   tournament: TournamentRow,
   reminderKind: ReminderKind,
+  participants: ReminderParticipant[] = [],
   isTest = false,
 ): DiscordMessagePayload {
   const isInternal = reminderKind === "internal_deadline";
@@ -363,7 +378,9 @@ export function buildDeadlineReminderMessage(
   return {
     content: isTest
       ? `【テスト送信・締切リマインダー】${deadlineLabel}の通知表示と送信権限の確認です。`
-      : `【締切リマインダー】${deadlineLabel}まで24時間以内です。`,
+      : isInternal
+        ? "【締切リマインダー】サークル内締切を過ぎました。参加希望者を確認してください。"
+        : "【締切リマインダー】本日が主催者締切です。申込完了後、大会ステータスを「申込完了」に変更してください。",
     embeds: [
       {
         title: tournament.title,
@@ -379,11 +396,64 @@ export function buildDeadlineReminderMessage(
             value: formatJstDateTime(deadline),
             inline: true,
           },
+          ...buildParticipantFields(participants),
         ],
       },
     ],
     allowed_mentions: { parse: [] },
   };
+}
+
+function buildParticipantFields(participants: ReminderParticipant[]) {
+  if (participants.length === 0) {
+    return [{ name: "参加希望者（0人）", value: "なし", inline: false }];
+  }
+
+  const chunks: string[] = [];
+  let current = "";
+  for (const participant of participants) {
+    const reading = participant.displayNameKana || "よみがな未登録";
+    const line = `・${participant.displayName}（${reading}）`;
+    if (current && current.length + line.length + 1 > 950) {
+      chunks.push(current);
+      current = line;
+    } else {
+      current += `${current ? "\n" : ""}${line}`;
+    }
+  }
+  if (current) {
+    chunks.push(current);
+  }
+
+  return chunks.map((value, index) => ({
+    name:
+      index === 0
+        ? `参加希望者（${participants.length}人）`
+        : `参加希望者（続き${index + 1}）`,
+    value,
+    inline: false,
+  }));
+}
+
+function startOfJstDay(value: string): Date {
+  const date = new Date(value);
+  const jstDate = new Date(date.getTime() + JST_OFFSET_MILLISECONDS)
+    .toISOString()
+    .slice(0, 10);
+  return new Date(`${jstDate}T00:00:00+09:00`);
+}
+
+export function getDeadlineReminderSchedule(
+  tournament: TournamentRow,
+  reminderKind: ReminderKind,
+): Date {
+  if (reminderKind === "internal_deadline") {
+    return new Date(
+      startOfJstDay(tournament.internal_deadline).getTime() +
+        24 * 60 * 60 * 1000,
+    );
+  }
+  return startOfJstDay(tournament.true_deadline);
 }
 
 export function buildNotificationTargets(
@@ -413,20 +483,31 @@ export function buildNotificationTargets(
 export function buildDeadlineReminderTargets(
   tournament: TournamentRow,
   reminderChannelId: string,
+  participantCount: number,
   now = new Date(),
 ): NotificationTarget[] {
   const nowMs = now.getTime();
-  const reminderLimitMs = nowMs + DEADLINE_REMINDER_LEAD_MILLISECONDS;
-  const deadlines: Array<{ kind: ReminderKind; value: string }> = [
-    { kind: "internal_deadline", value: tournament.internal_deadline },
-    { kind: "organizer_deadline", value: tournament.true_deadline },
+  const reminders: Array<{ kind: ReminderKind; enabled: boolean }> = [
+    {
+      kind: "internal_deadline",
+      enabled:
+        nowMs >=
+        getDeadlineReminderSchedule(tournament, "internal_deadline").getTime(),
+    },
+    {
+      kind: "organizer_deadline",
+      enabled:
+        participantCount > 0 &&
+        nowMs >=
+          getDeadlineReminderSchedule(
+            tournament,
+            "organizer_deadline",
+          ).getTime(),
+    },
   ];
 
-  return deadlines
-    .filter(({ value }) => {
-      const deadlineMs = new Date(value).getTime();
-      return deadlineMs > nowMs && deadlineMs <= reminderLimitMs;
-    })
+  return reminders
+    .filter(({ enabled }) => enabled)
     .map(({ kind }) => ({
       idempotencyKey: `deadline_reminder:${kind}:${tournament.tournament_id}:${reminderChannelId}`,
       tournamentId: tournament.tournament_id,
@@ -512,6 +593,37 @@ export async function upsertReminderChannel(
   }
 }
 
+async function listReminderParticipants(
+  db: D1Database,
+  tournamentId: string,
+): Promise<ReminderParticipant[]> {
+  const participants = await db.prepare(
+    `SELECT
+      members.display_name,
+      COALESCE(
+        NULLIF(members.display_name_kana, ''),
+        NULLIF(trim(members.last_name_kana || ' ' || members.first_name_kana), ''),
+        ''
+      ) AS display_name_kana
+    FROM responses
+    INNER JOIN members ON members.member_id = responses.member_id
+    WHERE responses.tournament_id = ?
+      AND responses.response = 'yes'
+      AND responses.is_valid = 1
+    ORDER BY
+      CASE WHEN display_name_kana = '' THEN 1 ELSE 0 END,
+      display_name_kana,
+      members.display_name`,
+  )
+    .bind(tournamentId)
+    .all<ReminderParticipantRow>();
+
+  return participants.results.map((participant) => ({
+    displayName: participant.display_name,
+    displayNameKana: participant.display_name_kana,
+  }));
+}
+
 export async function sendTestDeadlineReminder(
   env: TournamentEnv,
   now = new Date(),
@@ -564,10 +676,19 @@ export async function sendTestDeadlineReminder(
     tournament.internal_deadline > nowIso
       ? "internal_deadline"
       : "organizer_deadline";
+  const participants = await listReminderParticipants(
+    env.DB,
+    tournament.tournament_id,
+  );
   await sendChannelMessage(
     env.DISCORD_BOT_TOKEN,
     settings.admin_reminder_channel_id,
-    buildDeadlineReminderMessage(tournament, reminderKind, true),
+    buildDeadlineReminderMessage(
+      tournament,
+      reminderKind,
+      participants,
+      true,
+    ),
   );
   return { tournamentTitle: tournament.title, reminderKind };
 }
@@ -731,10 +852,6 @@ export async function enqueueDeadlineReminders(
     return 0;
   }
 
-  const nowIso = now.toISOString();
-  const reminderLimitIso = new Date(
-    now.getTime() + DEADLINE_REMINDER_LEAD_MILLISECONDS,
-  ).toISOString();
   const tournaments = await env.DB.prepare(
     `SELECT
       tournament_id,
@@ -746,23 +863,24 @@ export async function enqueueDeadlineReminders(
       venue,
       true_deadline,
       internal_deadline,
-      document_url
+      document_url,
+      (SELECT COUNT(*)
+       FROM responses
+       WHERE responses.tournament_id = tournaments.tournament_id
+         AND responses.response = 'yes'
+         AND responses.is_valid = 1) AS response_yes
     FROM tournaments
     WHERE status = 'active'
-      AND (
-        (internal_deadline > ? AND internal_deadline <= ?)
-        OR (true_deadline > ? AND true_deadline <= ?)
-      )
     ORDER BY internal_deadline, true_deadline
     LIMIT 100`,
   )
-    .bind(nowIso, reminderLimitIso, nowIso, reminderLimitIso)
-    .all<TournamentRow>();
+    .all<ReminderTournamentRow>();
 
   const targets = tournaments.results.flatMap((tournament) =>
     buildDeadlineReminderTargets(
       tournament,
       settings.admin_reminder_channel_id!,
+      Number(tournament.response_yes),
       now,
     ),
   );
@@ -870,9 +988,31 @@ export async function processNotificationQueue(
         if (!notification.reminder_kind) {
           throw new Error("締切リマインダーの種類が未設定です。");
         }
+        const participants = await listReminderParticipants(
+          env.DB,
+          notification.tournament_id,
+        );
+        if (
+          notification.reminder_kind === "organizer_deadline" &&
+          participants.length === 0
+        ) {
+          await env.DB.prepare(
+            `UPDATE notification_deliveries
+             SET status = 'skipped', error_message = ?, next_attempt_at = NULL,
+               lease_until = NULL
+             WHERE notification_id = ?`,
+          )
+            .bind(
+              "参加希望者がいないため主催者締切リマインダーを送信しませんでした。",
+              notification.notification_id,
+            )
+            .run();
+          continue;
+        }
         payload = buildDeadlineReminderMessage(
           notification,
           notification.reminder_kind,
+          participants,
         );
       } else {
         payload = buildAttendanceMessage(notification);
@@ -973,7 +1113,9 @@ export async function createTestTournamentAndNotify(
   const normalized = normalizeMemberRegistration({
     discordUserId: rawInput.createdByDiscordUserId,
     displayName: rawInput.title || "Discord Botテスト大会",
+    displayNameKana: rawInput.title || "Discord Botテスト大会",
     grade: rawInput.grade,
+    rank: 0,
   });
   const now = new Date();
   const tournament = await createTournament(env, {

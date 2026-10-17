@@ -6,6 +6,7 @@ import {
 import { commands } from "./commands";
 import {
   formatGrade,
+  formatRank,
   normalizeMemberRegistration,
   submitMemberRegistrationRequest,
   type MemberRegistrationRequestResult,
@@ -127,6 +128,16 @@ function getStringOption(
     (candidate) => candidate.name === optionName,
   );
   return typeof option?.value === "string" ? option.value : "";
+}
+
+function getIntegerOption(
+  interaction: DiscordInteraction,
+  optionName: string,
+): number {
+  const option = interaction.data?.options?.find(
+    (candidate) => candidate.name === optionName,
+  );
+  return typeof option?.value === "number" ? option.value : Number.NaN;
 }
 
 function canManageGuild(interaction: DiscordInteraction): boolean {
@@ -259,16 +270,18 @@ export async function handleRequest(
         discordUserId:
           interaction.member?.user?.id ?? interaction.user?.id ?? "",
         displayName: getStringOption(interaction, "name"),
+        displayNameKana: getStringOption(interaction, "name-kana"),
         grade: getStringOption(interaction, "grade"),
+        rank: getIntegerOption(interaction, "rank"),
       });
 
       if (registration.requestType === "update") {
         return ephemeralMessage(
-          `登録内容変更の申請を受け付けました。\n現在: ${registration.currentDisplayName}・${formatGrade(registration.currentGrade ?? "")}\n申請内容: ${registration.displayName}・${formatGrade(registration.grade)}\n管理者の承認後に反映されます。`,
+          `登録内容変更の申請を受け付けました。\n現在: ${registration.currentDisplayName}（${registration.currentDisplayNameKana || "よみがな未登録"}）・${formatGrade(registration.currentGrade ?? "")}・${formatRank(registration.currentRank ?? 0)}\n申請内容: ${registration.displayName}（${registration.displayNameKana}）・${formatGrade(registration.grade)}・${formatRank(registration.rank)}\n管理者の承認後に反映されます。`,
         );
       }
       return ephemeralMessage(
-        `メンバー登録の申請を受け付けました。\n氏名: ${registration.displayName}\n出場級: ${formatGrade(registration.grade)}\n管理者の承認後に有効になります。`,
+        `メンバー登録の申請を受け付けました。\n氏名: ${registration.displayName}\nよみがな: ${registration.displayNameKana}\n出場級: ${formatGrade(registration.grade)}\n段位: ${formatRank(registration.rank)}\n管理者の承認後に有効になります。`,
       );
     } catch (error: unknown) {
       console.error("メンバー登録申請エラー", error);
@@ -383,7 +396,10 @@ export async function handleRequest(
         discordUserId: creatorId,
         displayName:
           getStringOption(interaction, "title") || "Discord Botテスト大会",
+        displayNameKana:
+          getStringOption(interaction, "title") || "Discord Botテスト大会",
         grade: getStringOption(interaction, "grade"),
+        rank: 0,
       });
 
       executionContext.waitUntil(
