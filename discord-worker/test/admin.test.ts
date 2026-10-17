@@ -88,10 +88,25 @@ describe("Admin Worker", () => {
     expect(html).toContain('<option value="deadline_asc">締切日が近い順</option>');
     expect(html).toContain('id="tournament-status-filter"');
     expect(html).toContain("responseLabels[response] + '(' + people.length + '人)'");
-    expect(html).toContain("groupTournaments(filtered)");
+    expect(html).toContain("groupTournaments(loadedTournaments)");
     expect(html).toContain("person.display_name_kana || 'よみがな未登録'");
     expect(html).not.toContain("回答者の内訳");
     expect(html).not.toContain('class="stats"');
+  });
+
+  it("shows tournament editing and grouped application-completion controls", async () => {
+    const response = await handleAdminRequest(
+      new Request("https://admin.example.com/tournaments"),
+      env,
+      authenticatedContext(),
+    );
+
+    const html = await response.text();
+    expect(html).toContain('id="edit-tournament-dialog"');
+    expect(html).toContain("大会情報を編集");
+    expect(html).toContain("申込完了にする");
+    expect(html).toContain("tournamentIds: tournaments.map");
+    expect(html).toContain("開催級はこの画面では変更できません");
   });
 
   it("uses 23:59 as the default organizer deadline time", async () => {
@@ -446,6 +461,110 @@ describe("Admin Worker", () => {
       "closed",
       "admin@example.com",
     );
+  });
+
+  it("completes every grade in a tournament group in one request", async () => {
+    const statusesUpdater = vi.fn().mockResolvedValue({
+      tournamentIds: [
+        "T-11111111-1111-4111-8111-111111111111",
+        "T-22222222-2222-4222-8222-222222222222",
+      ],
+      status: "applied",
+      changedCount: 2,
+      completionNotificationQueued: true,
+    });
+    const response = await handleAdminRequest(
+      new Request("https://admin.example.com/api/tournaments/status", {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Origin: "https://admin.example.com",
+        },
+        body: JSON.stringify({
+          tournamentIds: [
+            "T-11111111-1111-4111-8111-111111111111",
+            "T-22222222-2222-4222-8222-222222222222",
+          ],
+          status: "applied",
+        }),
+      }),
+      env,
+      authenticatedContext(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      statusesUpdater,
+    );
+
+    expect(response.status).toBe(200);
+    expect(statusesUpdater).toHaveBeenCalledWith(
+      env,
+      [
+        "T-11111111-1111-4111-8111-111111111111",
+        "T-22222222-2222-4222-8222-222222222222",
+      ],
+      "applied",
+      "admin@example.com",
+    );
+    await expect(response.json()).resolves.toMatchObject({
+      changedCount: 2,
+      message: expect.stringContaining("告知チャンネル"),
+    });
+  });
+
+  it("edits tournament information without changing its grade or ID", async () => {
+    const tournamentEditor = vi.fn().mockResolvedValue({
+      tournaments: [{ tournament_id: "T-11111111-1111-4111-8111-111111111111" }],
+      notificationsQueued: 2,
+    });
+    const body = {
+      tournamentIds: ["T-11111111-1111-4111-8111-111111111111"],
+      title: "修正版大会",
+      eventStartDate: "2026-11-02",
+      tournamentType: "official",
+      internalDeadline: "2026-10-26T14:59:00.000Z",
+      trueDeadline: "2026-10-29T14:59:00.000Z",
+      venue: "さいたま会館",
+      documentUrl: "https://example.com/revised.pdf",
+    };
+    const response = await handleAdminRequest(
+      new Request("https://admin.example.com/api/tournaments", {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Origin: "https://admin.example.com",
+        },
+        body: JSON.stringify(body),
+      }),
+      env,
+      authenticatedContext(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      tournamentEditor,
+    );
+
+    expect(response.status).toBe(200);
+    expect(tournamentEditor).toHaveBeenCalledWith(
+      env,
+      body.tournamentIds,
+      expect.objectContaining({ title: "修正版大会" }),
+      "admin@example.com",
+    );
+    await expect(response.json()).resolves.toMatchObject({
+      message: expect.stringContaining("更新通知を予約"),
+    });
   });
 
   it("rejects an unsupported tournament status", async () => {

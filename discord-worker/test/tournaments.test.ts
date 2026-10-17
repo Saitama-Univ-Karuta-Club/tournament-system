@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  buildApplicationCompletedMessage,
   buildAttendanceMessage,
   buildDeadlineReminderMessage,
   buildDeadlineReminderTargets,
@@ -80,6 +81,13 @@ describe("attendance DM", () => {
     const message = buildAttendanceMessage({ ...tournament, all_grades: 1 });
 
     expect(message.embeds?.[0]?.fields?.[0]?.value).toBe("すべて");
+  });
+
+  it("labels tournament update DMs and keeps the current response", () => {
+    const message = buildAttendanceMessage(tournament, "yes", true);
+
+    expect(message.content).toContain("大会情報更新");
+    expect(message.content).toContain("現在の回答: **参加希望**");
   });
 });
 
@@ -187,6 +195,38 @@ describe("notification queue", () => {
     expect([1, 2, 3, 4, 5].map(getRetryDelayMinutes)).toEqual([
       1, 5, 15, 60, 60,
     ]);
+  });
+
+  it("uses revision-scoped idempotency keys for update notifications", () => {
+    const [announcement, directMessage] = buildNotificationTargets(
+      tournament,
+      "channel-1",
+      [{ member_id: "M-1", discord_user_id: "discord-1" }],
+      { context: "update", revision: "revision-1" },
+    );
+
+    expect(announcement.idempotencyKey).toContain("announcement:update:revision-1");
+    expect(directMessage.idempotencyKey).toContain("invitation_dm:update:revision-1");
+    expect(directMessage.deliveryContext).toBe("update");
+  });
+
+  it("builds one application-completed message for multiple grades", () => {
+    const message = buildApplicationCompletedMessage(
+      [
+        { ...tournament, tournament_id: "T-b", grade: "B" },
+        { ...tournament, tournament_id: "T-c", grade: "C" },
+      ],
+      [
+        { displayName: "石田洋音", displayNameKana: "いしだひろね", grade: "C" },
+        { displayName: "山田花子", displayNameKana: "やまだはなこ", grade: "B" },
+      ],
+    );
+
+    expect(message.content).toContain("申込完了");
+    expect(message.embeds?.[0]?.fields?.[0]?.value).toBe("B級・C級");
+    expect(message.embeds?.[0]?.fields?.[2]?.value).toContain("B級 山田花子");
+    expect(message.embeds?.[0]?.fields?.[2]?.value).toContain("C級 石田洋音");
+    expect(message.components).toBeUndefined();
   });
 
   it("サークル内締切の翌日0時に集計リマインダーをキューに入れる", () => {

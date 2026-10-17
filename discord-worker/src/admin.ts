@@ -1,5 +1,7 @@
 import {
   createTournaments,
+  enqueueApplicationCompletedNotification,
+  enqueueTournamentUpdateNotifications,
   normalizeTournamentGrades,
   normalizeTournamentInput,
   type TournamentEnv,
@@ -33,6 +35,18 @@ type TournamentStatusUpdater = (
   status: string,
   changedByEmail: string,
 ) => Promise<TournamentStatusUpdate>;
+type TournamentStatusesUpdater = (
+  env: AdminEnv,
+  tournamentIds: string[],
+  status: string,
+  changedByEmail: string,
+) => Promise<TournamentStatusBatchUpdate>;
+type TournamentEditor = (
+  env: AdminEnv,
+  tournamentIds: string[],
+  input: TournamentEditInput,
+  changedByEmail: string,
+) => Promise<TournamentEditResult>;
 type MemberLister = (env: AdminEnv) => Promise<AdminMember[]>;
 type MemberUpdater = (
   env: AdminEnv,
@@ -87,6 +101,28 @@ export interface TournamentStatusUpdate {
   changed: boolean;
 }
 
+export interface TournamentStatusBatchUpdate {
+  tournamentIds: string[];
+  status: string;
+  changedCount: number;
+  completionNotificationQueued: boolean;
+}
+
+export interface TournamentEditInput {
+  title: string;
+  eventStartDate: string;
+  tournamentType: string;
+  venue?: string;
+  trueDeadline: string;
+  internalDeadline: string;
+  documentUrl?: string;
+}
+
+export interface TournamentEditResult {
+  tournaments: TournamentRow[];
+  notificationsQueued: number;
+}
+
 class AdminRequestError extends Error {
   constructor(message: string, readonly status: number) {
     super(message);
@@ -100,6 +136,83 @@ const MANAGEABLE_STATUSES = new Set([
   "closed",
   "canceled",
 ]);
+
+interface EditableTournamentRow extends TournamentRow {
+  status: string;
+}
+
+function normalizeTournamentIds(rawIds: string[]): string[] {
+  const tournamentIds = [...new Set(rawIds)];
+  if (
+    tournamentIds.length === 0 ||
+    tournamentIds.length > 7 ||
+    tournamentIds.some((id) => !/^T-[0-9a-f-]{36}$/.test(id))
+  ) {
+    throw new AdminRequestError("大会IDが不正です。", 400);
+  }
+  return tournamentIds;
+}
+
+async function loadEditableTournaments(
+  env: AdminEnv,
+  rawIds: string[],
+  requireCompleteGroup = false,
+): Promise<EditableTournamentRow[]> {
+  const tournamentIds = normalizeTournamentIds(rawIds);
+  const placeholders = tournamentIds.map(() => "?").join(", ");
+  const rows = await env.DB.prepare(
+    `SELECT
+      tournament_id,
+      registration_group_id,
+      title,
+      event_start_date,
+      event_end_date,
+      grade,
+      all_grades,
+      tournament_type,
+      venue,
+      true_deadline,
+      internal_deadline,
+      document_url,
+      status
+     FROM tournaments
+     WHERE tournament_id IN (${placeholders})
+       AND status <> 'deleted'
+     ORDER BY grade`,
+  ).bind(...tournamentIds).all<EditableTournamentRow>();
+  if (rows.results.length !== tournamentIds.length) {
+    throw new AdminRequestError("対象の大会が見つかりません。", 404);
+  }
+  if (requireCompleteGroup && rows.results.length > 1) {
+    const groupId = rows.results[0].registration_group_id;
+    if (
+      !groupId ||
+      rows.results.some((tournament) => tournament.registration_group_id !== groupId)
+    ) {
+      throw new AdminRequestError("同時登録された大会だけを一括変更できます。", 400);
+    }
+    const groupCount = await env.DB.prepare(
+      `SELECT COUNT(*) AS count
+       FROM tournaments
+       WHERE registration_group_id = ? AND status <> 'deleted'`,
+    ).bind(groupId).first<{ count: number }>();
+    if (Number(groupCount?.count ?? 0) !== rows.results.length) {
+      throw new AdminRequestError("大会グループの一部が選択されていません。", 400);
+    }
+  }
+  return rows.results;
+}
+
+async function editFingerprint(input: TournamentEditInput): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(JSON.stringify(input)),
+  );
+  return Array.from(new Uint8Array(digest))
+    .slice(0, 12)
+    .map((value) => value.toString(16).padStart(2, "0"))
+    .join("");
+}
 
 export async function listAdminTournaments(
   env: AdminEnv,
@@ -236,52 +349,197 @@ export async function updateTournamentStatus(
   status: string,
   changedByEmail: string,
 ): Promise<TournamentStatusUpdate> {
-  if (!/^T-[0-9a-f-]{36}$/.test(tournamentId)) {
-    throw new AdminRequestError("大会IDが不正です。", 400);
-  }
-  if (!MANAGEABLE_STATUSES.has(status)) {
-    throw new AdminRequestError("変更先のステータスが不正です。", 400);
-  }
-
-  const existing = await env.DB.prepare(
-    `SELECT status FROM tournaments
-     WHERE tournament_id = ? AND status <> 'deleted'`,
-  )
-    .bind(tournamentId)
-    .first<{ status: string }>();
-  if (!existing) {
-    throw new AdminRequestError("対象の大会が見つかりません。", 404);
-  }
-  if (existing.status === status) {
-    return {
-      tournamentId,
-      previousStatus: existing.status,
-      status,
-      changed: false,
-    };
-  }
-
-  const now = new Date().toISOString();
-  await env.DB.batch([
-    env.DB.prepare(
-      `UPDATE tournaments
-       SET status = ?, updated_at = ?,
-         applied_at = CASE WHEN ? = 'applied' THEN ? ELSE applied_at END
-       WHERE tournament_id = ? AND status = ?`,
-    ).bind(status, now, status, now, tournamentId, existing.status),
-    env.DB.prepare(
-      `INSERT INTO tournament_status_history (
-        tournament_id, previous_status, new_status, changed_by_email, changed_at
-      ) VALUES (?, ?, ?, ?, ?)`,
-    ).bind(tournamentId, existing.status, status, changedByEmail, now),
-  ]);
+  const [existing] = await loadEditableTournaments(env, [tournamentId]);
+  const result = await updateTournamentStatuses(
+    env,
+    [tournamentId],
+    status,
+    changedByEmail,
+  );
 
   return {
     tournamentId,
     previousStatus: existing.status,
     status,
-    changed: true,
+    changed: result.changedCount > 0,
   };
+}
+
+export async function updateTournamentStatuses(
+  env: AdminEnv,
+  rawTournamentIds: string[],
+  status: string,
+  changedByEmail: string,
+): Promise<TournamentStatusBatchUpdate> {
+  if (!MANAGEABLE_STATUSES.has(status)) {
+    throw new AdminRequestError("変更先のステータスが不正です。", 400);
+  }
+  const tournaments = await loadEditableTournaments(
+    env,
+    rawTournamentIds,
+    rawTournamentIds.length > 1,
+  );
+  const changed = tournaments.filter((tournament) => tournament.status !== status);
+  if (changed.length > 0) {
+    const now = new Date().toISOString();
+    await env.DB.batch(
+      changed.flatMap((tournament) => [
+        env.DB.prepare(
+          `UPDATE tournaments
+           SET status = ?, updated_at = ?,
+             applied_at = CASE WHEN ? = 'applied' THEN ? ELSE applied_at END
+           WHERE tournament_id = ? AND status = ?`,
+        ).bind(
+          status,
+          now,
+          status,
+          now,
+          tournament.tournament_id,
+          tournament.status,
+        ),
+        env.DB.prepare(
+          `INSERT INTO tournament_status_history (
+            tournament_id, previous_status, new_status, changed_by_email, changed_at
+          ) VALUES (?, ?, ?, ?, ?)`,
+        ).bind(
+          tournament.tournament_id,
+          tournament.status,
+          status,
+          changedByEmail,
+          now,
+        ),
+      ]),
+    );
+  }
+
+  let completionNotificationQueued = false;
+  if (status === "applied") {
+    const completed = tournaments.map((tournament) => ({
+      ...tournament,
+      status: "applied",
+    }));
+    const queued = await enqueueApplicationCompletedNotification(env, completed);
+    completionNotificationQueued = queued > 0;
+  }
+  return {
+    tournamentIds: tournaments.map((tournament) => tournament.tournament_id),
+    status,
+    changedCount: changed.length,
+    completionNotificationQueued,
+  };
+}
+
+export async function editTournaments(
+  env: AdminEnv,
+  rawTournamentIds: string[],
+  rawInput: TournamentEditInput,
+  changedByEmail: string,
+): Promise<TournamentEditResult> {
+  const tournaments = await loadEditableTournaments(
+    env,
+    rawTournamentIds,
+    rawTournamentIds.length > 1,
+  );
+  const normalized = normalizeTournamentInput({
+    ...rawInput,
+    eventEndDate: rawInput.eventStartDate,
+    grade: tournaments[0].all_grades === 1 ? "all" : tournaments[0].grade,
+    createdByEmail: changedByEmail,
+  });
+  const editableData = {
+    title: normalized.title,
+    eventStartDate: normalized.eventStartDate,
+    tournamentType: normalized.tournamentType,
+    venue: normalized.venue || "",
+    trueDeadline: normalized.trueDeadline,
+    internalDeadline: normalized.internalDeadline,
+    documentUrl: normalized.documentUrl || "",
+  };
+  const changed = tournaments.filter((tournament) =>
+    tournament.title !== editableData.title ||
+    tournament.event_start_date !== editableData.eventStartDate ||
+    tournament.event_end_date !== editableData.eventStartDate ||
+    tournament.tournament_type !== editableData.tournamentType ||
+    (tournament.venue ?? "") !== editableData.venue ||
+    tournament.true_deadline !== editableData.trueDeadline ||
+    tournament.internal_deadline !== editableData.internalDeadline ||
+    (tournament.document_url ?? "") !== editableData.documentUrl
+  );
+  if (changed.length === 0) {
+    return { tournaments, notificationsQueued: 0 };
+  }
+
+  const now = new Date().toISOString();
+  await env.DB.batch(
+    changed.flatMap((tournament) => {
+      const previousData = {
+        title: tournament.title,
+        eventStartDate: tournament.event_start_date,
+        tournamentType: tournament.tournament_type,
+        venue: tournament.venue ?? "",
+        trueDeadline: tournament.true_deadline,
+        internalDeadline: tournament.internal_deadline,
+        documentUrl: tournament.document_url ?? "",
+      };
+      return [
+        env.DB.prepare(
+          `UPDATE tournaments
+           SET title = ?, event_start_date = ?, event_end_date = ?,
+             tournament_type = ?, is_official = ?, venue = ?,
+             true_deadline = ?, internal_deadline = ?, document_url = ?,
+             updated_at = ?
+           WHERE tournament_id = ? AND status <> 'deleted'`,
+        ).bind(
+          editableData.title,
+          editableData.eventStartDate,
+          editableData.eventStartDate,
+          editableData.tournamentType,
+          editableData.tournamentType === "official" ? 1 : 0,
+          editableData.venue || null,
+          editableData.trueDeadline,
+          editableData.internalDeadline,
+          editableData.documentUrl || null,
+          now,
+          tournament.tournament_id,
+        ),
+        env.DB.prepare(
+          `INSERT INTO tournament_change_history (
+            tournament_id, previous_data, new_data, changed_by_email, changed_at
+          ) VALUES (?, ?, ?, ?, ?)`,
+        ).bind(
+          tournament.tournament_id,
+          JSON.stringify(previousData),
+          JSON.stringify(editableData),
+          changedByEmail,
+          now,
+        ),
+      ];
+    }),
+  );
+
+  const updated = tournaments.map((tournament) => ({
+    ...tournament,
+    title: editableData.title,
+    event_start_date: editableData.eventStartDate,
+    event_end_date: editableData.eventStartDate,
+    tournament_type: editableData.tournamentType,
+    venue: editableData.venue || null,
+    true_deadline: editableData.trueDeadline,
+    internal_deadline: editableData.internalDeadline,
+    document_url: editableData.documentUrl || null,
+  }));
+  const revision = await editFingerprint(editableData);
+  let notificationsQueued = 0;
+  for (const tournament of updated) {
+    if (tournament.status === "active") {
+      notificationsQueued += await enqueueTournamentUpdateNotifications(
+        env,
+        tournament,
+        revision,
+      );
+    }
+  }
+  return { tournaments: updated, notificationsQueued };
 }
 
 const securityHeaders = {
@@ -374,6 +632,9 @@ function adminHtml(page: AdminPage): string {
     #list-status { color: #697386; margin-bottom: 12px; }
     #tournament-list { display: grid; gap: 14px; }
     .tournament-card { border: 1px solid #dce1eb; border-radius: 10px; padding: 18px; }
+    .card-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 10px 0 4px; }
+    button.success { background: #18794e; }
+    button.success:hover { background: #12633f; }
     .meta { color: #596579; margin: 8px 0 14px; font-size: .88rem; line-height: 1.6; }
     .badge { display: inline-flex; align-items: center; border-radius: 999px; padding: 5px 10px; font-size: .78rem; font-weight: 750; white-space: nowrap; }
     .badge.active { color: #17643a; background: #e4f7ec; }
@@ -415,6 +676,13 @@ function adminHtml(page: AdminPage): string {
     button.danger { color: #a12822; background: #fdecea; }
     button.danger:hover { background: #f9d9d5; }
     .empty { color: #697386; text-align: center; padding: 30px 10px; }
+    dialog { width: min(680px, calc(100vw - 32px)); max-height: calc(100vh - 40px); overflow: auto; border: 0; border-radius: 14px; padding: 0; box-shadow: 0 22px 70px #17203355; }
+    dialog::backdrop { background: #17203388; }
+    .dialog-form { padding: 24px; }
+    .dialog-form h2 { margin-bottom: 8px; }
+    .dialog-note { margin: 0 0 18px; color: #697386; font-size: .84rem; }
+    .dialog-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; margin-top: 22px; flex-wrap: wrap; }
+    .dialog-actions .status-message { margin-right: auto; }
     @media (max-width: 680px) { .grid, .response-sections, .member-grid, .request-comparison { grid-template-columns: 1fr; } .request-arrow { transform: rotate(90deg); text-align: center; } .wide { grid-column: auto; } .panel { padding: 18px; } .header-inner { display: block; } #identity { display: block; margin-top: 6px; } .tabs { padding: 0 8px; } .tab { padding-inline: 13px; } .card-heading { align-items: flex-start; } .list-controls { align-items: stretch; } .list-controls label { flex: 1 1 100%; } }
   </style>
 </head>
@@ -471,6 +739,22 @@ function adminHtml(page: AdminPage): string {
       <div class="footnote">Discord IDそのものは管理画面に表示しません。氏名・よみがな・出場級・段位・在籍状態・DM送信設定の変更履歴は管理者メールとともに保存されます。</div>
     </section>
   </main>
+  <dialog id="edit-tournament-dialog">
+    <form id="edit-tournament-form" class="dialog-form">
+      <h2>大会情報を編集</h2>
+      <p id="edit-tournament-grade" class="dialog-note"></p>
+      <div class="grid">
+        <label class="wide">大会名<input name="title" required maxlength="100" autocomplete="off"></label>
+        <label>開催日<input type="date" name="eventStartDate" required></label>
+        <label>大会種別<select name="tournamentType" required><option value="official">公認大会</option><option value="support">後援大会</option><option value="event">その他イベント</option></select></label>
+        <label>主催締切日<input type="datetime-local" name="trueDeadline" required></label>
+        <label>サークル内締切日<input type="datetime-local" name="internalDeadline" required></label>
+        <label class="wide">会場 <span class="optional">任意</span><input name="venue" maxlength="200" autocomplete="off"></label>
+        <label class="wide">大会要項 <span class="optional">任意・URLを入力</span><input type="url" name="documentUrl" maxlength="500" placeholder="https://..."></label>
+      </div>
+      <div class="dialog-actions"><span id="edit-tournament-result" class="status-message" role="status" aria-live="polite"></span><button id="cancel-tournament-edit" type="button" class="secondary">キャンセル</button><button id="save-tournament-edit" type="submit">変更を保存</button></div>
+    </form>
+  </dialog>
   <script>
     const currentPage = document.body.dataset.page;
     const form = document.querySelector('#tournament-form');
@@ -482,6 +766,12 @@ function adminHtml(page: AdminPage): string {
     const refreshList = document.querySelector('#refresh-list');
     const tournamentSort = document.querySelector('#tournament-sort');
     const tournamentStatusFilter = document.querySelector('#tournament-status-filter');
+    const editTournamentDialog = document.querySelector('#edit-tournament-dialog');
+    const editTournamentForm = document.querySelector('#edit-tournament-form');
+    const editTournamentGrade = document.querySelector('#edit-tournament-grade');
+    const editTournamentResult = document.querySelector('#edit-tournament-result');
+    const saveTournamentEdit = document.querySelector('#save-tournament-edit');
+    const cancelTournamentEdit = document.querySelector('#cancel-tournament-edit');
     const memberList = document.querySelector('#member-list');
     const memberStatus = document.querySelector('#member-status');
     const refreshMembers = document.querySelector('#refresh-members');
@@ -502,6 +792,7 @@ function adminHtml(page: AdminPage): string {
       pending: '未回答',
     };
     let loadedTournaments = [];
+    let editingTournaments = [];
     const memberStatusLabels = {
       active: '有効',
       inactive: '無効',
@@ -554,6 +845,15 @@ function adminHtml(page: AdminPage): string {
       }).format(new Date(value));
     }
 
+    function dateTimeInputValue(value) {
+      const parts = new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+      }).formatToParts(new Date(value));
+      const get = (type) => parts.find((part) => part.type === type).value;
+      return get('year') + '-' + get('month') + '-' + get('day') + 'T' + get('hour') + ':' + get('minute');
+    }
+
     const gradeOrder = new Map(['A', 'B', 'C', 'D', 'E', 'F', 'beginner'].map((grade, index) => [grade, index]));
 
     function tournamentFallbackGroupKey(tournament) {
@@ -584,6 +884,22 @@ function adminHtml(page: AdminPage): string {
       return Array.from(groups.values()).map((group) => group.sort((left, right) => {
         return (gradeOrder.get(left.grade) ?? 99) - (gradeOrder.get(right.grade) ?? 99);
       }));
+    }
+
+    function openTournamentEditor(tournaments) {
+      const tournament = tournaments[0];
+      editingTournaments = tournaments;
+      editTournamentGrade.textContent = '開催級：' + tournaments.map(tournamentGradeLabel).join('・') + '（開催級はこの画面では変更できません）';
+      editTournamentForm.elements.title.value = tournament.title;
+      editTournamentForm.elements.eventStartDate.value = tournament.event_start_date;
+      editTournamentForm.elements.tournamentType.value = tournament.tournament_type;
+      editTournamentForm.elements.trueDeadline.value = dateTimeInputValue(tournament.true_deadline);
+      editTournamentForm.elements.internalDeadline.value = dateTimeInputValue(tournament.internal_deadline);
+      editTournamentForm.elements.venue.value = tournament.venue || '';
+      editTournamentForm.elements.documentUrl.value = tournament.document_url || '';
+      editTournamentResult.className = 'status-message';
+      editTournamentResult.textContent = '';
+      editTournamentDialog.showModal();
     }
 
     function responseSection(tournaments, response) {
@@ -686,6 +1002,39 @@ function adminHtml(page: AdminPage): string {
         link.rel = 'noopener noreferrer';
         meta.append(document.createTextNode(' ／ '), link);
       }
+
+      const cardActions = element('div', 'card-actions');
+      const editButton = element('button', 'secondary', '大会情報を編集');
+      editButton.type = 'button';
+      editButton.addEventListener('click', () => openTournamentEditor(tournaments));
+      const completeButton = element('button', 'success', tournaments.every((item) => item.status === 'applied') ? '申込完了済み' : '申込完了にする');
+      completeButton.type = 'button';
+      completeButton.disabled = tournaments.every((item) => item.status === 'applied');
+      completeButton.addEventListener('click', async () => {
+        const grades = tournaments.map(tournamentGradeLabel).join('・');
+        if (!confirm(tournament.title + '（' + grades + '）を申込完了にして、告知チャンネルへ通知しますか？')) return;
+        completeButton.disabled = true;
+        completeButton.textContent = '変更中…';
+        try {
+          const response = await fetch('/api/tournaments/status', {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              tournamentIds: tournaments.map((item) => item.tournament_id),
+              status: 'applied',
+            }),
+          });
+          const body = await response.json();
+          if (!response.ok) throw new Error(body.error || '申込完了に変更できませんでした。');
+          await loadTournaments();
+        } catch (error) {
+          alert(error instanceof Error ? error.message : '申込完了に変更できませんでした。');
+          completeButton.disabled = false;
+          completeButton.textContent = '申込完了にする';
+        }
+      });
+      cardActions.append(editButton, completeButton);
+      card.append(cardActions);
 
       const responseSections = element('div', 'response-sections');
       responseSections.append(
@@ -885,10 +1234,11 @@ function adminHtml(page: AdminPage): string {
 
     function renderTournamentList() {
       const status = tournamentStatusFilter.value;
-      const filtered = status === 'all'
-        ? loadedTournaments
-        : loadedTournaments.filter((tournament) => tournament.status === status);
-      const groups = groupTournaments(filtered);
+      const allGroups = groupTournaments(loadedTournaments);
+      const groups = status === 'all'
+        ? allGroups
+        : allGroups.filter((group) => group.some((tournament) => tournament.status === status));
+      const visibleTournamentCount = groups.reduce((total, group) => total + group.length, 0);
       const sort = tournamentSort.value;
       groups.sort((left, right) => {
         const difference = groupSortValue(left, sort) - groupSortValue(right, sort);
@@ -901,9 +1251,9 @@ function adminHtml(page: AdminPage): string {
       } else {
         groups.forEach((group) => tournamentList.append(renderTournament(group)));
       }
-      const groupDescription = groups.length === filtered.length
-        ? filtered.length + '件の大会'
-        : filtered.length + '件の開催級を' + groups.length + '大会にまとめて表示';
+      const groupDescription = groups.length === visibleTournamentCount
+        ? visibleTournamentCount + '件の大会'
+        : visibleTournamentCount + '件の開催級を' + groups.length + '大会にまとめて表示';
       listStatus.textContent = groupDescription;
     }
 
@@ -1051,6 +1401,36 @@ function adminHtml(page: AdminPage): string {
         submit.disabled = false;
       }
     });
+    cancelTournamentEdit.addEventListener('click', () => editTournamentDialog.close());
+    editTournamentForm.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      if (!editingTournaments.length) return;
+      saveTournamentEdit.disabled = true;
+      editTournamentResult.className = 'status-message';
+      editTournamentResult.textContent = '保存中…';
+      try {
+        const payload = Object.fromEntries(new FormData(editTournamentForm).entries());
+        payload.tournamentIds = editingTournaments.map((tournament) => tournament.tournament_id);
+        payload.internalDeadline = localJstToIso(payload.internalDeadline);
+        payload.trueDeadline = localJstToIso(payload.trueDeadline);
+        const response = await fetch('/api/tournaments', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.error || '大会情報を変更できませんでした。');
+        editTournamentResult.className = 'status-message';
+        editTournamentResult.textContent = body.message || '変更しました。';
+        await loadTournaments();
+        editTournamentDialog.close();
+      } catch (error) {
+        editTournamentResult.className = 'status-message error';
+        editTournamentResult.textContent = error instanceof Error ? error.message : '大会情報を変更できませんでした。';
+      } finally {
+        saveTournamentEdit.disabled = false;
+      }
+    });
     if (currentPage === 'tournaments') {
       refreshList.addEventListener('click', loadTournaments);
       tournamentSort.addEventListener('change', renderTournamentList);
@@ -1078,6 +1458,8 @@ export async function handleAdminRequest(
   memberRegistrationLister: MemberRegistrationLister = listPendingMemberRegistrations,
   memberRegistrationDecider: MemberRegistrationDecider = decideMemberRegistration,
   memberRegistrationCounter: MemberRegistrationCounter = countPendingMemberRegistrations,
+  statusesUpdater: TournamentStatusesUpdater = updateTournamentStatuses,
+  tournamentEditor: TournamentEditor = editTournaments,
 ): Promise<Response> {
   if (!ctx.access) {
     return json({ error: "Cloudflare Accessによる認証が必要です。" }, 403);
@@ -1255,6 +1637,84 @@ export async function handleAdminRequest(
     } catch (error: unknown) {
       console.error("Web管理画面からの大会登録エラー", error);
       return json({ error: "大会の保存に失敗しました。" }, 500);
+    }
+  }
+
+  if (request.method === "PATCH" && url.pathname === "/api/tournaments") {
+    if (!isSameOrigin(request)) {
+      return json({ error: "不正な送信元です。" }, 403);
+    }
+    if (!request.headers.get("Content-Type")?.toLowerCase().startsWith("application/json")) {
+      return json({ error: "JSON形式で送信してください。" }, 415);
+    }
+    try {
+      const body = (await request.json()) as TournamentEditInput & {
+        tournamentIds?: unknown;
+      };
+      if (!Array.isArray(body.tournamentIds)) {
+        throw new AdminRequestError("大会IDを指定してください。", 400);
+      }
+      const result = await tournamentEditor(
+        env,
+        body.tournamentIds.map(String),
+        body,
+        email,
+      );
+      return json({
+        ok: true,
+        ...result,
+        message:
+          result.notificationsQueued > 0
+            ? "大会情報を更新し、Discordへの更新通知を予約しました。"
+            : "大会情報を更新しました。",
+      });
+    } catch (error: unknown) {
+      if (error instanceof AdminRequestError) {
+        return json({ error: error.message }, error.status);
+      }
+      if (error instanceof Error && !error.message.includes("D1_")) {
+        return json({ error: error.message }, 400);
+      }
+      console.error("大会情報の編集エラー", error);
+      return json({ error: "大会情報を変更できませんでした。" }, 500);
+    }
+  }
+
+  if (request.method === "PATCH" && url.pathname === "/api/tournaments/status") {
+    if (!isSameOrigin(request)) {
+      return json({ error: "不正な送信元です。" }, 403);
+    }
+    if (!request.headers.get("Content-Type")?.toLowerCase().startsWith("application/json")) {
+      return json({ error: "JSON形式で送信してください。" }, 415);
+    }
+    try {
+      const body = (await request.json()) as {
+        tournamentIds?: unknown;
+        status?: unknown;
+      };
+      if (!Array.isArray(body.tournamentIds)) {
+        throw new AdminRequestError("大会IDを指定してください。", 400);
+      }
+      const status = typeof body.status === "string" ? body.status : "";
+      const result = await statusesUpdater(
+        env,
+        body.tournamentIds.map(String),
+        status,
+        email,
+      );
+      return json({
+        ...result,
+        message:
+          status === "applied"
+            ? "申込完了へ変更し、告知チャンネルへの通知を予約しました。"
+            : `${result.changedCount}件のステータスを変更しました。`,
+      });
+    } catch (error: unknown) {
+      if (error instanceof AdminRequestError) {
+        return json({ error: error.message }, error.status);
+      }
+      console.error("大会ステータス一括変更エラー", error);
+      return json({ error: "ステータスを変更できませんでした。" }, 500);
     }
   }
 

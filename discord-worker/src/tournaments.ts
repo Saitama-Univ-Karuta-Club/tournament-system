@@ -61,10 +61,16 @@ export interface NotificationTarget {
   idempotencyKey: string;
   tournamentId: string;
   memberId?: string;
-  notificationType: "announcement" | "invitation_dm" | "deadline_reminder";
+  notificationType:
+    | "announcement"
+    | "invitation_dm"
+    | "deadline_reminder"
+    | "application_completed";
   destinationType: "channel" | "dm";
   destinationId: string;
   reminderKind?: ReminderKind;
+  deliveryContext?: "initial" | "update" | "completion";
+  relatedTournamentIds?: string[];
 }
 
 export type ReminderKind = "internal_deadline" | "organizer_deadline";
@@ -76,11 +82,18 @@ export interface TestReminderResult {
 
 interface QueuedNotificationRow extends TournamentRow {
   notification_id: number;
-  notification_type: "announcement" | "invitation_dm" | "deadline_reminder";
+  member_id: string | null;
+  notification_type:
+    | "announcement"
+    | "invitation_dm"
+    | "deadline_reminder"
+    | "application_completed";
   destination_id: string;
   attempt_count: number;
   tournament_status: string;
   reminder_kind: ReminderKind | null;
+  delivery_context: "initial" | "update" | "completion";
+  related_tournament_ids: string | null;
 }
 
 interface ReminderTournamentRow extends TournamentRow {
@@ -90,6 +103,10 @@ interface ReminderTournamentRow extends TournamentRow {
 export interface ReminderParticipant {
   displayName: string;
   displayNameKana: string;
+}
+
+export interface ApplicationCompletedParticipant extends ReminderParticipant {
+  grade: string;
 }
 
 interface ReminderParticipantRow {
@@ -277,6 +294,7 @@ export function formatTournamentGrade(tournament: TournamentRow): string {
 export function buildAttendanceMessage(
   tournament: TournamentRow,
   selectedResponse?: string,
+  isUpdate = false,
 ): DiscordMessagePayload {
   const selected = selectedResponse
     ? `\n現在の回答: **${RESPONSE_LABELS[selectedResponse]}**`
@@ -313,7 +331,9 @@ export function buildAttendanceMessage(
   }
 
   return {
-    content: `大会への参加意思を選択してください。${selected}`,
+    content: isUpdate
+      ? `【大会情報更新】内容が変更されました。参加意思をもう一度確認してください。${selected}`
+      : `大会への参加意思を選択してください。${selected}`,
     embeds: [
       {
         title: tournament.title,
@@ -350,7 +370,10 @@ export function buildAttendanceMessage(
   };
 }
 
-function buildAnnouncementMessage(tournament: TournamentRow): DiscordMessagePayload {
+function buildAnnouncementMessage(
+  tournament: TournamentRow,
+  isUpdate = false,
+): DiscordMessagePayload {
   const fields = [
     {
       name: "対象級",
@@ -382,12 +405,82 @@ function buildAnnouncementMessage(tournament: TournamentRow): DiscordMessagePayl
   }
 
   return {
-    content: "【大会追加】\n対象者のDMへ参加確認を送信します。",
+    content: isUpdate
+      ? "【大会情報更新】\n変更後の内容を対象者のDMへ再送します。"
+      : "【大会追加】\n対象者のDMへ参加確認を送信します。",
     embeds: [
       {
         title: tournament.title,
         color: 0x57f287,
         fields,
+      },
+    ],
+    allowed_mentions: { parse: [] },
+  };
+}
+
+export function buildApplicationCompletedMessage(
+  tournaments: TournamentRow[],
+  participants: ApplicationCompletedParticipant[],
+): DiscordMessagePayload {
+  const first = tournaments[0];
+  if (!first) {
+    throw new Error("申込完了通知の大会情報がありません。");
+  }
+  const gradeOrder = new Map(
+    ["A", "B", "C", "D", "E", "F", "beginner"].map((grade, index) => [grade, index]),
+  );
+  const grades = tournaments
+    .map((tournament) => formatTournamentGrade(tournament))
+    .join("・");
+  const sortedParticipants = [...participants].sort((left, right) => {
+    const gradeDifference =
+      (gradeOrder.get(left.grade) ?? 99) - (gradeOrder.get(right.grade) ?? 99);
+    if (gradeDifference !== 0) return gradeDifference;
+    return left.displayNameKana.localeCompare(right.displayNameKana, "ja");
+  });
+  const participantLines = sortedParticipants.map((participant) => {
+    const reading = participant.displayNameKana || "よみがな未登録";
+    return `${formatGrade(participant.grade)} ${participant.displayName}（${reading}）`;
+  });
+  const participantChunks: string[] = [];
+  let currentChunk = "";
+  for (const line of participantLines) {
+    if (currentChunk && currentChunk.length + line.length + 1 > 950) {
+      participantChunks.push(currentChunk);
+      currentChunk = line;
+    } else {
+      currentChunk += `${currentChunk ? "\n" : ""}${line}`;
+    }
+  }
+  if (currentChunk) participantChunks.push(currentChunk);
+  if (participantChunks.length === 0) participantChunks.push("なし");
+
+  return {
+    content: "【申込完了】主催者への大会申込が完了しました。",
+    embeds: [
+      {
+        title: first.title,
+        color: 0x5865f2,
+        fields: [
+          { name: "申込完了した級", value: grades, inline: true },
+          {
+            name: "開催日",
+            value:
+              first.event_start_date === first.event_end_date
+                ? first.event_start_date
+                : `${first.event_start_date}〜${first.event_end_date}`,
+            inline: true,
+          },
+          ...participantChunks.map((value, index) => ({
+            name:
+              index === 0
+                ? `参加者（${participants.length}人）`
+                : `参加者（続き${index + 1}）`,
+            value,
+            inline: false,
+          })),
+        ],
       },
     ],
     allowed_mentions: { parse: [] },
@@ -491,22 +584,29 @@ export function buildNotificationTargets(
   tournament: TournamentRow,
   announcementChannelId: string,
   members: TargetMemberRow[],
+  options: { context?: "initial" | "update"; revision?: string } = {},
 ): NotificationTarget[] {
+  const context = options.context ?? "initial";
+  const revisionPart = context === "update"
+    ? `:update:${options.revision ?? "update"}`
+    : "";
   return [
     {
-      idempotencyKey: `announcement:${tournament.tournament_id}:${announcementChannelId}`,
+      idempotencyKey: `announcement${revisionPart}:${tournament.tournament_id}:${announcementChannelId}`,
       tournamentId: tournament.tournament_id,
       notificationType: "announcement",
       destinationType: "channel",
       destinationId: announcementChannelId,
+      deliveryContext: context,
     },
     ...members.map((member) => ({
-      idempotencyKey: `invitation_dm:${tournament.tournament_id}:${member.member_id}`,
+      idempotencyKey: `invitation_dm${revisionPart}:${tournament.tournament_id}:${member.member_id}`,
       tournamentId: tournament.tournament_id,
       memberId: member.member_id,
       notificationType: "invitation_dm" as const,
       destinationType: "dm" as const,
       destinationId: member.discord_user_id,
+      deliveryContext: context,
     })),
   ];
 }
@@ -741,9 +841,11 @@ async function insertNotificationTargets(
           destination_type,
           destination_id,
           reminder_kind,
+          delivery_context,
+          related_tournament_ids,
           status,
           next_attempt_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
         ON CONFLICT(idempotency_key) DO NOTHING`,
       ).bind(
         target.idempotencyKey,
@@ -753,6 +855,10 @@ async function insertNotificationTargets(
         target.destinationType,
         target.destinationId,
         target.reminderKind ?? null,
+        target.deliveryContext ?? "initial",
+        target.relatedTournamentIds
+          ? JSON.stringify(target.relatedTournamentIds)
+          : null,
         new Date().toISOString(),
       ),
     );
@@ -888,6 +994,72 @@ export async function enqueueTournamentNotifications(
   return insertNotificationTargets(env, targets);
 }
 
+async function latestAnnouncementChannelId(
+  db: D1Database,
+): Promise<string> {
+  const settings = await db.prepare(
+    `SELECT announcement_channel_id
+     FROM discord_settings
+     WHERE announcement_channel_id IS NOT NULL
+     ORDER BY updated_at DESC
+     LIMIT 1`,
+  ).first<{ announcement_channel_id: string }>();
+  if (!settings?.announcement_channel_id) {
+    throw new Error("告知チャンネルが未設定です。");
+  }
+  return settings.announcement_channel_id;
+}
+
+export async function enqueueTournamentUpdateNotifications(
+  env: TournamentEnv,
+  tournament: TournamentRow,
+  revision: string,
+): Promise<number> {
+  const announcementChannelId = await latestAnnouncementChannelId(env.DB);
+  const members = await env.DB.prepare(
+    `SELECT member_id, discord_user_id
+     FROM members
+     WHERE status = 'active'
+       AND dm_enabled = 1
+       AND (? = 1 OR grade = ?)
+       AND discord_user_id IS NOT NULL
+     ORDER BY member_id`,
+  )
+    .bind(tournament.all_grades ?? 0, tournament.grade)
+    .all<TargetMemberRow>();
+  return insertNotificationTargets(
+    env,
+    buildNotificationTargets(
+      tournament,
+      announcementChannelId,
+      members.results,
+      { context: "update", revision },
+    ),
+  );
+}
+
+export async function enqueueApplicationCompletedNotification(
+  env: TournamentEnv,
+  tournaments: TournamentRow[],
+): Promise<number> {
+  if (tournaments.length === 0) return 0;
+  const announcementChannelId = await latestAnnouncementChannelId(env.DB);
+  const tournamentIds = tournaments
+    .map((tournament) => tournament.tournament_id)
+    .sort();
+  return insertNotificationTargets(env, [
+    {
+      idempotencyKey: `application_completed:${tournamentIds.join(":")}`,
+      tournamentId: tournamentIds[0],
+      notificationType: "application_completed",
+      destinationType: "channel",
+      destinationId: announcementChannelId,
+      deliveryContext: "completion",
+      relatedTournamentIds: tournamentIds,
+    },
+  ]);
+}
+
 export async function enqueueDeadlineReminders(
   env: TournamentEnv,
   now = new Date(),
@@ -943,6 +1115,96 @@ export async function enqueueDeadlineReminders(
   return insertNotificationTargets(env, targets);
 }
 
+function parseRelatedTournamentIds(
+  raw: string | null,
+  fallbackId: string,
+): string[] {
+  if (!raw) return [fallbackId];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (
+      Array.isArray(parsed) &&
+      parsed.length > 0 &&
+      parsed.length <= 7 &&
+      parsed.every(
+        (value) =>
+          typeof value === "string" && /^T-[0-9a-f-]{36}$/.test(value),
+      )
+    ) {
+      return [...new Set(parsed)];
+    }
+  } catch {
+    // キュー値が壊れている場合は代表大会だけで安全に処理する。
+  }
+  return [fallbackId];
+}
+
+async function applicationCompletedPayload(
+  db: D1Database,
+  notification: QueuedNotificationRow,
+): Promise<DiscordMessagePayload> {
+  const tournamentIds = parseRelatedTournamentIds(
+    notification.related_tournament_ids,
+    notification.tournament_id,
+  );
+  const placeholders = tournamentIds.map(() => "?").join(", ");
+  const tournaments = await db.prepare(
+    `SELECT
+      tournament_id,
+      registration_group_id,
+      title,
+      event_start_date,
+      event_end_date,
+      grade,
+      all_grades,
+      tournament_type,
+      venue,
+      true_deadline,
+      internal_deadline,
+      document_url
+     FROM tournaments
+     WHERE tournament_id IN (${placeholders})
+       AND status = 'applied'
+     ORDER BY grade`,
+  ).bind(...tournamentIds).all<TournamentRow>();
+  if (tournaments.results.length === 0) {
+    throw new Error("申込完了状態の大会がありません。");
+  }
+  const participants = await db.prepare(
+    `SELECT
+      members.display_name,
+      COALESCE(
+        NULLIF(members.display_name_kana, ''),
+        NULLIF(TRIM(members.last_name_kana || ' ' || members.first_name_kana), ''),
+        ''
+      ) AS display_name_kana,
+      CASE WHEN tournaments.all_grades = 1
+        THEN members.grade
+        ELSE tournaments.grade
+      END AS grade
+     FROM responses
+     INNER JOIN members ON members.member_id = responses.member_id
+     INNER JOIN tournaments
+       ON tournaments.tournament_id = responses.tournament_id
+     WHERE responses.tournament_id IN (${placeholders})
+       AND responses.response = 'yes'
+       AND responses.is_valid = 1
+     ORDER BY tournaments.grade, display_name_kana, members.display_name`,
+  ).bind(...tournamentIds).all<{
+    display_name: string;
+    display_name_kana: string;
+    grade: string;
+  }>();
+  return buildApplicationCompletedMessage(
+    tournaments.results,
+    participants.results.map((participant) => ({
+      displayName: participant.display_name,
+      displayNameKana: participant.display_name_kana,
+      grade: participant.grade,
+    })),
+  );
+}
+
 export async function processNotificationQueue(
   env: TournamentEnv,
   batchSize = QUEUE_BATCH_SIZE,
@@ -956,8 +1218,11 @@ export async function processNotificationQueue(
   const queued = await env.DB.prepare(
     `SELECT
       notification_deliveries.notification_id,
+      notification_deliveries.member_id,
       notification_deliveries.notification_type,
       notification_deliveries.reminder_kind,
+      notification_deliveries.delivery_context,
+      notification_deliveries.related_tournament_ids,
       notification_deliveries.destination_id,
       notification_deliveries.attempt_count,
       tournaments.tournament_id,
@@ -989,6 +1254,7 @@ export async function processNotificationQueue(
       CASE notification_deliveries.notification_type
         WHEN 'announcement' THEN 0
         WHEN 'deadline_reminder' THEN 1
+        WHEN 'application_completed' THEN 2
         ELSE 2
       END,
       notification_deliveries.created_at,
@@ -1025,14 +1291,18 @@ export async function processNotificationQueue(
     }
 
     processed += 1;
-    if (notification.tournament_status !== "active") {
+    const statusAllowsNotification =
+      notification.notification_type === "application_completed"
+        ? notification.tournament_status === "applied"
+        : notification.tournament_status === "active";
+    if (!statusAllowsNotification) {
       await env.DB.prepare(
         `UPDATE notification_deliveries
          SET status = 'skipped', error_message = ?, next_attempt_at = NULL,
            lease_until = NULL
          WHERE notification_id = ?`,
       )
-        .bind("大会が回答受付中ではないため送信を停止しました。", notification.notification_id)
+        .bind("大会ステータスが通知条件を満たさないため送信を停止しました。", notification.notification_id)
         .run();
       continue;
     }
@@ -1040,7 +1310,10 @@ export async function processNotificationQueue(
     try {
       let payload: DiscordMessagePayload;
       if (notification.notification_type === "announcement") {
-        payload = buildAnnouncementMessage(notification);
+        payload = buildAnnouncementMessage(
+          notification,
+          notification.delivery_context === "update",
+        );
       } else if (notification.notification_type === "deadline_reminder") {
         if (!notification.reminder_kind) {
           throw new Error("締切リマインダーの種類が未設定です。");
@@ -1071,8 +1344,24 @@ export async function processNotificationQueue(
           notification.reminder_kind,
           participants,
         );
+      } else if (notification.notification_type === "application_completed") {
+        payload = await applicationCompletedPayload(env.DB, notification);
       } else {
-        payload = buildAttendanceMessage(notification);
+        let selectedResponse: string | undefined;
+        if (notification.member_id) {
+          const current = await env.DB.prepare(
+            `SELECT response FROM responses
+             WHERE tournament_id = ? AND member_id = ? AND is_valid = 1`,
+          )
+            .bind(notification.tournament_id, notification.member_id)
+            .first<{ response: string }>();
+          selectedResponse = current?.response;
+        }
+        payload = buildAttendanceMessage(
+          notification,
+          selectedResponse,
+          notification.delivery_context === "update",
+        );
       }
       const message =
         notification.notification_type !== "invitation_dm"
