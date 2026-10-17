@@ -104,17 +104,11 @@ function adminHtml(): string {
       return get('year') + '-' + get('month') + '-' + get('day');
     }
 
-    function dateTimeValue(date) {
-      const parts = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(date);
-      const get = (type) => parts.find((part) => part.type === type).value;
-      return get('year') + '-' + get('month') + '-' + get('day') + 'T' + get('hour') + ':' + get('minute');
-    }
-
     const now = Date.now();
     form.elements.eventStartDate.value = dateValue(new Date(now + 14 * 86400000));
     form.elements.eventEndDate.value = form.elements.eventStartDate.value;
-    form.elements.internalDeadline.value = dateTimeValue(new Date(now + 7 * 86400000));
-    form.elements.trueDeadline.value = dateTimeValue(new Date(now + 10 * 86400000));
+    form.elements.internalDeadline.value = dateValue(new Date(now + 7 * 86400000)) + 'T23:59';
+    form.elements.trueDeadline.value = dateValue(new Date(now + 10 * 86400000)) + 'T23:59';
     form.elements.eventStartDate.addEventListener('change', () => {
       if (!form.elements.eventEndDate.value || form.elements.eventEndDate.value < form.elements.eventStartDate.value) form.elements.eventEndDate.value = form.elements.eventStartDate.value;
     });

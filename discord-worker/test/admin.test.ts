@@ -39,6 +39,17 @@ describe("Admin Worker", () => {
     await expect(response.text()).resolves.toContain("大会登録（Discord版MVP）");
   });
 
+  it("uses 23:59 as the default deadline time", async () => {
+    const response = await handleAdminRequest(
+      new Request("https://admin.example.com/"),
+      env,
+      authenticatedContext(),
+    );
+
+    const html = await response.text();
+    expect(html.match(/T23:59/g)).toHaveLength(2);
+  });
+
   it("stores a valid tournament for the notification worker", async () => {
     const waitUntil = vi.fn();
     const creator = vi.fn().mockResolvedValue({
