@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
+    "dev:admin": "wrangler dev --config wrangler.admin.jsonc",
     "deploy": "wrangler deploy",
+    "deploy:admin": "wrangler deploy --config wrangler.admin.jsonc",
     "db:migrate:local": "wrangler d1 migrations apply DB --local",
     "db:migrate:remote": "wrangler d1 migrations apply DB --remote",
     "register:commands": "tsx scripts/register-commands.ts",

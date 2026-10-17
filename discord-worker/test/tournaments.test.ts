@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { buildAttendanceMessage } from "../src/tournaments";
+import {
+  buildAttendanceMessage,
+  normalizeTournamentInput,
+} from "../src/tournaments";
 
 const tournament = {
   tournament_id: "T-test",
@@ -27,5 +30,36 @@ describe("attendance DM", () => {
     const message = buildAttendanceMessage(tournament, "yes");
 
     expect(message.content).toContain("現在の回答: **参加希望**");
+  });
+});
+
+describe("tournament input", () => {
+  it("normalizes deadlines to UTC", () => {
+    const input = normalizeTournamentInput({
+      title: " 東会大会 ",
+      grade: "C",
+      tournamentType: "official",
+      eventStartDate: "2026-11-01",
+      eventEndDate: "2026-11-01",
+      internalDeadline: "2026-10-25T23:59:00+09:00",
+      trueDeadline: "2026-10-28T23:59:00+09:00",
+    });
+
+    expect(input.title).toBe("東会大会");
+    expect(input.internalDeadline).toBe("2026-10-25T14:59:00.000Z");
+  });
+
+  it("rejects an internal deadline after the organizer deadline", () => {
+    expect(() =>
+      normalizeTournamentInput({
+        title: "東会大会",
+        grade: "C",
+        tournamentType: "official",
+        eventStartDate: "2026-11-01",
+        eventEndDate: "2026-11-01",
+        internalDeadline: "2026-10-29T23:59:00+09:00",
+        trueDeadline: "2026-10-28T23:59:00+09:00",
+      }),
+    ).toThrow("サークル内締切は主催者締切以前");
   });
 });

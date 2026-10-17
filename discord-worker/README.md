@@ -12,8 +12,19 @@
 - `/member-register` によるDiscordユーザーとテスト部員の紐付け
 - `/setup-channel` によるテスト告知先の設定
 - `/test-tournament` による告知・対象級DM・参加回答ボタンの疎通確認
+- Cloudflare Accessで保護する大会登録Web管理画面
+- Web登録された未通知大会を1分ごとに取得するDiscord通知処理
 - 署名付きPING受信時の開発用サーバーへのコマンド登録
 - D1による部員・大会・回答・通知履歴の管理
+
+## Worker構成
+
+役割と認証境界を分けるため、同じソースから2つのWorkerを配備します。
+
+- `sukc-tournament-discord-bot`: Discord Interaction受信用。Discord署名を検証し、BotのSecretを保持する
+- `sukc-tournament-admin`: 大会登録画面。Worker全体をCloudflare Accessで保護し、BotのSecretは保持しない
+
+管理画面で保存した大会はD1へ入り、Discord WorkerのCronが1分以内を目安に取得して告知とDMを送ります。管理画面WorkerへBotトークンを複製しない構成です。
 
 ## 秘密情報
 
@@ -36,6 +47,7 @@ npm install
 npm test
 npm run typecheck
 npm run dev
+npm run dev:admin
 ```
 
 ## D1マイグレーション
@@ -46,6 +58,18 @@ npm run db:migrate:remote
 ```
 
 リモートDBに適用する前に、必ずローカルDBで成功を確認します。
+
+## 管理画面の配備
+
+次の順番で配備します。
+
+```sh
+npm run db:migrate:remote
+npm run deploy
+npm run deploy:admin
+```
+
+`sukc-tournament-admin` は、Cloudflareダッシュボードの `Workers & Pages` からWorkerを選び、`Access` で本番トラフィック全体を保護します。許可対象は最初はCloudflareアカウントのメンバーだけに限定します。Accessが有効でなければアプリ自身も403を返すため、管理画面は利用できません。
 
 ## DM送信のテスト制限
 

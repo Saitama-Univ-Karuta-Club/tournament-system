@@ -11,6 +11,7 @@ import {
 } from "./members";
 import {
   createTestTournamentAndNotify,
+  notifyPendingTournaments,
   recordAttendanceResponse,
   type AttendanceInput,
   type TestTournamentInput,
@@ -356,5 +357,12 @@ export async function handleRequest(
 export default {
   fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     return handleRequest(request, env, verifyKey, ctx);
+  },
+  scheduled(
+    _controller: ScheduledController,
+    env: Env,
+    ctx: ExecutionContext,
+  ): void {
+    ctx.waitUntil(notifyPendingTournaments(env));
   },
 } satisfies ExportedHandler<Env>;
