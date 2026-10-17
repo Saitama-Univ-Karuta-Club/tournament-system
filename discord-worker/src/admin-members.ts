@@ -161,6 +161,7 @@ function invalidateResponsesForGrade(
          SELECT 1
          FROM tournaments
          WHERE tournaments.tournament_id = responses.tournament_id
+           AND tournaments.all_grades = 0
            AND tournaments.grade = ?
        )`,
   ).bind(invalidatedAt, memberId, previousGrade);

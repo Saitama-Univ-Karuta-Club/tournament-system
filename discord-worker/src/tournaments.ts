@@ -43,6 +43,7 @@ export interface TournamentRow {
   event_start_date: string;
   event_end_date: string;
   grade: string;
+  all_grades?: number;
   internal_deadline: string;
   true_deadline: string;
   tournament_type?: string;
@@ -110,7 +111,16 @@ const MAX_NOTIFICATION_ATTEMPTS = 5;
 const QUEUE_LEASE_MILLISECONDS = 5 * 60 * 1000;
 const INSERT_BATCH_SIZE = 50;
 const JST_OFFSET_MILLISECONDS = 9 * 60 * 60 * 1000;
-const TOURNAMENT_GRADES = new Set(["A", "B", "C", "D", "E", "F", "beginner"]);
+const TOURNAMENT_GRADES = new Set([
+  "A",
+  "B",
+  "C",
+  "D",
+  "E",
+  "F",
+  "beginner",
+  "all",
+]);
 const TOURNAMENT_TYPES = new Set(["official", "support", "event"]);
 
 function addDays(base: Date, days: number): Date {
@@ -243,6 +253,26 @@ export function normalizeTournamentInput(raw: TournamentInput): TournamentInput 
   };
 }
 
+export function normalizeTournamentGrades(raw: unknown): string[] {
+  const values = Array.isArray(raw) ? raw : [raw];
+  const grades = [...new Set(values.map((value) => String(value ?? "").trim()))]
+    .filter(Boolean);
+  if (grades.length === 0) {
+    throw new Error("対象級を1つ以上選択してください。");
+  }
+  if (grades.some((grade) => !TOURNAMENT_GRADES.has(grade))) {
+    throw new Error("対象級が不正です。");
+  }
+  if (grades.includes("all") && grades.length > 1) {
+    throw new Error("「すべて」と個別の級は同時に選択できません。");
+  }
+  return grades;
+}
+
+export function formatTournamentGrade(tournament: TournamentRow): string {
+  return tournament.all_grades === 1 ? "すべて" : formatGrade(tournament.grade);
+}
+
 export function buildAttendanceMessage(
   tournament: TournamentRow,
   selectedResponse?: string,
@@ -254,7 +284,7 @@ export function buildAttendanceMessage(
   const fields = [
     {
       name: "対象級",
-      value: formatGrade(tournament.grade),
+      value: formatTournamentGrade(tournament),
       inline: true,
     },
     {
@@ -323,7 +353,7 @@ function buildAnnouncementMessage(tournament: TournamentRow): DiscordMessagePayl
   const fields = [
     {
       name: "対象級",
-      value: formatGrade(tournament.grade),
+      value: formatTournamentGrade(tournament),
       inline: true,
     },
     {
@@ -388,7 +418,7 @@ export function buildDeadlineReminderMessage(
         fields: [
           {
             name: "対象級",
-            value: formatGrade(tournament.grade),
+            value: formatTournamentGrade(tournament),
             inline: true,
           },
           {
@@ -651,6 +681,7 @@ export async function sendTestDeadlineReminder(
       event_start_date,
       event_end_date,
       grade,
+      all_grades,
       tournament_type,
       venue,
       true_deadline,
@@ -737,61 +768,78 @@ export async function createTournament(
   env: TournamentEnv,
   rawInput: TournamentInput,
 ): Promise<TournamentRow> {
-  const input = normalizeTournamentInput(rawInput);
+  const [tournament] = await createTournaments(env, [rawInput]);
+  return tournament;
+}
+
+export async function createTournaments(
+  env: TournamentEnv,
+  rawInputs: TournamentInput[],
+): Promise<TournamentRow[]> {
+  if (rawInputs.length === 0 || rawInputs.length > 7) {
+    throw new Error("対象級は1〜7件で指定してください。");
+  }
+  const inputs = rawInputs.map(normalizeTournamentInput);
   const now = new Date();
-  const tournament: TournamentRow = {
+  const tournaments = inputs.map<TournamentRow>((input) => ({
     tournament_id: `T-${crypto.randomUUID()}`,
     title: input.title,
     event_start_date: input.eventStartDate,
     event_end_date: input.eventEndDate,
-    grade: input.grade,
+    grade: input.grade === "all" ? "A" : input.grade,
+    all_grades: input.grade === "all" ? 1 : 0,
     tournament_type: input.tournamentType,
     venue: input.venue || null,
     true_deadline: input.trueDeadline,
     internal_deadline: input.internalDeadline,
     document_url: input.documentUrl || null,
-  };
+  }));
 
-  await env.DB.prepare(
-    `INSERT INTO tournaments (
-      tournament_id,
-      title,
-      event_start_date,
-      event_end_date,
-      grade,
-      tournament_type,
-      is_official,
-      true_deadline,
-      internal_deadline,
-      venue,
-      document_url,
-      status,
-      created_by_discord_user_id,
-      created_by_email,
-      created_at,
-      updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)`,
-  )
-    .bind(
-      tournament.tournament_id,
-      tournament.title,
-      tournament.event_start_date,
-      tournament.event_end_date,
-      tournament.grade,
-      input.tournamentType,
-      input.tournamentType === "official" ? 1 : 0,
-      tournament.true_deadline,
-      tournament.internal_deadline,
-      input.venue || null,
-      input.documentUrl || null,
-      input.createdByDiscordUserId || null,
-      input.createdByEmail || null,
-      now.toISOString(),
-      now.toISOString(),
-    )
-    .run();
+  await env.DB.batch(
+    tournaments.map((tournament, index) => {
+      const input = inputs[index];
+      return env.DB.prepare(
+        `INSERT INTO tournaments (
+          tournament_id,
+          title,
+          event_start_date,
+          event_end_date,
+          grade,
+          all_grades,
+          tournament_type,
+          is_official,
+          true_deadline,
+          internal_deadline,
+          venue,
+          document_url,
+          status,
+          created_by_discord_user_id,
+          created_by_email,
+          created_at,
+          updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)`,
+      ).bind(
+        tournament.tournament_id,
+        tournament.title,
+        tournament.event_start_date,
+        tournament.event_end_date,
+        tournament.grade,
+        tournament.all_grades,
+        input.tournamentType,
+        input.tournamentType === "official" ? 1 : 0,
+        tournament.true_deadline,
+        tournament.internal_deadline,
+        input.venue || null,
+        input.documentUrl || null,
+        input.createdByDiscordUserId || null,
+        input.createdByEmail || null,
+        now.toISOString(),
+        now.toISOString(),
+      );
+    }),
+  );
 
-  return tournament;
+  return tournaments;
 }
 
 export async function enqueueTournamentNotifications(
@@ -818,11 +866,11 @@ export async function enqueueTournamentNotifications(
      FROM members
      WHERE status = 'active'
        AND dm_enabled = 1
-       AND grade = ?
+       AND (? = 1 OR grade = ?)
        AND discord_user_id IS NOT NULL
      ORDER BY member_id`,
   )
-    .bind(tournament.grade)
+    .bind(tournament.all_grades ?? 0, tournament.grade)
     .all<TargetMemberRow>();
 
   const targets = buildNotificationTargets(
@@ -859,6 +907,7 @@ export async function enqueueDeadlineReminders(
       event_start_date,
       event_end_date,
       grade,
+      all_grades,
       tournament_type,
       venue,
       true_deadline,
@@ -909,6 +958,7 @@ export async function processNotificationQueue(
       tournaments.event_start_date,
       tournaments.event_end_date,
       tournaments.grade,
+      tournaments.all_grades,
       tournaments.tournament_type,
       tournaments.venue,
       tournaments.true_deadline,
@@ -1058,6 +1108,7 @@ export async function notifyPendingTournaments(
       tournaments.event_start_date,
       tournaments.event_end_date,
       tournaments.grade,
+      tournaments.all_grades,
       tournaments.tournament_type,
       tournaments.venue,
       tournaments.true_deadline,
@@ -1077,7 +1128,7 @@ export async function notifyPendingTournaments(
           FROM members
           WHERE members.status = 'active'
             AND members.dm_enabled = 1
-            AND members.grade = tournaments.grade
+            AND (tournaments.all_grades = 1 OR members.grade = tournaments.grade)
             AND members.discord_user_id IS NOT NULL
             AND NOT EXISTS (
               SELECT 1
@@ -1148,13 +1199,14 @@ export async function recordAttendanceResponse(
       tournaments.event_start_date,
       tournaments.event_end_date,
       tournaments.grade,
+      tournaments.all_grades,
       tournaments.internal_deadline,
       tournaments.true_deadline
     FROM members
     INNER JOIN tournaments ON tournaments.tournament_id = ?
     WHERE members.discord_user_id = ?
       AND members.status = 'active'
-      AND members.grade = tournaments.grade
+      AND (tournaments.all_grades = 1 OR members.grade = tournaments.grade)
       AND tournaments.status = 'active'
     LIMIT 1`,
   )

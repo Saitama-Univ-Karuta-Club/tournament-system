@@ -56,11 +56,10 @@ describe("member registration decisions", () => {
     });
     expect(batch).toHaveBeenCalledOnce();
     expect(batch.mock.calls[0][0]).toHaveLength(4);
-    expect(
-      sqlStatements.some(
-        (sql) => sql.includes("UPDATE responses") && sql.includes("is_valid = 0"),
-      ),
-    ).toBe(true);
+    const invalidationSql = sqlStatements.find(
+      (sql) => sql.includes("UPDATE responses") && sql.includes("is_valid = 0"),
+    );
+    expect(invalidationSql).toContain("tournaments.all_grades = 0");
   });
 
   it("does not invalidate responses when an update keeps the same grade", async () => {

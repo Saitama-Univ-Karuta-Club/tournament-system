@@ -1,5 +1,6 @@
 import {
-  createTournament,
+  createTournaments,
+  normalizeTournamentGrades,
   normalizeTournamentInput,
   type TournamentEnv,
   type TournamentInput,
@@ -23,8 +24,8 @@ export interface AdminEnv extends TournamentEnv {}
 type AdminContext = Pick<ExecutionContext, "access" | "waitUntil">;
 type TournamentCreator = (
   env: AdminEnv,
-  input: TournamentInput,
-) => Promise<TournamentRow>;
+  inputs: TournamentInput[],
+) => Promise<TournamentRow[]>;
 type TournamentLister = (env: AdminEnv) => Promise<AdminTournament[]>;
 type TournamentStatusUpdater = (
   env: AdminEnv,
@@ -107,6 +108,7 @@ export async function listAdminTournaments(
       tournaments.event_start_date,
       tournaments.event_end_date,
       tournaments.grade,
+      tournaments.all_grades,
       tournaments.tournament_type,
       tournaments.venue,
       tournaments.true_deadline,
@@ -129,7 +131,7 @@ export async function listAdminTournaments(
       (SELECT COUNT(*) FROM members
         WHERE members.status = 'active'
           AND members.dm_enabled = 1
-          AND members.grade = tournaments.grade
+          AND (tournaments.all_grades = 1 OR members.grade = tournaments.grade)
           AND members.discord_user_id IS NOT NULL) AS eligible_members,
       (SELECT COUNT(*) FROM notification_deliveries
         WHERE notification_deliveries.tournament_id = tournaments.tournament_id
@@ -325,6 +327,12 @@ function adminHtml(page: AdminPage): string {
     .optional { color: #697386; font-size: .78rem; font-weight: 500; }
     input, select { width: 100%; border: 1px solid #b9c1d0; border-radius: 8px; padding: 11px 12px; font: inherit; color: inherit; background: white; }
     input:focus, select:focus { outline: 3px solid #7c9cff3b; border-color: #526fc4; }
+    .grade-picker { min-width: 0; margin: 0; padding: 0; border: 0; }
+    .grade-picker legend { margin-bottom: 7px; padding: 0; font-size: .9rem; font-weight: 650; }
+    .grade-options { display: flex; flex-wrap: wrap; gap: 8px; padding: 9px; border: 1px solid #b9c1d0; border-radius: 8px; background: #fff; }
+    .grade-option { display: inline-flex; grid-template-columns: none; align-items: center; gap: 6px; padding: 3px 7px; border-radius: 6px; font-weight: 600; white-space: nowrap; }
+    .grade-option:has(input:checked) { color: #294796; background: #edf1ff; }
+    .grade-option input { width: auto; margin: 0; }
     .actions { margin-top: 24px; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
     button { border: 0; border-radius: 8px; padding: 12px 20px; background: #3658b2; color: white; font: inherit; font-weight: 700; cursor: pointer; }
     button:hover { background: #294796; }
@@ -402,7 +410,7 @@ function adminHtml(page: AdminPage): string {
       <h2>大会登録</h2>
       <div class="grid">
         <label class="wide">大会名<input name="title" required maxlength="100" autocomplete="off"></label>
-        <label>対象級<select name="grade" required><option value="">選択してください</option><option value="A">A級</option><option value="B">B級</option><option value="C">C級</option><option value="D">D級</option><option value="E">E級</option><option value="F">F級</option><option value="beginner">初心者</option></select></label>
+        <fieldset class="grade-picker"><legend>対象級 <span class="optional">複数選択可</span></legend><div class="grade-options"><label class="grade-option"><input type="checkbox" name="grades" value="all">すべて</label><label class="grade-option"><input type="checkbox" name="grades" value="A">A級</label><label class="grade-option"><input type="checkbox" name="grades" value="B">B級</label><label class="grade-option"><input type="checkbox" name="grades" value="C">C級</label><label class="grade-option"><input type="checkbox" name="grades" value="D">D級</label><label class="grade-option"><input type="checkbox" name="grades" value="E">E級</label><label class="grade-option"><input type="checkbox" name="grades" value="F">F級</label><label class="grade-option"><input type="checkbox" name="grades" value="beginner">初心者</label></div></fieldset>
         <label>大会種別<select name="tournamentType" required><option value="official">公認大会</option><option value="support">後援大会</option><option value="event">その他イベント</option></select></label>
         <label>開催開始日<input type="date" name="eventStartDate" required></label>
         <label>開催終了日<input type="date" name="eventEndDate" required></label>
@@ -412,7 +420,7 @@ function adminHtml(page: AdminPage): string {
         <label class="wide">大会要項URL <span class="optional">任意・Google Drive等</span><input type="url" name="documentUrl" maxlength="500" placeholder="https://..."></label>
       </div>
       <div class="actions"><button id="submit" type="submit">登録して通知を開始</button><span id="result" role="status" aria-live="polite"></span></div>
-      <div class="footnote">現段階では1回の登録につき1級です。級ごとに日程・締切が異なる大会を正確に扱えるよう、D1では級別の大会として保存します。</div>
+      <div class="footnote">複数級を選ぶと、同じ内容で級ごとに独立した大会として一括登録します。「すべて」は1件の大会として登録し、全級のメンバーへDMを送ります。</div>
     </form>
     <section class="panel" aria-labelledby="tournament-list-title"${hiddenPage("tournaments")}>
       <div class="list-heading">
@@ -500,6 +508,10 @@ function adminHtml(page: AdminPage): string {
       return grade === 'beginner' ? '初心者' : grade + '級';
     }
 
+    function tournamentGradeLabel(tournament) {
+      return tournament.all_grades === 1 ? 'すべて' : gradeLabel(tournament.grade);
+    }
+
     function rankLabel(rank) {
       return ['無段', '初段', '二段', '三段', '四段', '五段', '六段', '七段', '八段', '九段', '十段'][Number(rank)] || '段位不明';
     }
@@ -541,7 +553,7 @@ function adminHtml(page: AdminPage): string {
         ? tournament.event_start_date
         : tournament.event_start_date + '〜' + tournament.event_end_date;
       const metaParts = [
-        gradeLabel(tournament.grade),
+        tournamentGradeLabel(tournament),
         eventDates,
         'サークル内締切 ' + dateTimeLabel(tournament.internal_deadline),
       ];
@@ -875,6 +887,19 @@ function adminHtml(page: AdminPage): string {
     form.elements.trueDeadline.value = dateValue(new Date(now + 10 * 86400000)) + 'T23:59';
     setInternalDeadlineFromOrganizer();
     form.elements.trueDeadline.addEventListener('input', setInternalDeadlineFromOrganizer);
+    const gradeCheckboxes = Array.from(form.querySelectorAll('input[name="grades"]'));
+    const allGradesCheckbox = gradeCheckboxes.find((checkbox) => checkbox.value === 'all');
+    gradeCheckboxes.forEach((checkbox) => {
+      checkbox.addEventListener('change', () => {
+        if (checkbox.value === 'all' && checkbox.checked) {
+          gradeCheckboxes.forEach((candidate) => {
+            if (candidate !== checkbox) candidate.checked = false;
+          });
+        } else if (checkbox.checked && allGradesCheckbox) {
+          allGradesCheckbox.checked = false;
+        }
+      });
+    });
     form.elements.eventStartDate.addEventListener('change', () => {
       if (!form.elements.eventEndDate.value || form.elements.eventEndDate.value < form.elements.eventStartDate.value) form.elements.eventEndDate.value = form.elements.eventStartDate.value;
     });
@@ -898,6 +923,8 @@ function adminHtml(page: AdminPage): string {
       const data = new FormData(form);
       try {
         const payload = Object.fromEntries(data.entries());
+        payload.grades = data.getAll('grades');
+        if (!payload.grades.length) throw new Error('対象級を1つ以上選択してください。');
         payload.internalDeadline = localJstToIso(payload.internalDeadline);
         payload.trueDeadline = localJstToIso(payload.trueDeadline);
         const response = await fetch('/api/tournaments', {
@@ -908,7 +935,7 @@ function adminHtml(page: AdminPage): string {
         const body = await response.json();
         if (!response.ok) throw new Error(body.error || '登録に失敗しました。');
         result.className = 'ok';
-        result.textContent = '登録しました。Discord通知を予約しました。';
+        result.textContent = body.message || '登録しました。Discord通知を予約しました。';
         form.elements.title.value = '';
         form.elements.venue.value = '';
         form.elements.documentUrl.value = '';
@@ -936,7 +963,7 @@ export async function handleAdminRequest(
   request: Request,
   env: AdminEnv,
   ctx: AdminContext,
-  creator: TournamentCreator = createTournament,
+  creator: TournamentCreator = createTournaments,
   lister: TournamentLister = listAdminTournaments,
   statusUpdater: TournamentStatusUpdater = updateTournamentStatus,
   memberLister: MemberLister = listAdminMembers,
@@ -1086,22 +1113,35 @@ export async function handleAdminRequest(
       return json({ error: "JSON形式で送信してください。" }, 415);
     }
 
-    let input: TournamentInput;
+    let inputs: TournamentInput[];
     try {
-      const body = (await request.json()) as TournamentInput;
-      input = normalizeTournamentInput({ ...body, createdByEmail: email });
+      const body = (await request.json()) as Partial<TournamentInput> & {
+        grades?: unknown;
+      };
+      const grades = normalizeTournamentGrades(body.grades ?? body.grade);
+      inputs = grades.map((grade) =>
+        normalizeTournamentInput({
+          ...body,
+          grade,
+          createdByEmail: email,
+        } as TournamentInput),
+      );
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : "入力内容を確認してください。";
       return json({ error: message }, 400);
     }
 
     try {
-      const tournament = await creator(env, input);
+      const tournaments = await creator(env, inputs);
       return json(
         {
           ok: true,
-          tournamentId: tournament.tournament_id,
-          message: "大会を登録し、Discord通知を予約しました。",
+          tournamentId: tournaments[0]?.tournament_id,
+          tournamentIds: tournaments.map((tournament) => tournament.tournament_id),
+          message:
+            tournaments.length === 1
+              ? "大会を登録し、Discord通知を予約しました。"
+              : `${tournaments.length}件の級別大会を一括登録し、Discord通知を予約しました。`,
         },
         201,
       );

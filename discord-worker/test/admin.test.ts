@@ -68,6 +68,8 @@ describe("Admin Worker", () => {
     const html = await response.text();
     expect(html).toContain("登録済みメンバー全員");
     expect(html).not.toContain("最大10人");
+    expect(html).toContain('name="grades" value="all"');
+    expect(html).toContain("data.getAll('grades')");
   });
 
   it("uses 23:59 as the default organizer deadline time", async () => {
@@ -104,15 +106,17 @@ describe("Admin Worker", () => {
 
   it("stores a valid tournament for the notification worker", async () => {
     const waitUntil = vi.fn();
-    const creator = vi.fn().mockResolvedValue({
-      tournament_id: "T-test",
-      title: "テスト大会",
-      event_start_date: "2026-11-01",
-      event_end_date: "2026-11-01",
-      grade: "C",
-      internal_deadline: "2026-10-25T14:59:00.000Z",
-      true_deadline: "2026-10-28T14:59:00.000Z",
-    });
+    const creator = vi.fn().mockResolvedValue([
+      {
+        tournament_id: "T-test",
+        title: "テスト大会",
+        event_start_date: "2026-11-01",
+        event_end_date: "2026-11-01",
+        grade: "C",
+        internal_deadline: "2026-10-25T14:59:00.000Z",
+        true_deadline: "2026-10-28T14:59:00.000Z",
+      },
+    ]);
     const response = await handleAdminRequest(
       new Request("https://admin.example.com/api/tournaments", {
         method: "POST",
@@ -138,13 +142,79 @@ describe("Admin Worker", () => {
     expect(response.status).toBe(201);
     expect(creator).toHaveBeenCalledWith(
       env,
-      expect.objectContaining({
-        title: "テスト大会",
-        grade: "C",
-        createdByEmail: "admin@example.com",
-      }),
+      [
+        expect.objectContaining({
+          title: "テスト大会",
+          grade: "C",
+          createdByEmail: "admin@example.com",
+        }),
+      ],
     );
     expect(waitUntil).not.toHaveBeenCalled();
+  });
+
+  it("registers the same tournament for multiple grades in one request", async () => {
+    const creator = vi.fn().mockResolvedValue([
+      { tournament_id: "T-grade-b" },
+      { tournament_id: "T-grade-c" },
+    ]);
+    const response = await handleAdminRequest(
+      new Request("https://admin.example.com/api/tournaments", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Origin: "https://admin.example.com",
+        },
+        body: JSON.stringify({
+          title: "複数級大会",
+          grades: ["B", "C"],
+          tournamentType: "official",
+          eventStartDate: "2026-11-01",
+          eventEndDate: "2026-11-01",
+          internalDeadline: "2026-10-25T23:59:00+09:00",
+          trueDeadline: "2026-10-28T23:59:00+09:00",
+        }),
+      }),
+      env,
+      authenticatedContext(),
+      creator,
+    );
+
+    expect(response.status).toBe(201);
+    expect(creator).toHaveBeenCalledWith(
+      env,
+      [
+        expect.objectContaining({ grade: "B", title: "複数級大会" }),
+        expect.objectContaining({ grade: "C", title: "複数級大会" }),
+      ],
+    );
+    await expect(response.json()).resolves.toMatchObject({
+      tournamentIds: ["T-grade-b", "T-grade-c"],
+      message: expect.stringContaining("2件"),
+    });
+  });
+
+  it("rejects selecting all grades together with an individual grade", async () => {
+    const creator = vi.fn();
+    const response = await handleAdminRequest(
+      new Request("https://admin.example.com/api/tournaments", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Origin: "https://admin.example.com",
+        },
+        body: JSON.stringify({ grades: ["all", "C"] }),
+      }),
+      env,
+      authenticatedContext(),
+      creator,
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      error: expect.stringContaining("同時に選択できません"),
+    });
+    expect(creator).not.toHaveBeenCalled();
   });
 
   it("rejects a cross-origin submission", async () => {

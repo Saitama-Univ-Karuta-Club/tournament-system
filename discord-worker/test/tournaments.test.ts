@@ -4,8 +4,10 @@ import {
   buildDeadlineReminderMessage,
   buildDeadlineReminderTargets,
   buildNotificationTargets,
+  createTournaments,
   getDeadlineReminderSchedule,
   getRetryDelayMinutes,
+  normalizeTournamentGrades,
   normalizeTournamentInput,
   recordAttendanceResponse,
 } from "../src/tournaments";
@@ -70,7 +72,14 @@ describe("attendance DM", () => {
     expect(upsert).toContain("is_valid = 1");
     expect(upsert).toContain("invalidated_at = NULL");
     expect(upsert).toContain("invalidated_reason = NULL");
+    expect(sqlStatements[0]).toContain("tournaments.all_grades = 1");
     expect(run).toHaveBeenCalledOnce();
+  });
+
+  it("shows all grades for an unrestricted tournament", () => {
+    const message = buildAttendanceMessage({ ...tournament, all_grades: 1 });
+
+    expect(message.embeds?.[0]?.fields?.[0]?.value).toBe("すべて");
   });
 });
 
@@ -102,6 +111,54 @@ describe("tournament input", () => {
         trueDeadline: "2026-10-28T23:59:00+09:00",
       }),
     ).toThrow("サークル内締切は主催者締切以前");
+  });
+
+  it("accepts all grades but rejects mixing it with individual grades", () => {
+    expect(normalizeTournamentGrades(["all"])).toEqual(["all"]);
+    expect(normalizeTournamentGrades(["B", "C", "B"])).toEqual(["B", "C"]);
+    expect(() => normalizeTournamentGrades(["all", "C"])).toThrow(
+      "同時に選択できません",
+    );
+  });
+
+  it("keeps one independent tournament ID per selected grade", async () => {
+    const statements: unknown[] = [];
+    const prepare = vi.fn(() => ({
+      bind: vi.fn((...values: unknown[]) => ({ values })),
+    }));
+    const batch = vi.fn(async (items: unknown[]) => {
+      statements.push(...items);
+      return items.map(() => ({ success: true }));
+    });
+    const common = {
+      title: "複数級大会",
+      tournamentType: "official",
+      eventStartDate: "2026-11-01",
+      eventEndDate: "2026-11-01",
+      internalDeadline: "2026-10-25T23:59:00+09:00",
+      trueDeadline: "2026-10-28T23:59:00+09:00",
+    };
+
+    const created = await createTournaments(
+      { DB: { prepare, batch } as unknown as D1Database },
+      [
+        { ...common, grade: "B" },
+        { ...common, grade: "C" },
+      ],
+    );
+
+    expect(created.map((item) => item.grade)).toEqual(["B", "C"]);
+    expect(created[0].tournament_id).not.toBe(created[1].tournament_id);
+    expect(created.every((item) => /^T-[0-9a-f-]{36}$/.test(item.tournament_id)))
+      .toBe(true);
+    expect(statements).toHaveLength(2);
+
+    const [allGrades] = await createTournaments(
+      { DB: { prepare, batch } as unknown as D1Database },
+      [{ ...common, grade: "all" }],
+    );
+    expect(allGrades).toMatchObject({ grade: "A", all_grades: 1 });
+    expect(statements).toHaveLength(3);
   });
 });
 
