@@ -39,6 +39,9 @@ describe("Admin Worker", () => {
     const html = await response.text();
     expect(html).toContain("大会管理（Discord版MVP）");
     expect(html).toContain("大会一覧・回答集計");
+    expect(html).toContain("メンバー管理");
+    expect(html).toContain("登録済みメンバー全員");
+    expect(html).not.toContain("最大10人");
   });
 
   it("uses 23:59 as the default deadline time", async () => {
@@ -206,5 +209,80 @@ describe("Admin Worker", () => {
 
     expect(response.status).toBe(400);
     expect(statusUpdater).not.toHaveBeenCalled();
+  });
+
+  it("returns members without exposing Discord user IDs", async () => {
+    const memberLister = vi.fn().mockResolvedValue([
+      {
+        memberId: "M-11111111-1111-4111-8111-111111111111",
+        displayName: "石田 洋音",
+        grade: "C",
+        status: "active",
+        dmEnabled: true,
+        discordLinked: true,
+        createdAt: "2026-10-01T00:00:00.000Z",
+        updatedAt: "2026-10-01T00:00:00.000Z",
+      },
+    ]);
+    const response = await handleAdminRequest(
+      new Request("https://admin.example.com/api/members"),
+      env,
+      authenticatedContext(),
+      undefined,
+      undefined,
+      undefined,
+      memberLister,
+    );
+
+    expect(response.status).toBe(200);
+    const body = await response.json() as { members: Array<Record<string, unknown>> };
+    expect(body.members[0]).toMatchObject({
+      displayName: "石田 洋音",
+      discordLinked: true,
+    });
+    expect(body.members[0]).not.toHaveProperty("discordUserId");
+  });
+
+  it("updates a member with the authenticated administrator", async () => {
+    const memberId = "M-11111111-1111-4111-8111-111111111111";
+    const memberUpdater = vi.fn().mockResolvedValue({
+      memberId,
+      displayName: "石田 洋音",
+      grade: "B",
+      status: "active",
+      dmEnabled: false,
+      discordLinked: true,
+    });
+    const input = {
+      displayName: "石田 洋音",
+      grade: "B",
+      status: "active",
+      dmEnabled: false,
+    };
+    const response = await handleAdminRequest(
+      new Request(`https://admin.example.com/api/members/${memberId}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Origin: "https://admin.example.com",
+        },
+        body: JSON.stringify(input),
+      }),
+      env,
+      authenticatedContext(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      memberUpdater,
+    );
+
+    expect(response.status).toBe(200);
+    expect(memberUpdater).toHaveBeenCalledWith(
+      env,
+      memberId,
+      input,
+      "admin@example.com",
+    );
   });
 });

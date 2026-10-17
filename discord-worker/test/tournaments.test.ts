@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   buildAttendanceMessage,
+  buildNotificationTargets,
+  getRetryDelayMinutes,
   normalizeTournamentInput,
 } from "../src/tournaments";
 
@@ -61,5 +63,27 @@ describe("tournament input", () => {
         trueDeadline: "2026-10-28T23:59:00+09:00",
       }),
     ).toThrow("サークル内締切は主催者締切以前");
+  });
+});
+
+describe("notification queue", () => {
+  it("queues every eligible member without the former 10-member cap", () => {
+    const members = Array.from({ length: 12 }, (_, index) => ({
+      member_id: `M-${String(index).padStart(2, "0")}`,
+      discord_user_id: `discord-${index}`,
+    }));
+
+    const targets = buildNotificationTargets(tournament, "channel-1", members);
+
+    expect(targets).toHaveLength(13);
+    expect(targets.filter((target) => target.notificationType === "invitation_dm"))
+      .toHaveLength(12);
+    expect(targets.at(-1)?.destinationId).toBe("discord-11");
+  });
+
+  it("backs off failed deliveries before the next retry", () => {
+    expect([1, 2, 3, 4, 5].map(getRetryDelayMinutes)).toEqual([
+      1, 5, 15, 60, 60,
+    ]);
   });
 });

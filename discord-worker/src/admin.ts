@@ -5,6 +5,13 @@ import {
   type TournamentInput,
   type TournamentRow,
 } from "./tournaments";
+import {
+  listAdminMembers,
+  MemberAdminError,
+  updateAdminMember,
+  type AdminMember,
+  type MemberUpdateInput,
+} from "./admin-members";
 
 export interface AdminEnv extends TournamentEnv {}
 
@@ -20,6 +27,13 @@ type TournamentStatusUpdater = (
   status: string,
   changedByEmail: string,
 ) => Promise<TournamentStatusUpdate>;
+type MemberLister = (env: AdminEnv) => Promise<AdminMember[]>;
+type MemberUpdater = (
+  env: AdminEnv,
+  memberId: string,
+  input: MemberUpdateInput,
+  changedByEmail: string,
+) => Promise<AdminMember>;
 
 interface AdminTournamentRow extends TournamentRow {
   status: string;
@@ -30,6 +44,7 @@ interface AdminTournamentRow extends TournamentRow {
   eligible_members: number;
   announcements_sent: number;
   invitation_dms_sent: number;
+  notifications_queued: number;
   notification_failures: number;
 }
 
@@ -108,7 +123,17 @@ export async function listAdminTournaments(
           AND notification_deliveries.status = 'sent') AS invitation_dms_sent,
       (SELECT COUNT(*) FROM notification_deliveries
         WHERE notification_deliveries.tournament_id = tournaments.tournament_id
-          AND notification_deliveries.status = 'failed') AS notification_failures
+          AND (
+            notification_deliveries.status = 'pending'
+            OR (
+              notification_deliveries.status = 'failed'
+              AND notification_deliveries.attempt_count < 5
+            )
+          )) AS notifications_queued,
+      (SELECT COUNT(*) FROM notification_deliveries
+        WHERE notification_deliveries.tournament_id = tournaments.tournament_id
+          AND notification_deliveries.status = 'failed'
+          AND notification_deliveries.attempt_count >= 5) AS notification_failures
     FROM tournaments
     WHERE tournaments.status <> 'deleted'
     ORDER BY tournaments.created_at DESC
@@ -149,6 +174,7 @@ export async function listAdminTournaments(
       eligible_members: Number(tournament.eligible_members),
       announcements_sent: Number(tournament.announcements_sent),
       invitation_dms_sent: Number(tournament.invitation_dms_sent),
+      notifications_queued: Number(tournament.notifications_queued),
       notification_failures: Number(tournament.notification_failures),
       response_total: responseTotal,
       response_pending: Math.max(
@@ -252,6 +278,7 @@ function adminHtml(): string {
     main { max-width: 1080px; margin: 28px auto; padding: 0 18px 48px; }
     .notice { border-left: 4px solid #da8c10; background: #fff7e8; padding: 12px 16px; margin-bottom: 18px; line-height: 1.7; }
     .panel { background: white; border: 1px solid #dce1eb; border-radius: 12px; padding: 24px; box-shadow: 0 8px 24px #1720330c; }
+    .panel + .panel { margin-top: 26px; }
     #tournament-form { margin-bottom: 26px; }
     .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
     label { display: grid; gap: 7px; font-weight: 650; font-size: .9rem; }
@@ -296,14 +323,22 @@ function adminHtml(): string {
     .status-message { font-size: .84rem; font-weight: 650; }
     .status-message.error { color: #b42318; }
     .notification-note { color: #697386; font-size: .78rem; margin-top: 10px; }
+    #member-status { color: #697386; margin-bottom: 12px; }
+    #member-list { display: grid; gap: 12px; }
+    .member-card { border: 1px solid #dce1eb; border-radius: 10px; padding: 16px; }
+    .member-grid { display: grid; grid-template-columns: minmax(180px, 2fr) minmax(105px, .8fr) minmax(130px, 1fr) auto; gap: 12px; align-items: end; }
+    .member-grid .checkbox { display: flex; align-items: center; gap: 8px; min-height: 42px; }
+    .member-grid .checkbox input { width: auto; }
+    .member-actions { display: flex; align-items: center; gap: 12px; margin-top: 12px; flex-wrap: wrap; }
+    .member-link { color: #596579; font-size: .8rem; }
     .empty { color: #697386; text-align: center; padding: 30px 10px; }
-    @media (max-width: 680px) { .grid, .response-groups { grid-template-columns: 1fr; } .stats { grid-template-columns: 1fr 1fr; } label.wide { grid-column: auto; } .panel { padding: 18px; } header div { display: block; } #identity { margin-top: 6px; } .card-heading { align-items: flex-start; } }
+    @media (max-width: 680px) { .grid, .response-groups, .member-grid { grid-template-columns: 1fr; } .stats { grid-template-columns: 1fr 1fr; } label.wide { grid-column: auto; } .panel { padding: 18px; } header div { display: block; } #identity { margin-top: 6px; } .card-heading { align-items: flex-start; } }
   </style>
 </head>
 <body>
   <header><div><h1>大会管理（Discord版MVP）</h1><span id="identity">認証情報を確認中…</span></div></header>
   <main>
-    <div class="notice"><strong>テスト運用中です。</strong> 登録後1分以内を目安に告知チャンネルへ投稿し、該当級の登録済み部員へDMを送ります。現在は誤配信防止のため1大会につき最大10人です。</div>
+    <div class="notice"><strong>テスト運用中です。</strong> 登録後1分以内を目安に告知チャンネルへ投稿し、該当級の登録済みメンバー全員へのDMをキューに登録します。送信失敗時は最大5回まで自動再送します。</div>
     <form id="tournament-form" class="panel">
       <h2>大会登録</h2>
       <div class="grid">
@@ -328,6 +363,15 @@ function adminHtml(): string {
       <div id="list-status" role="status" aria-live="polite">読み込み中…</div>
       <div id="tournament-list"></div>
     </section>
+    <section class="panel" aria-labelledby="member-list-title">
+      <div class="list-heading">
+        <h2 id="member-list-title">メンバー管理</h2>
+        <button id="refresh-members" type="button" class="secondary">再読み込み</button>
+      </div>
+      <div id="member-status" role="status" aria-live="polite">読み込み中…</div>
+      <div id="member-list"></div>
+      <div class="footnote">Discord IDそのものは管理画面に表示しません。氏名・出場級・在籍状態・DM送信設定の変更履歴は管理者メールとともに保存されます。</div>
+    </section>
   </main>
   <script>
     const form = document.querySelector('#tournament-form');
@@ -337,6 +381,9 @@ function adminHtml(): string {
     const tournamentList = document.querySelector('#tournament-list');
     const listStatus = document.querySelector('#list-status');
     const refreshList = document.querySelector('#refresh-list');
+    const memberList = document.querySelector('#member-list');
+    const memberStatus = document.querySelector('#member-status');
+    const refreshMembers = document.querySelector('#refresh-members');
     const statusLabels = {
       draft: '下書き',
       active: '回答受付中',
@@ -348,6 +395,12 @@ function adminHtml(): string {
       yes: '参加',
       maybe: '未定',
       no: '不参加',
+    };
+    const memberStatusLabels = {
+      active: '有効',
+      inactive: '無効',
+      pending: '確認待ち',
+      rejected: '却下',
     };
 
     function element(tag, className, text) {
@@ -471,10 +524,89 @@ function adminHtml(): string {
       statusRow.append(statusLabel, updateButton, statusMessage);
       card.append(statusRow);
 
-      const notificationText = tournament.notification_failures
-        ? '通知失敗 ' + tournament.notification_failures + '件'
-        : '告知 ' + tournament.announcements_sent + '件・DM ' + tournament.invitation_dms_sent + '件送信済み';
+      const notificationParts = [
+        '告知 ' + tournament.announcements_sent + '件',
+        'DM ' + tournament.invitation_dms_sent + '件送信済み',
+      ];
+      if (tournament.notifications_queued) notificationParts.push('キュー・再送待ち ' + tournament.notifications_queued + '件');
+      if (tournament.notification_failures) notificationParts.push('送信失敗 ' + tournament.notification_failures + '件');
+      const notificationText = notificationParts.join('・');
       card.append(element('div', 'notification-note', notificationText));
+      return card;
+    }
+
+    function renderMember(member) {
+      const card = element('article', 'member-card');
+      const grid = element('div', 'member-grid');
+      const nameLabel = element('label', '', '氏名');
+      const nameInput = document.createElement('input');
+      nameInput.value = member.displayName;
+      nameInput.maxLength = 50;
+      nameLabel.append(nameInput);
+
+      const gradeLabelNode = element('label', '', '出場級');
+      const gradeSelect = document.createElement('select');
+      ['A', 'B', 'C', 'D', 'E', 'F', 'beginner'].forEach((grade) => {
+        const option = document.createElement('option');
+        option.value = grade;
+        option.textContent = gradeLabel(grade);
+        option.selected = grade === member.grade;
+        gradeSelect.append(option);
+      });
+      gradeLabelNode.append(gradeSelect);
+
+      const statusLabel = element('label', '', '状態');
+      const statusSelect = document.createElement('select');
+      Object.entries(memberStatusLabels).forEach(([value, label]) => {
+        const option = document.createElement('option');
+        option.value = value;
+        option.textContent = label;
+        option.selected = value === member.status;
+        statusSelect.append(option);
+      });
+      statusLabel.append(statusSelect);
+
+      const dmLabel = element('label', 'checkbox');
+      const dmCheckbox = document.createElement('input');
+      dmCheckbox.type = 'checkbox';
+      dmCheckbox.checked = member.dmEnabled;
+      dmLabel.append(dmCheckbox, document.createTextNode('DMを送る'));
+      grid.append(nameLabel, gradeLabelNode, statusLabel, dmLabel);
+      card.append(grid);
+
+      const actions = element('div', 'member-actions');
+      const save = element('button', 'secondary', '変更を保存');
+      save.type = 'button';
+      const message = element('span', 'status-message', '');
+      const linkState = element('span', 'member-link', member.discordLinked ? 'Discord連携済み' : 'Discord未連携');
+      save.addEventListener('click', async () => {
+        save.disabled = true;
+        message.className = 'status-message';
+        message.textContent = '変更中…';
+        try {
+          const response = await fetch('/api/members/' + encodeURIComponent(member.memberId), {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              displayName: nameInput.value,
+              grade: gradeSelect.value,
+              status: statusSelect.value,
+              dmEnabled: dmCheckbox.checked,
+            }),
+          });
+          const body = await response.json();
+          if (!response.ok) throw new Error(body.error || '変更に失敗しました。');
+          message.textContent = '変更しました。';
+          await loadMembers();
+        } catch (error) {
+          message.className = 'status-message error';
+          message.textContent = error instanceof Error ? error.message : '変更に失敗しました。';
+        } finally {
+          save.disabled = false;
+        }
+      });
+      actions.append(save, message, linkState);
+      card.append(actions);
       return card;
     }
 
@@ -496,6 +628,29 @@ function adminHtml(): string {
         listStatus.textContent = error instanceof Error ? error.message : '大会一覧を取得できませんでした。';
       } finally {
         refreshList.disabled = false;
+      }
+    }
+
+    async function loadMembers() {
+      refreshMembers.disabled = true;
+      memberStatus.textContent = '読み込み中…';
+      try {
+        const response = await fetch('/api/members');
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.error || 'メンバー一覧を取得できませんでした。');
+        memberList.replaceChildren();
+        if (!body.members.length) {
+          memberList.append(element('div', 'empty', '登録されたメンバーはいません。'));
+        } else {
+          body.members.forEach((member) => memberList.append(renderMember(member)));
+        }
+        const active = body.members.filter((member) => member.status === 'active').length;
+        const dmEnabled = body.members.filter((member) => member.status === 'active' && member.dmEnabled).length;
+        memberStatus.textContent = body.members.length + '人（有効 ' + active + '人・DM対象 ' + dmEnabled + '人）';
+      } catch (error) {
+        memberStatus.textContent = error instanceof Error ? error.message : 'メンバー一覧を取得できませんでした。';
+      } finally {
+        refreshMembers.disabled = false;
       }
     }
 
@@ -554,7 +709,9 @@ function adminHtml(): string {
       }
     });
     refreshList.addEventListener('click', loadTournaments);
+    refreshMembers.addEventListener('click', loadMembers);
     loadTournaments();
+    loadMembers();
   </script>
 </body>
 </html>`;
@@ -567,6 +724,8 @@ export async function handleAdminRequest(
   creator: TournamentCreator = createTournament,
   lister: TournamentLister = listAdminTournaments,
   statusUpdater: TournamentStatusUpdater = updateTournamentStatus,
+  memberLister: MemberLister = listAdminMembers,
+  memberUpdater: MemberUpdater = updateAdminMember,
 ): Promise<Response> {
   if (!ctx.access) {
     return json({ error: "Cloudflare Accessによる認証が必要です。" }, 403);
@@ -595,6 +754,43 @@ export async function handleAdminRequest(
     } catch (error: unknown) {
       console.error("大会一覧・回答集計の取得エラー", error);
       return json({ error: "大会一覧を取得できませんでした。" }, 500);
+    }
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/members") {
+    try {
+      return json({ members: await memberLister(env) });
+    } catch (error: unknown) {
+      console.error("メンバー一覧の取得エラー", error);
+      return json({ error: "メンバー一覧を取得できませんでした。" }, 500);
+    }
+  }
+
+  const memberPath = url.pathname.match(/^\/api\/members\/(M-[0-9a-f-]{36})$/);
+  if (request.method === "PATCH" && memberPath) {
+    if (!isSameOrigin(request)) {
+      return json({ error: "不正な送信元です。" }, 403);
+    }
+    if (!request.headers.get("Content-Type")?.toLowerCase().startsWith("application/json")) {
+      return json({ error: "JSON形式で送信してください。" }, 415);
+    }
+
+    let body: MemberUpdateInput;
+    try {
+      body = (await request.json()) as MemberUpdateInput;
+    } catch {
+      return json({ error: "入力内容を確認してください。" }, 400);
+    }
+
+    try {
+      const member = await memberUpdater(env, memberPath[1], body, email);
+      return json({ member });
+    } catch (error: unknown) {
+      if (error instanceof MemberAdminError) {
+        return json({ error: error.message }, error.statusCode);
+      }
+      console.error("メンバー情報の変更エラー", error);
+      return json({ error: "メンバー情報を変更できませんでした。" }, 500);
     }
   }
 

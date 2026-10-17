@@ -9,15 +9,16 @@
 - DiscordリクエストのEd25519署名検証
 - DiscordのInteraction Endpoint確認用PING/PONG
 - 開発用サーバーの `/ping` コマンド
-- `/member-register` によるDiscordユーザーとテスト部員の紐付け
+- `/member-register` によるDiscordユーザーとテストメンバーの紐付け
 - `/setup-channel` によるテスト告知先の設定
 - `/test-tournament` による告知・対象級DM・参加回答ボタンの疎通確認
 - Cloudflare Accessで保護する大会登録Web管理画面
 - 管理画面での大会一覧、回答者別集計、ステータス確認・変更
+- 管理画面でのメンバー一覧、氏名・級・状態・DM設定の変更
 - 管理者メールを記録する大会登録・ステータス変更の監査情報
 - Web登録された未通知大会を1分ごとに取得するDiscord通知処理
 - 署名付きPING受信時の開発用サーバーへのコマンド登録
-- D1による部員・大会・回答・通知履歴の管理
+- D1によるメンバー・大会・回答・通知履歴の管理
 
 ## Worker構成
 
@@ -73,9 +74,9 @@ npm run deploy:admin
 
 `sukc-tournament-admin` は、Cloudflareダッシュボードの `Workers & Pages` からWorkerを選び、`Access` で本番トラフィック全体を保護します。許可対象は最初はCloudflareアカウントのメンバーだけに限定します。Accessが有効でなければアプリ自身も403を返すため、管理画面は利用できません。
 
-## DM送信のテスト制限
+## 通知キュー
 
-`/test-tournament` は開発用で、1大会あたり最大10人へのDMに制限しています。
+大会通知はD1の永続キューに登録され、該当級の有効なメンバー全員へ順次DMを送ります。失敗した通知は最大5回まで自動再送されます。
 本番で数十〜数百人へ送る処理は、Discordのレート制限とWorkerの実行時間を考慮し、キューに分離します。
 
 ## スラッシュコマンド登録

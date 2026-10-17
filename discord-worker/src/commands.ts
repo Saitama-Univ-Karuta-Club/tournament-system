@@ -6,13 +6,13 @@ export const commands = [
   },
   {
     name: "member-register",
-    description: "自分を大会管理Botのテスト部員として登録・更新します",
+    description: "自分を大会管理Botのテストメンバーとして登録・更新します",
     type: 1,
     options: [
       {
         type: 3,
         name: "name",
-        description: "部員一覧と大会申込で使う氏名",
+        description: "メンバー一覧と大会申込で使う氏名",
         required: true,
         min_length: 1,
         max_length: 50,

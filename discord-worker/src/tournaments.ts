@@ -55,6 +55,23 @@ interface TargetMemberRow {
   discord_user_id: string;
 }
 
+export interface NotificationTarget {
+  idempotencyKey: string;
+  tournamentId: string;
+  memberId?: string;
+  notificationType: "announcement" | "invitation_dm";
+  destinationType: "channel" | "dm";
+  destinationId: string;
+}
+
+interface QueuedNotificationRow extends TournamentRow {
+  notification_id: number;
+  notification_type: "announcement" | "invitation_dm";
+  destination_id: string;
+  attempt_count: number;
+  tournament_status: string;
+}
+
 interface AttendanceTargetRow extends TournamentRow {
   member_id: string;
 }
@@ -65,7 +82,10 @@ const RESPONSE_LABELS: Record<string, string> = {
   no: "不参加",
 };
 
-const TEST_DM_LIMIT = 10;
+const QUEUE_BATCH_SIZE = 20;
+const MAX_NOTIFICATION_ATTEMPTS = 5;
+const QUEUE_LEASE_MILLISECONDS = 5 * 60 * 1000;
+const INSERT_BATCH_SIZE = 50;
 const TOURNAMENT_GRADES = new Set(["A", "B", "C", "D", "E", "F", "beginner"]);
 const TOURNAMENT_TYPES = new Set(["official", "support", "event"]);
 
@@ -319,75 +339,67 @@ function buildAnnouncementMessage(tournament: TournamentRow): DiscordMessagePayl
   };
 }
 
-async function createNotification(
-  db: D1Database,
-  values: {
-    idempotencyKey: string;
-    tournamentId: string;
-    memberId?: string;
-    notificationType: "announcement" | "invitation_dm";
-    destinationType: "channel" | "dm";
-    destinationId: string;
-  },
-): Promise<boolean> {
-  const result = await db
-    .prepare(
-      `INSERT INTO notification_deliveries (
-        idempotency_key,
-        tournament_id,
-        member_id,
-        notification_type,
-        destination_type,
-        destination_id,
-        status
-      ) VALUES (?, ?, ?, ?, ?, ?, 'pending')
-      ON CONFLICT(idempotency_key) DO NOTHING`,
-    )
-    .bind(
-      values.idempotencyKey,
-      values.tournamentId,
-      values.memberId ?? null,
-      values.notificationType,
-      values.destinationType,
-      values.destinationId,
-    )
-    .run();
+export function buildNotificationTargets(
+  tournament: TournamentRow,
+  announcementChannelId: string,
+  members: TargetMemberRow[],
+): NotificationTarget[] {
+  return [
+    {
+      idempotencyKey: `announcement:${tournament.tournament_id}:${announcementChannelId}`,
+      tournamentId: tournament.tournament_id,
+      notificationType: "announcement",
+      destinationType: "channel",
+      destinationId: announcementChannelId,
+    },
+    ...members.map((member) => ({
+      idempotencyKey: `invitation_dm:${tournament.tournament_id}:${member.member_id}`,
+      tournamentId: tournament.tournament_id,
+      memberId: member.member_id,
+      notificationType: "invitation_dm" as const,
+      destinationType: "dm" as const,
+      destinationId: member.discord_user_id,
+    })),
+  ];
+}
 
-  return (result.meta.changes ?? 0) > 0;
+export function getRetryDelayMinutes(attemptCount: number): number {
+  return [1, 5, 15, 60][Math.max(0, Math.min(attemptCount - 1, 3))];
 }
 
 async function markNotificationSent(
   db: D1Database,
-  idempotencyKey: string,
+  notificationId: number,
   discordMessageId: string,
+  sentAt: string,
 ): Promise<void> {
-  await db
-    .prepare(
-      `UPDATE notification_deliveries
-       SET status = 'sent', discord_message_id = ?, sent_at = ?
-       WHERE idempotency_key = ?`,
-    )
-    .bind(discordMessageId, new Date().toISOString(), idempotencyKey)
-    .run();
+  await db.prepare(
+    `UPDATE notification_deliveries
+     SET status = 'sent', discord_message_id = ?, sent_at = ?,
+       error_message = NULL, next_attempt_at = NULL, lease_until = NULL
+     WHERE notification_id = ?`,
+  ).bind(discordMessageId, sentAt, notificationId).run();
 }
 
 async function markNotificationFailed(
   db: D1Database,
-  idempotencyKey: string,
+  notificationId: number,
+  attemptCount: number,
   error: unknown,
+  attemptedAt: Date,
 ): Promise<void> {
-  const message = (error instanceof Error ? error.message : String(error)).slice(
-    0,
-    500,
-  );
-  await db
-    .prepare(
-      `UPDATE notification_deliveries
-       SET status = 'failed', error_message = ?
-       WHERE idempotency_key = ?`,
-    )
-    .bind(message, idempotencyKey)
-    .run();
+  const message = (error instanceof Error ? error.message : String(error)).slice(0, 500);
+  const nextAttemptAt =
+    attemptCount < MAX_NOTIFICATION_ATTEMPTS
+      ? new Date(
+          attemptedAt.getTime() + getRetryDelayMinutes(attemptCount) * 60 * 1000,
+        ).toISOString()
+      : null;
+  await db.prepare(
+    `UPDATE notification_deliveries
+     SET status = 'failed', error_message = ?, next_attempt_at = ?, lease_until = NULL
+     WHERE notification_id = ?`,
+  ).bind(message, nextAttemptAt, notificationId).run();
 }
 
 export async function upsertAnnouncementChannel(
@@ -469,12 +481,11 @@ export async function createTournament(
   return tournament;
 }
 
-export async function notifyTournament(
+export async function enqueueTournamentNotifications(
   env: TournamentEnv,
   tournament: TournamentRow,
-  dmLimit = TEST_DM_LIMIT,
-): Promise<void> {
-  if (!env.DISCORD_GUILD_ID || !env.DISCORD_BOT_TOKEN) {
+): Promise<number> {
+  if (!env.DISCORD_GUILD_ID) {
     throw new Error("Discord設定が足りません。");
   }
 
@@ -489,28 +500,6 @@ export async function notifyTournament(
     throw new Error("告知チャンネルが未設定です。");
   }
 
-  const announcementKey = `announcement:${tournament.tournament_id}:${settings.announcement_channel_id}`;
-  if (
-    await createNotification(env.DB, {
-      idempotencyKey: announcementKey,
-      tournamentId: tournament.tournament_id,
-      notificationType: "announcement",
-      destinationType: "channel",
-      destinationId: settings.announcement_channel_id,
-    })
-  ) {
-    try {
-      const message = await sendChannelMessage(
-        env.DISCORD_BOT_TOKEN,
-        settings.announcement_channel_id,
-        buildAnnouncementMessage(tournament),
-      );
-      await markNotificationSent(env.DB, announcementKey, message.id);
-    } catch (error: unknown) {
-      await markNotificationFailed(env.DB, announcementKey, error);
-    }
-  }
-
   const members = await env.DB.prepare(
     `SELECT member_id, discord_user_id
      FROM members
@@ -518,38 +507,174 @@ export async function notifyTournament(
        AND dm_enabled = 1
        AND grade = ?
        AND discord_user_id IS NOT NULL
-     ORDER BY member_id
-     LIMIT ?`,
+     ORDER BY member_id`,
   )
-    .bind(tournament.grade, dmLimit)
+    .bind(tournament.grade)
     .all<TargetMemberRow>();
 
-  for (const member of members.results) {
-    const invitationKey = `invitation_dm:${tournament.tournament_id}:${member.member_id}`;
-    if (
-      !(await createNotification(env.DB, {
-        idempotencyKey: invitationKey,
-        tournamentId: tournament.tournament_id,
-        memberId: member.member_id,
-        notificationType: "invitation_dm",
-        destinationType: "dm",
-        destinationId: member.discord_user_id,
-      }))
-    ) {
+  const targets = buildNotificationTargets(
+    tournament,
+    settings.announcement_channel_id,
+    members.results,
+  );
+  let enqueued = 0;
+  for (let offset = 0; offset < targets.length; offset += INSERT_BATCH_SIZE) {
+    const statements = targets.slice(offset, offset + INSERT_BATCH_SIZE).map((target) =>
+      env.DB.prepare(
+        `INSERT INTO notification_deliveries (
+          idempotency_key,
+          tournament_id,
+          member_id,
+          notification_type,
+          destination_type,
+          destination_id,
+          status,
+          next_attempt_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)
+        ON CONFLICT(idempotency_key) DO NOTHING`,
+      ).bind(
+        target.idempotencyKey,
+        target.tournamentId,
+        target.memberId ?? null,
+        target.notificationType,
+        target.destinationType,
+        target.destinationId,
+        new Date().toISOString(),
+      ),
+    );
+    const results = await env.DB.batch(statements);
+    enqueued += results.reduce(
+      (total, result) => total + Number(result.meta.changes ?? 0),
+      0,
+    );
+  }
+  return enqueued;
+}
+
+export async function processNotificationQueue(
+  env: TournamentEnv,
+  batchSize = QUEUE_BATCH_SIZE,
+): Promise<number> {
+  if (!env.DISCORD_BOT_TOKEN) {
+    throw new Error("Discord Bot Tokenが未設定です。");
+  }
+
+  const now = new Date();
+  const nowIso = now.toISOString();
+  const queued = await env.DB.prepare(
+    `SELECT
+      notification_deliveries.notification_id,
+      notification_deliveries.notification_type,
+      notification_deliveries.destination_id,
+      notification_deliveries.attempt_count,
+      tournaments.tournament_id,
+      tournaments.title,
+      tournaments.event_start_date,
+      tournaments.event_end_date,
+      tournaments.grade,
+      tournaments.tournament_type,
+      tournaments.venue,
+      tournaments.true_deadline,
+      tournaments.internal_deadline,
+      tournaments.document_url,
+      tournaments.status AS tournament_status
+    FROM notification_deliveries
+    INNER JOIN tournaments
+      ON tournaments.tournament_id = notification_deliveries.tournament_id
+    WHERE notification_deliveries.status IN ('pending', 'failed')
+      AND notification_deliveries.attempt_count < ?
+      AND (
+        notification_deliveries.next_attempt_at IS NULL
+        OR notification_deliveries.next_attempt_at <= ?
+      )
+      AND (
+        notification_deliveries.lease_until IS NULL
+        OR notification_deliveries.lease_until <= ?
+      )
+    ORDER BY
+      CASE notification_deliveries.notification_type
+        WHEN 'announcement' THEN 0 ELSE 1
+      END,
+      notification_deliveries.created_at,
+      notification_deliveries.notification_id
+    LIMIT ?`,
+  )
+    .bind(MAX_NOTIFICATION_ATTEMPTS, nowIso, nowIso, batchSize)
+    .all<QueuedNotificationRow>();
+
+  let processed = 0;
+  for (const notification of queued.results) {
+    const attemptedAt = new Date();
+    const leaseUntil = new Date(
+      attemptedAt.getTime() + QUEUE_LEASE_MILLISECONDS,
+    ).toISOString();
+    const claim = await env.DB.prepare(
+      `UPDATE notification_deliveries
+       SET lease_until = ?, last_attempt_at = ?, attempt_count = attempt_count + 1
+       WHERE notification_id = ?
+         AND attempt_count = ?
+         AND status IN ('pending', 'failed')
+         AND (lease_until IS NULL OR lease_until <= ?)`,
+    )
+      .bind(
+        leaseUntil,
+        attemptedAt.toISOString(),
+        notification.notification_id,
+        notification.attempt_count,
+        attemptedAt.toISOString(),
+      )
+      .run();
+    if (Number(claim.meta.changes ?? 0) !== 1) {
+      continue;
+    }
+
+    processed += 1;
+    if (notification.tournament_status !== "active") {
+      await env.DB.prepare(
+        `UPDATE notification_deliveries
+         SET status = 'skipped', error_message = ?, next_attempt_at = NULL,
+           lease_until = NULL
+         WHERE notification_id = ?`,
+      )
+        .bind("大会が回答受付中ではないため送信を停止しました。", notification.notification_id)
+        .run();
       continue;
     }
 
     try {
-      const message = await sendDirectMessage(
-        env.DISCORD_BOT_TOKEN,
-        member.discord_user_id,
-        buildAttendanceMessage(tournament),
+      const payload =
+        notification.notification_type === "announcement"
+          ? buildAnnouncementMessage(notification)
+          : buildAttendanceMessage(notification);
+      const message =
+        notification.notification_type === "announcement"
+          ? await sendChannelMessage(
+              env.DISCORD_BOT_TOKEN,
+              notification.destination_id,
+              payload,
+            )
+          : await sendDirectMessage(
+              env.DISCORD_BOT_TOKEN,
+              notification.destination_id,
+              payload,
+            );
+      await markNotificationSent(
+        env.DB,
+        notification.notification_id,
+        message.id,
+        new Date().toISOString(),
       );
-      await markNotificationSent(env.DB, invitationKey, message.id);
     } catch (error: unknown) {
-      await markNotificationFailed(env.DB, invitationKey, error);
+      await markNotificationFailed(
+        env.DB,
+        notification.notification_id,
+        notification.attempt_count + 1,
+        error,
+        attemptedAt,
+      );
     }
   }
+  return processed;
 }
 
 export async function notifyPendingTournaments(
@@ -569,11 +694,28 @@ export async function notifyPendingTournaments(
       tournaments.document_url
     FROM tournaments
     WHERE tournaments.status = 'active'
-      AND NOT EXISTS (
-        SELECT 1
-        FROM notification_deliveries
-        WHERE notification_deliveries.tournament_id = tournaments.tournament_id
-          AND notification_deliveries.notification_type = 'announcement'
+      AND (
+        NOT EXISTS (
+          SELECT 1
+          FROM notification_deliveries
+          WHERE notification_deliveries.tournament_id = tournaments.tournament_id
+            AND notification_deliveries.notification_type = 'announcement'
+        )
+        OR EXISTS (
+          SELECT 1
+          FROM members
+          WHERE members.status = 'active'
+            AND members.dm_enabled = 1
+            AND members.grade = tournaments.grade
+            AND members.discord_user_id IS NOT NULL
+            AND NOT EXISTS (
+              SELECT 1
+              FROM notification_deliveries
+              WHERE notification_deliveries.tournament_id = tournaments.tournament_id
+                AND notification_deliveries.member_id = members.member_id
+                AND notification_deliveries.notification_type = 'invitation_dm'
+            )
+        )
       )
     ORDER BY tournaments.created_at
     LIMIT 5`,
@@ -581,7 +723,7 @@ export async function notifyPendingTournaments(
 
   for (const tournament of pending.results) {
     try {
-      await notifyTournament(env, tournament);
+      await enqueueTournamentNotifications(env, tournament);
     } catch (error: unknown) {
       console.error(
         `未通知大会のDiscord通知エラー: ${tournament.tournament_id}`,
@@ -589,6 +731,7 @@ export async function notifyPendingTournaments(
       );
     }
   }
+  await processNotificationQueue(env);
 }
 
 export async function createTestTournamentAndNotify(
@@ -611,7 +754,8 @@ export async function createTestTournamentAndNotify(
     trueDeadline: addDays(now, 10).toISOString(),
     createdByDiscordUserId: normalized.discordUserId,
   });
-  await notifyTournament(env, tournament);
+  await enqueueTournamentNotifications(env, tournament);
+  await processNotificationQueue(env);
 }
 
 export async function recordAttendanceResponse(

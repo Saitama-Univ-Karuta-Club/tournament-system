@@ -237,7 +237,7 @@ export async function handleRequest(
     interaction.data?.name === "member-register"
   ) {
     if (!env.DISCORD_GUILD_ID || interaction.guild_id !== env.DISCORD_GUILD_ID) {
-      return ephemeralMessage("このサーバーでは部員登録できません。");
+      return ephemeralMessage("このサーバーではメンバー登録できません。");
     }
 
     try {
@@ -249,13 +249,13 @@ export async function handleRequest(
       });
 
       return ephemeralMessage(
-        `テスト部員として登録しました。\n氏名: ${member.displayName}\n出場級: ${formatGrade(member.grade)}`,
+        `テストメンバーとして登録しました。\n氏名: ${member.displayName}\n出場級: ${formatGrade(member.grade)}`,
       );
     } catch (error: unknown) {
-      console.error("部員登録エラー", error);
+      console.error("メンバー登録エラー", error);
       const message =
         error instanceof Error ? error.message : "不明なエラーが発生しました。";
-      return ephemeralMessage(`部員登録に失敗しました。\n${message}`);
+      return ephemeralMessage(`メンバー登録に失敗しました。\n${message}`);
     }
   }
 
