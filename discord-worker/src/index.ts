@@ -13,6 +13,7 @@ import {
   type MemberRegistrationRequestResult,
   type RegisterMemberInput,
 } from "./members";
+import { processMemberApprovalNotificationQueue } from "./member-notifications";
 import {
   createTestTournamentAndNotify,
   notifyPendingTournaments,
@@ -32,6 +33,8 @@ export interface Env {
   DISCORD_APPLICATION_ID?: string;
   DISCORD_GUILD_ID?: string;
   DISCORD_BOT_TOKEN?: string;
+  MEMBER_PORTAL_URL?: string;
+  TOURNAMENT_ADMIN_URL?: string;
 }
 
 interface DiscordInteraction {
@@ -271,13 +274,17 @@ export async function handleRequest(
     }
 
     try {
+      const dan = getIntegerOption(interaction, "dan");
       const registration = await memberRegistrar(env.DB, {
         discordUserId:
           interaction.member?.user?.id ?? interaction.user?.id ?? "",
         displayName: getStringOption(interaction, "name"),
         displayNameKana: getStringOption(interaction, "name-kana"),
         grade: getStringOption(interaction, "grade"),
-        rank: getIntegerOption(interaction, "rank"),
+        // 再登録直後にDiscord側へ古いコマンド定義が残る時間を考慮する。
+        rank: Number.isNaN(dan)
+          ? getIntegerOption(interaction, "rank")
+          : dan,
       });
 
       if (registration.requestType === "update") {
@@ -460,6 +467,11 @@ export default {
     env: Env,
     ctx: ExecutionContext,
   ): void {
-    ctx.waitUntil(notifyPendingTournaments(env));
+    ctx.waitUntil(
+      Promise.all([
+        notifyPendingTournaments(env),
+        processMemberApprovalNotificationQueue(env),
+      ]).then(() => undefined),
+    );
   },
 } satisfies ExportedHandler<Env>;

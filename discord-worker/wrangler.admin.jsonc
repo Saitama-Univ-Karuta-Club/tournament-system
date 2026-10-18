@@ -7,7 +7,9 @@
     "enabled": true
   },
   "vars": {
-    "DOCUMENT_PUBLIC_BASE_URL": "https://sukc-tournament-discord-bot.saitama-univ-karuta-club.workers.dev"
+    "DOCUMENT_PUBLIC_BASE_URL": "https://sukc-tournament-discord-bot.saitama-univ-karuta-club.workers.dev",
+    "DISCORD_GUILD_ID": "1534368058632572990",
+    "DISCORD_REDIRECT_URI": "https://sukc-tournament-admin.saitama-univ-karuta-club.workers.dev/auth/discord/callback"
   },
   "access": {
     "dev": {

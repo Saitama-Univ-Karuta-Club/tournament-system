@@ -14,7 +14,7 @@
 - `/setup-reminder-channel` による管理者用締切リマインダー送信先の設定
 - `/test-reminder` による管理者用チャンネルの送信権限・表示テスト
 - `/test-tournament` による告知・対象級DM・参加回答ボタンの疎通確認
-- Cloudflare Accessで保護する大会登録Web管理画面
+- Cloudflare AccessまたはDiscord大会管理者ロールで保護する大会登録Web管理画面
 - 同名大会の複数級一括登録、級ごとの開催日設定、全級メンバーを対象にする「すべて」の大会
 - 大会要項PDFの直接アップロード、自動リネーム、Discordからの閲覧リンク
 - 管理画面での大会一覧、回答者別集計、ステータス確認・変更
@@ -22,9 +22,9 @@
 - 同時登録した複数級の一括申込完了と、参加者一覧付きの告知チャンネル通知
 - 管理画面でのメンバー一覧、氏名・級・状態・DM設定の変更
 - 管理画面でのメンバー登録申請の確認・承認・却下
-- 管理者メールを記録する大会登録・ステータス変更の監査情報
+- 管理者のメールまたはDiscord IDを記録する大会登録・ステータス変更の監査情報
 - Web登録された未通知大会を1分ごとに取得するDiscord通知処理
-- サークル内締切の翌日0:00と主催者締切日0:00に、参加希望者の氏名・よみがなを管理者用チャンネルへ送る自動リマインダー
+- サークル内締切の翌日0:00と主催者締切日0:00に、参加希望者の氏名・よみがなと大会管理画面リンクを管理者用チャンネルへ送る自動リマインダー
 - 署名付きPING受信時の開発用サーバーへのコマンド登録
 - D1によるメンバー・大会・回答・通知履歴の管理と、R2による大会要項PDFの保存
 
@@ -33,11 +33,14 @@
 役割と認証境界を分けるため、同じソースから2つのWorkerを配備します。
 
 - `sukc-tournament-discord-bot`: Discord Interaction受信用。Discord署名を検証し、BotのSecretを保持する
-- `sukc-tournament-admin`: 大会登録画面。Worker全体をCloudflare Accessで保護し、BotのSecretは保持しない
+- `sukc-tournament-admin`: 大会登録画面。移行中はCloudflare Accessを併用し、最終的にDiscord大会管理者ロールで保護する。BotのSecretは保持しない
+- `sukc-tournament-portal`: 承認済みメンバー用。Discord OAuthで本人確認し、大会閲覧・PDF閲覧・Web回答を提供する
 
 管理画面で保存した大会はD1へ入り、Discord WorkerのCronが1分以内を目安に取得して告知とDMを送ります。管理画面WorkerへBotトークンを複製しない構成です。
 
 PDF本体は非公開のR2バケット `sukc-tournament-documents` に保存し、D1には閲覧URLだけを記録します。閲覧URLには推測困難なUUIDを含め、Bot Workerが該当ファイルだけを返します。URLを知っている人は閲覧できるため、Discord外へリンクを公開しない運用を前提とします。
+
+メンバーポータル内のPDFリンクは、ログイン済みの承認済みメンバーだけが利用できます。既存のDiscord通知に記載済みのBot Worker側URLは、段階移行のため引き続き閲覧できます。
 
 ## 秘密情報
 
@@ -53,6 +56,29 @@ npx wrangler secret put DISCORD_BOT_TOKEN
 
 BotトークンやSecretの実値はGitへコミットしません。
 
+メンバーポータルには次のSecretを登録します。Botトークンは登録しません。
+
+```sh
+npx wrangler secret put DISCORD_APPLICATION_ID --config wrangler.portal.jsonc
+npx wrangler secret put DISCORD_CLIENT_SECRET --config wrangler.portal.jsonc
+npx wrangler secret put SESSION_SECRET --config wrangler.portal.jsonc
+```
+
+大会管理画面のDiscord認証にも同じ3種類のSecretを登録します。Botトークンは登録しません。
+
+```sh
+npx wrangler secret put DISCORD_APPLICATION_ID --config wrangler.admin.jsonc
+npx wrangler secret put DISCORD_CLIENT_SECRET --config wrangler.admin.jsonc
+npx wrangler secret put SESSION_SECRET --config wrangler.admin.jsonc
+```
+
+Discord Developer PortalのOAuth2 Redirectsには、次を登録します。
+
+```text
+https://sukc-tournament-portal.saitama-univ-karuta-club.workers.dev/auth/discord/callback
+https://sukc-tournament-admin.saitama-univ-karuta-club.workers.dev/auth/discord/callback
+```
+
 ## 開発コマンド
 
 ```sh
@@ -61,6 +87,7 @@ npm test
 npm run typecheck
 npm run dev
 npm run dev:admin
+npm run dev:portal
 ```
 
 ## D1マイグレーション
@@ -80,9 +107,10 @@ npm run db:migrate:remote
 npm run db:migrate:remote
 npm run deploy
 npm run deploy:admin
+npm run deploy:portal
 ```
 
-`sukc-tournament-admin` は、Cloudflareダッシュボードの `Workers & Pages` からWorkerを選び、`Access` で本番トラフィック全体を保護します。許可対象は最初はCloudflareアカウントのメンバーだけに限定します。Accessが有効でなければアプリ自身も403を返すため、管理画面は利用できません。
+`sukc-tournament-admin` は、D1の `discord_settings.admin_role_id` に登録したDiscordロールを持つ本番サーバーのメンバーだけを許可します。OAuth移行の検証が終わるまではCloudflare Accessも併用でき、既存管理者は従来のメール認証でも操作できます。Discord認証を本番利用する際は、Developer Portalへ管理画面用Redirect URLを追加し、上記Secretと大会管理者ロールIDを設定してからCloudflare Accessを解除します。
 
 ## 通知キュー
 

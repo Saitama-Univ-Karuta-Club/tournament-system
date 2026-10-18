@@ -20,14 +20,30 @@ function authenticatedContext(waitUntil = vi.fn()) {
 }
 
 describe("Admin Worker", () => {
-  it("rejects a request that did not pass Cloudflare Access", async () => {
+  it("redirects an unauthenticated browser to Discord login", async () => {
     const response = await handleAdminRequest(
       new Request("https://admin.example.com/"),
       env,
       { waitUntil: vi.fn() },
     );
 
-    expect(response.status).toBe(403);
+    expect(response.status).toBe(302);
+    expect(response.headers.get("Location")).toBe(
+      "/auth/discord?return_to=%2F",
+    );
+  });
+
+  it("rejects unauthenticated API access without redirecting", async () => {
+    const response = await handleAdminRequest(
+      new Request("https://admin.example.com/api/tournaments"),
+      env,
+      { waitUntil: vi.fn() },
+    );
+
+    expect(response.status).toBe(401);
+    await expect(response.json()).resolves.toEqual({
+      error: "Discordでの大会管理者ログインが必要です。",
+    });
   });
 
   it("redirects the root to the tournament registration page", async () => {
@@ -182,6 +198,28 @@ describe("Admin Worker", () => {
     expect(html).toContain("payload.eventEndDate = payload.eventDate");
     expect(formHtml).toContain('id="grade-date-settings"');
     expect(html).toContain("payload.eventDatesByGrade");
+  });
+
+  it("keeps date and deadline inputs within the mobile viewport", async () => {
+    const response = await handleAdminRequest(
+      new Request("https://admin.example.com/register"),
+      env,
+      authenticatedContext(),
+    );
+
+    const html = await response.text();
+    expect(html).toContain(
+      '.grade-date-grid > label { width: 100%; min-width: 0; }',
+    );
+    expect(html).toContain(
+      'input, select { width: 100%; min-width: 0; max-width: 100%;',
+    );
+    expect(html).toContain('inline-size: 100%;');
+    expect(html).toContain('min-inline-size: 0;');
+    expect(html).toContain('-webkit-appearance: none;');
+    expect(html).toContain(
+      'input[type="datetime-local"]::-webkit-datetime-edit',
+    );
   });
 
   it("checks and clears every grade with the all-grades checkbox", async () => {

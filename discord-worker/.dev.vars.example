@@ -3,3 +3,13 @@ DISCORD_PUBLIC_KEY="Discord Developer Portalの公開鍵"
 DISCORD_APPLICATION_ID="Discord Developer PortalのアプリケーションID"
 DISCORD_GUILD_ID="開発用DiscordサーバーのID"
 DISCORD_BOT_TOKEN="Botトークン"
+MEMBER_PORTAL_URL="https://sukc-tournament-portal.saitama-univ-karuta-club.workers.dev"
+TOURNAMENT_ADMIN_URL="https://sukc-tournament-admin.saitama-univ-karuta-club.workers.dev/tournaments"
+
+# メンバーポータル（Discord OAuth）
+DISCORD_CLIENT_SECRET="Discord Developer PortalのOAuth2 Client Secret"
+DISCORD_REDIRECT_URI="http://localhost:8787/auth/discord/callback"
+SESSION_SECRET="openssl rand -base64 32 等で生成した十分に長いランダム値"
+
+# 大会管理画面でも上記のDiscord OAuth設定を利用します。
+# 本番の管理画面用Redirect URIはwrangler.admin.jsoncで指定します。

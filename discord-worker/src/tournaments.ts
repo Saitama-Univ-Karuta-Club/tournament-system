@@ -9,6 +9,8 @@ export interface TournamentEnv {
   DB: D1Database;
   DISCORD_GUILD_ID?: string;
   DISCORD_BOT_TOKEN?: string;
+  MEMBER_PORTAL_URL?: string;
+  TOURNAMENT_ADMIN_URL?: string;
 }
 
 export interface TestTournamentInput {
@@ -295,6 +297,7 @@ export function buildAttendanceMessage(
   tournament: TournamentRow,
   selectedResponse?: string,
   isUpdate = false,
+  memberPortalUrl?: string,
 ): DiscordMessagePayload {
   const selected = selectedResponse
     ? `\n現在の回答: **${RESPONSE_LABELS[selectedResponse]}**`
@@ -322,10 +325,18 @@ export function buildAttendanceMessage(
   if (tournament.venue) {
     fields.push({ name: "会場", value: tournament.venue, inline: false });
   }
+  const portalUrl = buildMemberPortalUrl(memberPortalUrl);
+  if (portalUrl) {
+    fields.push({
+      name: "Web版大会参加確認",
+      value: `[大会一覧・回答画面を開く](${portalUrl})`,
+      inline: false,
+    });
+  }
   if (tournament.document_url) {
     fields.push({
       name: "大会要項",
-      value: `[リンクを開く](${tournament.document_url})`,
+      value: `[PDFを開く](${tournament.document_url})`,
       inline: false,
     });
   }
@@ -370,9 +381,34 @@ export function buildAttendanceMessage(
   };
 }
 
-function buildAnnouncementMessage(
+function buildMemberPortalUrl(memberPortalUrl?: string): string | undefined {
+  if (!memberPortalUrl) return undefined;
+  try {
+    const url = new URL(memberPortalUrl);
+    if (url.protocol !== "https:") return undefined;
+    url.hash = "answer";
+    return url.toString();
+  } catch {
+    return undefined;
+  }
+}
+
+function buildTournamentAdminUrl(
+  tournamentAdminUrl?: string,
+): string | undefined {
+  if (!tournamentAdminUrl) return undefined;
+  try {
+    const url = new URL(tournamentAdminUrl);
+    return url.protocol === "https:" ? url.toString() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function buildAnnouncementMessage(
   tournament: TournamentRow,
   isUpdate = false,
+  memberPortalUrl?: string,
 ): DiscordMessagePayload {
   const fields = [
     {
@@ -396,10 +432,18 @@ function buildAnnouncementMessage(
   if (tournament.venue) {
     fields.push({ name: "会場", value: tournament.venue, inline: false });
   }
+  const portalUrl = buildMemberPortalUrl(memberPortalUrl);
+  if (portalUrl) {
+    fields.push({
+      name: "Web版大会参加確認",
+      value: `[大会一覧・回答画面を開く](${portalUrl})`,
+      inline: false,
+    });
+  }
   if (tournament.document_url) {
     fields.push({
       name: "大会要項",
-      value: `[リンクを開く](${tournament.document_url})`,
+      value: `[PDFを開く](${tournament.document_url})`,
       inline: false,
     });
   }
@@ -498,12 +542,14 @@ export function buildDeadlineReminderMessage(
   reminderKind: ReminderKind,
   participants: ReminderParticipant[] = [],
   isTest = false,
+  tournamentAdminUrl?: string,
 ): DiscordMessagePayload {
   const isInternal = reminderKind === "internal_deadline";
   const deadlineLabel = isInternal ? "サークル内締切" : "主催者締切";
   const deadline = isInternal
     ? tournament.internal_deadline
     : tournament.true_deadline;
+  const adminUrl = buildTournamentAdminUrl(tournamentAdminUrl);
 
   return {
     content: isTest
@@ -527,6 +573,13 @@ export function buildDeadlineReminderMessage(
             inline: true,
           },
           ...buildParticipantFields(participants),
+          ...(adminUrl
+            ? [{
+              name: "大会管理画面",
+              value: `[大会一覧・申込状況を開く](${adminUrl})`,
+              inline: false,
+            }]
+            : []),
         ],
       },
     ],
@@ -826,6 +879,7 @@ export async function sendTestDeadlineReminder(
       reminderKind,
       participants,
       true,
+      env.TOURNAMENT_ADMIN_URL,
     ),
   );
   return { tournamentTitle: tournament.title, reminderKind };
@@ -1319,6 +1373,7 @@ export async function processNotificationQueue(
         payload = buildAnnouncementMessage(
           notification,
           notification.delivery_context === "update",
+          env.MEMBER_PORTAL_URL,
         );
       } else if (notification.notification_type === "deadline_reminder") {
         if (!notification.reminder_kind) {
@@ -1349,6 +1404,8 @@ export async function processNotificationQueue(
           notification,
           notification.reminder_kind,
           participants,
+          false,
+          env.TOURNAMENT_ADMIN_URL,
         );
       } else if (notification.notification_type === "application_completed") {
         payload = await applicationCompletedPayload(env.DB, notification);
@@ -1367,6 +1424,7 @@ export async function processNotificationQueue(
           notification,
           selectedResponse,
           notification.delivery_context === "update",
+          env.MEMBER_PORTAL_URL,
         );
       }
       const message =
@@ -1503,7 +1561,9 @@ export async function recordAttendanceResponse(
       tournaments.grade,
       tournaments.all_grades,
       tournaments.internal_deadline,
-      tournaments.true_deadline
+      tournaments.true_deadline,
+      tournaments.venue,
+      tournaments.document_url
     FROM members
     INNER JOIN tournaments ON tournaments.tournament_id = ?
     WHERE members.discord_user_id = ?
@@ -1539,5 +1599,10 @@ export async function recordAttendanceResponse(
     .bind(target.tournament_id, target.member_id, input.response, now, now)
     .run();
 
-  return buildAttendanceMessage(target, input.response);
+  return buildAttendanceMessage(
+    target,
+    input.response,
+    false,
+    env.MEMBER_PORTAL_URL,
+  );
 }

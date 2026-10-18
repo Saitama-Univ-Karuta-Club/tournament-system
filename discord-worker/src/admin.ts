@@ -25,10 +25,16 @@ import {
   uploadTournamentDocument,
   type DocumentEnv,
 } from "./documents";
+import {
+  handleAdminAuthRequest,
+  readAdminDiscordPrincipal,
+  type AdminAuthEnv,
+} from "./admin-auth";
 
-export interface AdminEnv extends TournamentEnv, DocumentEnv {}
+export interface AdminEnv extends TournamentEnv, DocumentEnv, AdminAuthEnv {}
 
-type AdminContext = Pick<ExecutionContext, "access" | "waitUntil">;
+type AdminContext = Pick<ExecutionContext, "waitUntil"> &
+  Partial<Pick<ExecutionContext, "access">>;
 type TournamentCreator = (
   env: AdminEnv,
   inputs: TournamentInput[],
@@ -630,7 +636,9 @@ function adminHtml(page: AdminPage): string {
     h1 { margin: 0; font-size: 1.25rem; }
     h2 { margin: 0 0 20px; font-size: 1.15rem; }
     h3 { margin: 0; font-size: 1.05rem; }
-    #identity { font-size: .82rem; opacity: .85; }
+    .identity-wrap { display: inline-flex; align-items: center; gap: 10px; font-size: .82rem; }
+    #identity { opacity: .85; }
+    #logout { color: white; text-underline-offset: 3px; }
     .tab-bar { background: white; border-bottom: 1px solid #dce1eb; box-shadow: 0 2px 8px #1720330a; }
     .tabs { max-width: 1080px; margin: auto; padding: 0 18px; display: flex; gap: 4px; overflow-x: auto; }
     .tab { position: relative; display: inline-flex; align-items: center; color: #596579; text-decoration: none; font-weight: 700; white-space: nowrap; padding: 15px 18px 12px; border-bottom: 3px solid transparent; }
@@ -643,11 +651,11 @@ function adminHtml(page: AdminPage): string {
     .panel + .panel { margin-top: 26px; }
     [hidden] { display: none !important; }
     .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
-    .grid > label, .grid > fieldset { width: 100%; }
+    .grid > label, .grid > fieldset, .grade-date-grid > label { width: 100%; min-width: 0; }
     label { display: grid; gap: 7px; font-weight: 650; font-size: .9rem; }
     .wide { grid-column: 1 / -1; }
     .optional { color: #697386; font-size: .78rem; font-weight: 500; }
-    input, select { width: 100%; border: 1px solid #b9c1d0; border-radius: 8px; padding: 11px 12px; font: inherit; color: inherit; background: white; }
+    input, select { width: 100%; min-width: 0; max-width: 100%; border: 1px solid #b9c1d0; border-radius: 8px; padding: 11px 12px; font: inherit; color: inherit; background: white; }
     input:focus, select:focus { outline: 3px solid #7c9cff3b; border-color: #526fc4; }
     .grade-picker { min-width: 0; margin: 0; padding: 0; border: 0; }
     .grade-picker legend { margin-bottom: 7px; padding: 0; font-size: .9rem; font-weight: 650; }
@@ -727,11 +735,40 @@ function adminHtml(page: AdminPage): string {
     .dialog-note { margin: 0 0 18px; color: #697386; font-size: .84rem; }
     .dialog-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; margin-top: 22px; flex-wrap: wrap; }
     .dialog-actions .status-message { margin-right: auto; }
-    @media (max-width: 680px) { .grid, .grade-date-grid, .response-sections, .member-grid, .request-comparison { grid-template-columns: 1fr; } .request-arrow { transform: rotate(90deg); text-align: center; } .wide, .grade-date-settings { grid-column: auto; } .panel { padding: 18px; } .header-inner { display: block; } #identity { display: block; margin-top: 6px; } .tabs { padding: 0 8px; } .tab { padding-inline: 13px; } .card-heading { align-items: flex-start; } .list-controls { align-items: stretch; } .list-controls label { flex: 1 1 100%; } }
+    @media (max-width: 680px) {
+      .grid, .grade-date-grid, .response-sections, .member-grid, .request-comparison { grid-template-columns: minmax(0, 1fr); }
+      input[type="date"], input[type="datetime-local"] {
+        display: block;
+        inline-size: 100%;
+        min-inline-size: 0;
+        max-inline-size: 100%;
+        overflow: hidden;
+        -webkit-appearance: none;
+        appearance: none;
+        font-size: 16px;
+      }
+      input[type="date"]::-webkit-date-and-time-value,
+      input[type="datetime-local"]::-webkit-date-and-time-value,
+      input[type="date"]::-webkit-datetime-edit,
+      input[type="datetime-local"]::-webkit-datetime-edit {
+        min-inline-size: 0;
+        text-align: left;
+      }
+      .request-arrow { transform: rotate(90deg); text-align: center; }
+      .wide, .grade-date-settings { grid-column: auto; }
+      .panel { padding: 18px; }
+      .header-inner { display: block; }
+      .identity-wrap { margin-top: 6px; }
+      .tabs { padding: 0 8px; }
+      .tab { padding-inline: 13px; }
+      .card-heading { align-items: flex-start; }
+      .list-controls { align-items: stretch; }
+      .list-controls label { flex: 1 1 100%; }
+    }
   </style>
 </head>
 <body data-page="${page}">
-  <header><div class="header-inner"><h1>大会管理（Discord版MVP）</h1><span id="identity">認証情報を確認中…</span></div></header>
+  <header><div class="header-inner"><h1>大会管理（Discord版MVP）</h1><span class="identity-wrap"><span id="identity">認証情報を確認中…</span><a id="logout" href="/auth/logout" hidden>ログアウト</a></span></div></header>
   <div class="tab-bar">
     <nav class="tabs" aria-label="管理画面メニュー">
       <a class="${tabClass("register")}" href="/register"${currentPage("register")}>大会登録</a>
@@ -1471,7 +1508,8 @@ function adminHtml(page: AdminPage): string {
     }
 
     fetch('/api/session').then((response) => response.json()).then((data) => {
-      identity.textContent = data.email || '認証済み';
+      identity.textContent = data.displayName || data.email || '認証済み';
+      document.querySelector('#logout').hidden = data.provider !== 'discord';
     }).catch(() => { identity.textContent = '認証済み'; });
     loadPendingRequestCount();
     setInterval(() => {
@@ -1603,17 +1641,47 @@ export async function handleAdminRequest(
   statusesUpdater: TournamentStatusesUpdater = updateTournamentStatuses,
   tournamentEditor: TournamentEditor = editTournaments,
 ): Promise<Response> {
-  if (!ctx.access) {
-    return json({ error: "Cloudflare Accessによる認証が必要です。" }, 403);
-  }
-
-  const identity = await ctx.access.getIdentity();
-  const email = identity?.email?.trim();
-  if (!email) {
-    return json({ error: "認証済みメールアドレスを確認できません。" }, 403);
-  }
-
   const url = new URL(request.url);
+  const authResponse = await handleAdminAuthRequest(request, env);
+  if (authResponse) return authResponse;
+
+  let principal:
+    | {
+      provider: "cloudflare" | "discord";
+      displayName: string;
+      auditIdentity: string;
+      discordUserId?: string;
+    }
+    | null = null;
+  if (ctx.access) {
+    const identity = await ctx.access.getIdentity();
+    const email = identity?.email?.trim();
+    if (email) {
+      principal = {
+        provider: "cloudflare",
+        displayName: email,
+        auditIdentity: email,
+      };
+    }
+  }
+  if (!principal) {
+    principal = await readAdminDiscordPrincipal(request, env);
+  }
+  if (!principal) {
+    if (url.pathname.startsWith("/api/")) {
+      return json({ error: "Discordでの大会管理者ログインが必要です。" }, 401);
+    }
+    const returnTo = `${url.pathname}${url.search}`;
+    return new Response(null, {
+      status: 302,
+      headers: {
+        ...securityHeaders,
+        Location: `/auth/discord?return_to=${encodeURIComponent(returnTo)}`,
+      },
+    });
+  }
+  const actor = principal.auditIdentity;
+
   if (request.method === "GET" && url.pathname === "/") {
     return new Response(null, {
       status: 302,
@@ -1633,7 +1701,11 @@ export async function handleAdminRequest(
   }
 
   if (request.method === "GET" && url.pathname === "/api/session") {
-    return json({ email });
+    return json({
+      email: principal.displayName,
+      displayName: principal.displayName,
+      provider: principal.provider,
+    });
   }
 
   if (request.method === "POST" && url.pathname === "/api/documents") {
@@ -1644,7 +1716,7 @@ export async function handleAdminRequest(
       return json({ error: "PDFをフォーム形式で送信してください。" }, 415);
     }
     try {
-      return json(await uploadTournamentDocument(request, env, email), 201);
+      return json(await uploadTournamentDocument(request, env, actor), 201);
     } catch (error: unknown) {
       if (error instanceof DocumentUploadError) {
         return json({ error: error.message }, 400);
@@ -1714,7 +1786,7 @@ export async function handleAdminRequest(
           env,
           memberRequestPath[1],
           decision,
-          email,
+          actor,
         ),
       );
     } catch (error: unknown) {
@@ -1743,7 +1815,7 @@ export async function handleAdminRequest(
     }
 
     try {
-      const member = await memberUpdater(env, memberPath[1], body, email);
+      const member = await memberUpdater(env, memberPath[1], body, actor);
       return json({ member });
     } catch (error: unknown) {
       if (error instanceof MemberAdminError) {
@@ -1784,7 +1856,8 @@ export async function handleAdminRequest(
           grade,
           eventStartDate: String(eventDatesByGrade?.[grade] ?? body.eventStartDate ?? ""),
           eventEndDate: String(eventDatesByGrade?.[grade] ?? body.eventStartDate ?? ""),
-          createdByEmail: email,
+          createdByDiscordUserId: principal.discordUserId,
+          createdByEmail: actor,
         } as TournamentInput),
       );
     } catch (error: unknown) {
@@ -1830,7 +1903,7 @@ export async function handleAdminRequest(
         env,
         body.tournamentIds.map(String),
         body,
-        email,
+        actor,
       );
       return json({
         ok: true,
@@ -1872,7 +1945,7 @@ export async function handleAdminRequest(
         env,
         body.tournamentIds.map(String),
         status,
-        email,
+        actor,
       );
       return json({
         ...result,
@@ -1918,7 +1991,7 @@ export async function handleAdminRequest(
 
     try {
       return json(
-        await statusUpdater(env, statusPath[1], status, email),
+        await statusUpdater(env, statusPath[1], status, actor),
       );
     } catch (error: unknown) {
       if (error instanceof AdminRequestError) {

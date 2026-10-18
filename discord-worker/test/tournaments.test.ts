@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  buildAnnouncementMessage,
   buildApplicationCompletedMessage,
   buildAttendanceMessage,
   buildDeadlineReminderMessage,
@@ -88,6 +89,30 @@ describe("attendance DM", () => {
 
     expect(message.content).toContain("大会情報更新");
     expect(message.content).toContain("現在の回答: **参加希望**");
+  });
+
+  it("adds the member portal and PDF links to announcements and DMs", () => {
+    const withDocument = {
+      ...tournament,
+      document_url: "https://bot.example.com/documents/test/guide.pdf",
+    };
+    const portalUrl = "https://portal.example.com";
+    const messages = [
+      buildAnnouncementMessage(withDocument, false, portalUrl),
+      buildAttendanceMessage(withDocument, undefined, false, portalUrl),
+    ];
+
+    for (const message of messages) {
+      const fields = message.embeds?.[0]?.fields ?? [];
+      expect(fields).toContainEqual(expect.objectContaining({
+        name: "Web版大会参加確認",
+        value: "[大会一覧・回答画面を開く](https://portal.example.com/#answer)",
+      }));
+      expect(fields).toContainEqual(expect.objectContaining({
+        name: "大会要項",
+        value: "[PDFを開く](https://bot.example.com/documents/test/guide.pdf)",
+      }));
+    }
   });
 });
 
@@ -307,10 +332,15 @@ describe("notification queue", () => {
           displayNameKana: "いしだ ようおん",
         },
       ],
+      false,
+      "https://admin.example.com/tournaments",
     );
 
     expect(message.content).toContain("本日が主催者締切");
     expect(message.embeds?.[0]?.fields?.at(-1)?.value).toContain(
+      "https://admin.example.com/tournaments",
+    );
+    expect(message.embeds?.[0]?.fields?.at(-2)?.value).toContain(
       "石田洋音（いしだ ようおん）",
     );
     expect(message.components).toBeUndefined();

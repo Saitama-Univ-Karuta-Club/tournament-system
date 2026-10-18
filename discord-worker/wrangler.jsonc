@@ -6,6 +6,10 @@
   "observability": {
     "enabled": true
   },
+  "vars": {
+    "MEMBER_PORTAL_URL": "https://sukc-tournament-portal.saitama-univ-karuta-club.workers.dev",
+    "TOURNAMENT_ADMIN_URL": "https://sukc-tournament-admin.saitama-univ-karuta-club.workers.dev/tournaments"
+  },
   "triggers": {
     "crons": ["*/1 * * * *"]
   },

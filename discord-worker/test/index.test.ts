@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { commands } from "../src/commands";
 import { handleRequest, type Env } from "../src/index";
 
 const env: Env = {
@@ -11,6 +12,14 @@ const env: Env = {
 };
 
 describe("Discord Worker", () => {
+  it("uses dan as the member registration option name", () => {
+    const command = commands.find((candidate) => candidate.name === "member-register");
+    const optionNames = command?.options?.map((option) => option.name) ?? [];
+
+    expect(optionNames).toContain("dan");
+    expect(optionNames).not.toContain("rank");
+  });
+
   it("returns health information", async () => {
     const response = await handleRequest(
       new Request("https://example.com/health"),
@@ -164,7 +173,7 @@ describe("Discord Worker", () => {
               { name: "name", value: "埼玉 花子" },
               { name: "name-kana", value: "さいたま はなこ" },
               { name: "grade", value: "B" },
-              { name: "rank", value: 2 },
+              { name: "dan", value: 2 },
             ],
           },
         }),

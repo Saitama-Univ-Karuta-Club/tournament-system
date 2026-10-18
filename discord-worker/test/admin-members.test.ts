@@ -55,11 +55,14 @@ describe("member registration decisions", () => {
       memberId: "M-11111111-1111-4111-8111-111111111111",
     });
     expect(batch).toHaveBeenCalledOnce();
-    expect(batch.mock.calls[0][0]).toHaveLength(4);
+    expect(batch.mock.calls[0][0]).toHaveLength(5);
     const invalidationSql = sqlStatements.find(
       (sql) => sql.includes("UPDATE responses") && sql.includes("is_valid = 0"),
     );
     expect(invalidationSql).toContain("tournaments.all_grades = 0");
+    expect(sqlStatements.some((sql) =>
+      sql.includes("INSERT INTO member_notification_deliveries")
+    )).toBe(true);
   });
 
   it("does not invalidate responses when an update keeps the same grade", async () => {
@@ -89,10 +92,45 @@ describe("member registration decisions", () => {
       "admin@example.com",
     );
 
-    expect(batch.mock.calls[0][0]).toHaveLength(3);
+    expect(batch.mock.calls[0][0]).toHaveLength(4);
     expect(sqlStatements.some((sql) => sql.includes("UPDATE responses"))).toBe(
       false,
     );
+  });
+
+  it("queues a distinct approval DM for a new registration", async () => {
+    const requestId = "MR-33333333-3333-4333-8333-333333333333";
+    const { env, batch, sqlStatements } = decisionEnvironment({
+      request_id: requestId,
+      member_id: null,
+      discord_user_id: "discord-new-member",
+      request_type: "new",
+      requested_display_name: "埼玉花子",
+      requested_display_name_kana: "さいたま はなこ",
+      requested_grade: "C",
+      requested_rank: 1,
+      submitted_at: "2026-10-18T00:00:00.000Z",
+      current_display_name: null,
+      current_display_name_kana: null,
+      current_grade: null,
+      current_rank: null,
+      current_status: null,
+      current_dm_enabled: null,
+    });
+
+    const result = await decideMemberRegistration(
+      env,
+      requestId,
+      "approved",
+      "admin@example.com",
+    );
+
+    expect(result.decision).toBe("approved");
+    expect(result.memberId).toMatch(/^M-/);
+    expect(batch.mock.calls[0][0]).toHaveLength(3);
+    expect(sqlStatements.some((sql) =>
+      sql.includes("INSERT INTO member_notification_deliveries")
+    )).toBe(true);
   });
 
   it("rejects an unsupported decision before changing the database", async () => {

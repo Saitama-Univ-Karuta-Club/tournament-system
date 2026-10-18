@@ -42,7 +42,7 @@ export const commands = [
       },
       {
         type: 4,
-        name: "rank",
+        name: "dan",
         description: "現在の段位",
         required: true,
         choices: [

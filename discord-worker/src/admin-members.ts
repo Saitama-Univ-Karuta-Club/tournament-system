@@ -1,4 +1,5 @@
 import type { TournamentEnv } from "./tournaments";
+import { prepareMemberApprovalNotification } from "./member-notifications";
 
 const MEMBER_GRADES = new Set(["A", "B", "C", "D", "E", "F", "beginner"]);
 const MEMBER_STATUSES = new Set(["active", "inactive", "pending", "rejected"]);
@@ -371,6 +372,20 @@ export async function decideMemberRegistration(
          SET status = 'approved', decided_at = ?, decided_by_email = ?
          WHERE request_id = ? AND status = 'pending'`,
       ).bind(now, decidedByEmail, requestId),
+      prepareMemberApprovalNotification(
+        env.DB,
+        {
+          requestId,
+          requestType: "update",
+          memberId: request.member_id,
+          discordUserId: request.discord_user_id,
+          displayName: request.requested_display_name,
+          displayNameKana: request.requested_display_name_kana,
+          grade: request.requested_grade,
+          rank: request.requested_rank,
+        },
+        now,
+      ),
     );
     await env.DB.batch(statements);
     return { requestId, decision: "approved", memberId: request.member_id };
@@ -411,6 +426,20 @@ export async function decideMemberRegistration(
        SET member_id = ?, status = 'approved', decided_at = ?, decided_by_email = ?
        WHERE request_id = ? AND status = 'pending'`,
     ).bind(memberId, now, decidedByEmail, requestId),
+    prepareMemberApprovalNotification(
+      env.DB,
+      {
+        requestId,
+        requestType: "new",
+        memberId,
+        discordUserId: request.discord_user_id,
+        displayName: request.requested_display_name,
+        displayNameKana: request.requested_display_name_kana,
+        grade: request.requested_grade,
+        rank: request.requested_rank,
+      },
+      now,
+    ),
   ]);
   return { requestId, decision: "approved", memberId };
 }
