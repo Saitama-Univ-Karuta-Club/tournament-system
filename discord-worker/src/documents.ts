@@ -10,6 +10,8 @@ export interface DocumentEnv {
   DOCUMENT_PUBLIC_BASE_URL?: string;
 }
 
+export type ArchiveDocumentType = "roster" | "results";
+
 export class DocumentUploadError extends Error {}
 
 function safeFilenamePart(value: string, fallback: string): string {
@@ -58,6 +60,17 @@ export function buildPdfFilename(
   return safeFilenamePart(`${months}_${safeTitle}_${gradeLabel}`, "大会要項") + ".pdf";
 }
 
+export function buildArchivePdfFilename(
+  title: string,
+  grades: string[],
+  eventDates: string[],
+  documentType: ArchiveDocumentType,
+): string {
+  const base = buildPdfFilename(title, grades, eventDates).replace(/\.pdf$/i, "");
+  const label = documentType === "roster" ? "選手名簿" : "大会結果";
+  return safeFilenamePart(`${base}_${label}`, label) + ".pdf";
+}
+
 function contentDisposition(filename: string): string {
   return `inline; filename="tournament.pdf"; filename*=UTF-8''${encodeURIComponent(filename)}`;
 }
@@ -88,11 +101,25 @@ export async function uploadTournamentDocument(
   const title = String(form.get("title") ?? "").trim();
   if (!title || title.length > 100) throw new DocumentUploadError("大会名を確認してください。");
 
+  const fileName = buildPdfFilename(title, grades, eventDates);
+  return storeTournamentPdf(file, env, uploadedBy, fileName);
+}
+
+export async function storeTournamentPdf(
+  file: File,
+  env: DocumentEnv,
+  uploadedBy: string,
+  fileName: string,
+): Promise<{ url: string; fileName: string; size: number }> {
+  if (!env.DOCUMENTS || !env.DOCUMENT_PUBLIC_BASE_URL) {
+    throw new DocumentUploadError("PDF保存先が設定されていません。");
+  }
+  if (file.size === 0) throw new DocumentUploadError("PDFファイルが空です。");
+  if (file.size > MAX_PDF_BYTES) throw new DocumentUploadError("PDFは20MB以下にしてください。");
   const bytes = await file.arrayBuffer();
   const signature = new TextDecoder().decode(bytes.slice(0, 5));
   if (signature !== "%PDF-") throw new DocumentUploadError("PDF形式のファイルを選択してください。");
 
-  const fileName = buildPdfFilename(title, grades, eventDates);
   const id = crypto.randomUUID();
   const key = `documents/${id}/${fileName}`;
   await env.DOCUMENTS.put(key, bytes, {

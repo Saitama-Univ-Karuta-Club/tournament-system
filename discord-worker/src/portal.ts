@@ -50,6 +50,7 @@ interface PortalTournamentRow {
   eligible: number;
   own_response: ResponseValue | null;
   own_entry_status: string | null;
+  archive_published_at: string | null;
 }
 
 interface ParticipantRow {
@@ -58,6 +59,13 @@ interface ParticipantRow {
   display_name_kana: string;
   grade: string;
   entry_status: string | null;
+  result_text: string | null;
+}
+
+interface PortalArchiveDocumentRow {
+  group_key: string;
+  document_type: "roster" | "results";
+  file_name: string;
 }
 
 interface DiscordTokenResponse {
@@ -348,6 +356,7 @@ async function listPortalTournaments(env: PortalEnv, member: PortalMemberRow): P
       tournaments.document_url,
       tournaments.status,
       tournaments.closure_reason,
+      tournaments.archive_published_at,
       tournaments.created_at,
       CASE WHEN tournaments.all_grades = 1 OR tournaments.grade = ? THEN 1 ELSE 0 END AS eligible,
       (SELECT responses.response
@@ -369,14 +378,16 @@ async function listPortalTournaments(env: PortalEnv, member: PortalMemberRow): P
   const participants = await env.DB.prepare(
     `SELECT
       responses.tournament_id,
-      members.display_name,
+      COALESCE(tournament_entries.archive_display_name, members.display_name) AS display_name,
       COALESCE(
+        NULLIF(tournament_entries.archive_display_name_kana, ''),
         NULLIF(members.display_name_kana, ''),
         NULLIF(TRIM(members.last_name_kana || ' ' || members.first_name_kana), ''),
         ''
       ) AS display_name_kana,
-      members.grade,
-      tournament_entries.status AS entry_status
+      COALESCE(tournament_entries.archive_grade, members.grade) AS grade,
+      tournament_entries.status AS entry_status,
+      tournament_entries.result_text
      FROM responses
      INNER JOIN members ON members.member_id = responses.member_id
      INNER JOIN tournaments ON tournaments.tournament_id = responses.tournament_id
@@ -385,16 +396,36 @@ async function listPortalTournaments(env: PortalEnv, member: PortalMemberRow): P
       AND tournament_entries.member_id = responses.member_id
      WHERE responses.response = 'yes'
        AND responses.is_valid = 1
-       AND members.status = 'active'
+       AND (members.status = 'active' OR tournaments.archive_published_at IS NOT NULL)
        AND tournaments.status NOT IN ('draft', 'deleted')
      ORDER BY members.grade, display_name_kana, members.display_name`,
   ).all<ParticipantRow>();
+
+  const archiveDocuments = await env.DB.prepare(
+    `SELECT tournament_archive_documents.group_key,
+            tournament_archive_documents.document_type,
+            tournament_archive_documents.file_name
+     FROM tournament_archive_documents
+     WHERE EXISTS (
+       SELECT 1 FROM tournaments
+       WHERE COALESCE(tournaments.registration_group_id, tournaments.tournament_id)
+         = tournament_archive_documents.group_key
+         AND tournaments.archive_published_at IS NOT NULL
+     )
+     ORDER BY tournament_archive_documents.document_type`,
+  ).all<PortalArchiveDocumentRow>();
 
   const byTournament = new Map<string, ParticipantRow[]>();
   for (const participant of participants.results) {
     const current = byTournament.get(participant.tournament_id) ?? [];
     current.push(participant);
     byTournament.set(participant.tournament_id, current);
+  }
+  const documentsByGroup = new Map<string, PortalArchiveDocumentRow[]>();
+  for (const document of archiveDocuments.results) {
+    const current = documentsByGroup.get(document.group_key) ?? [];
+    current.push(document);
+    documentsByGroup.set(document.group_key, current);
   }
   return tournaments.results.map((tournament) => ({
     ...tournament,
@@ -403,6 +434,9 @@ async function listPortalTournaments(env: PortalEnv, member: PortalMemberRow): P
     participants: byTournament.get(tournament.tournament_id) ?? [],
     has_document: Boolean(tournament.document_url),
     document_url: undefined,
+    archive_documents: documentsByGroup.get(
+      tournament.registration_group_id ?? tournament.tournament_id,
+    ) ?? [],
   }));
 }
 
@@ -482,11 +516,18 @@ async function servePortalDocument(
      LIMIT 1`,
   ).bind(tournamentId).first<{ document_url: string | null }>();
   if (!tournament?.document_url) return new Response("Not Found", { status: 404 });
-  const key = r2KeyFromDocumentUrl(tournament.document_url);
+  return serveStoredDocumentUrl(env, tournament.document_url);
+}
+
+async function serveStoredDocumentUrl(
+  env: PortalEnv,
+  documentUrl: string,
+): Promise<Response> {
+  const key = r2KeyFromDocumentUrl(documentUrl);
   if (!key || !env.DOCUMENTS) {
     let external: URL;
     try {
-      external = new URL(tournament.document_url);
+      external = new URL(documentUrl);
     } catch {
       return new Response("Not Found", { status: 404 });
     }
@@ -503,6 +544,33 @@ async function servePortalDocument(
     ETag: object.httpEtag,
   });
   return new Response(object.body, { headers });
+}
+
+async function servePortalArchiveDocument(
+  env: PortalEnv,
+  groupKey: string,
+  documentType: string,
+): Promise<Response> {
+  if (!/^(?:T|TG)-[0-9a-f-]{36}$/.test(groupKey)) {
+    return new Response("Not Found", { status: 404 });
+  }
+  if (documentType !== "roster" && documentType !== "results") {
+    return new Response("Not Found", { status: 404 });
+  }
+  const document = await env.DB.prepare(
+    `SELECT tournament_archive_documents.document_url
+     FROM tournament_archive_documents
+     WHERE tournament_archive_documents.group_key = ?
+       AND tournament_archive_documents.document_type = ?
+       AND EXISTS (
+         SELECT 1 FROM tournaments
+         WHERE COALESCE(tournaments.registration_group_id, tournaments.tournament_id) = ?
+           AND tournaments.archive_published_at IS NOT NULL
+       )
+     LIMIT 1`,
+  ).bind(groupKey, documentType, groupKey).first<{ document_url: string }>();
+  if (!document?.document_url) return new Response("Not Found", { status: 404 });
+  return serveStoredDocumentUrl(env, document.document_url);
 }
 
 function portalHtml(): string {
@@ -530,9 +598,10 @@ function portalHtml(): string {
     <section class="login" id="login" hidden><h2>Discordでログイン</h2><p>承認済みメンバーだけが大会情報・参加希望者・大会要項を閲覧し、参加回答を変更できます。</p><a class="discord-button" href="/auth/discord"><span class="discord-mark">◈</span>Discordで続ける</a></section>
     <div id="app" hidden>
       <div class="welcome"><h2 id="welcome"></h2><p>回答はDiscordとWebで共通です。最後に保存した回答が反映されます。</p></div>
-      <nav class="tabs" role="tablist" aria-label="大会情報の表示切替"><button class="tab" id="answer-tab" role="tab" aria-selected="true" aria-controls="answer-panel" data-tab="answer">参加回答<span class="tab-count" id="unanswered-count" hidden></span></button><button class="tab" id="tournaments-tab" role="tab" aria-selected="false" aria-controls="tournaments-panel" data-tab="tournaments">大会一覧</button></nav>
+      <nav class="tabs" role="tablist" aria-label="大会情報の表示切替"><button class="tab" id="answer-tab" role="tab" aria-selected="true" aria-controls="answer-panel" data-tab="answer">参加回答<span class="tab-count" id="unanswered-count" hidden></span></button><button class="tab" id="tournaments-tab" role="tab" aria-selected="false" aria-controls="tournaments-panel" data-tab="tournaments">大会一覧</button><button class="tab" id="archive-tab" role="tab" aria-selected="false" aria-controls="archive-panel" data-tab="archive">過去の大会結果</button></nav>
       <section class="panel" id="answer-panel" role="tabpanel" aria-labelledby="answer-tab"><div class="notice">DMが届かない場合も、ここから回答できます。参加希望者の一覧は「大会一覧」タブで確認できます。</div><div class="toolbar"><div class="filters"><label>回答状況<select id="answer-status-filter"><option value="all">すべて</option><option value="open" selected>回答受付中</option><option value="unanswered">未回答</option><option value="yes">参加希望</option><option value="maybe">未定・条件付き</option><option value="no">不参加</option><option value="closed">受付終了</option></select></label><label>並び順<select id="answer-sort"><option value="action">回答が必要な順</option><option value="deadline">締切が近い順</option><option value="event">開催日が近い順</option><option value="created">登録が新しい順</option></select></label></div></div><div class="list" id="answer-list"></div></section>
       <section class="panel" id="tournaments-panel" role="tabpanel" aria-labelledby="tournaments-tab" hidden><div class="toolbar"><div class="filters"><label>表示<select id="status-filter"><option value="current">受付中・今後</option><option value="all">すべて</option><option value="active">回答受付中</option><option value="applied">申込済み</option><option value="closed">終了</option></select></label><label>並び順<select id="sort"><option value="deadline">締切が近い順</option><option value="event">開催日が近い順</option><option value="created">登録が新しい順</option></select></label></div></div><div class="list" id="tournament-list"></div></section>
+      <section class="panel" id="archive-panel" role="tabpanel" aria-labelledby="archive-tab" hidden><div class="notice">大会要項・選手名簿・大会結果と、サークルから出場したメンバーの成績を大会ごとにまとめています。</div><div class="list" id="archive-list"></div></section>
     </div>
     <div class="loading" id="loading">大会情報を読み込んでいます…</div>
     <div class="fatal" id="fatal" hidden></div>
@@ -553,15 +622,17 @@ function portalHtml(): string {
     function groupRows(rows){const groups=new Map();for(const row of rows){const key=row.registration_group_id||row.tournament_id;const current=groups.get(key)||[];current.push(row);groups.set(key,current)}return [...groups.values()]}
     function filteredGroups(){const filter=document.querySelector('#status-filter').value;const sort=document.querySelector('#sort').value;const now=Date.now();let groups=groupRows(tournaments).filter(group=>{if(filter==='all')return true;if(filter==='current')return group.some(item=>item.status==='active'||new Date(item.event_start_date+'T23:59:59+09:00').getTime()>=now);return group.some(item=>item.status===filter)});groups.sort((a,b)=>{const get=(group)=>{if(sort==='event')return Math.min(...group.map(item=>new Date(item.event_start_date+'T00:00:00+09:00').getTime()));if(sort==='created')return -Math.max(...group.map(item=>new Date(item.created_at).getTime()));return Math.min(...group.map(item=>new Date(item.internal_deadline).getTime()))};return get(a)-get(b)});return groups}
     function documentLink(group,label='大会要項PDF'){const item=group.find(candidate=>candidate.has_document);return item?'<a class="document" href="/api/tournaments/'+encodeURIComponent(item.tournament_id)+'/document" target="_blank" rel="noopener">'+esc(label)+'</a>':'<span class="empty">なし</span>'}
+    function archiveDocumentLink(group,type,label){const first=group[0];const groupKey=first.registration_group_id||first.tournament_id;const found=(first.archive_documents||[]).find(item=>item.document_type===type);return found?'<a class="document" href="/api/archives/'+encodeURIComponent(groupKey)+'/documents/'+encodeURIComponent(type)+'" target="_blank" rel="noopener">'+esc(label)+'</a>':'<span class="empty">なし</span>'}
     function eligibleAnswerGroups(){return groupRows(tournaments).map(group=>({group,target:group.find(item=>item.eligible)})).filter(item=>item.target)}
     function canAnswer(target){return target.status==='active'&&new Date(target.internal_deadline).getTime()>=Date.now()}
     function displayStatus(target){return target.status==='closed'&&target.closure_reason==='no_participants'?'no_participants':target.status}
     function answerGroups(){const filter=document.querySelector('#answer-status-filter').value;const sort=document.querySelector('#answer-sort').value;const groups=eligibleAnswerGroups().filter(({target})=>{const open=canAnswer(target);if(filter==='all')return true;if(filter==='open')return open;if(filter==='unanswered')return open&&!target.own_response;if(filter==='closed')return !open;return target.own_response===filter});const value=({target})=>{if(sort==='event')return new Date(target.event_start_date+'T00:00:00+09:00').getTime();if(sort==='created')return -new Date(target.created_at).getTime();return new Date(target.internal_deadline).getTime()};groups.sort((a,b)=>{if(sort==='action'){const priority=({target})=>canAnswer(target)&&!target.own_response?0:canAnswer(target)?1:2;const difference=priority(a)-priority(b);if(difference)return difference}return value(a)-value(b)});return groups}
     function renderAnswers(){const list=document.querySelector('#answer-list');const allGroups=eligibleAnswerGroups();const groups=answerGroups();const unanswered=allGroups.filter(({target})=>canAnswer(target)&&!target.own_response).length;const badge=document.querySelector('#unanswered-count');badge.hidden=unanswered===0;badge.textContent=String(unanswered);if(!allGroups.length){list.innerHTML='<div class="card empty">現在の級が対象になっている大会はありません。</div>';return}if(!groups.length){list.innerHTML='<div class="card empty">条件に一致する大会はありません。</div>';return}list.innerHTML=groups.map(({group,target})=>{const answerable=canAnswer(target);const answer=target.own_response||'';const targetStatus=displayStatus(target);const badgeLabel=answer?'回答済み':answerable?'未回答':statusLabels[targetStatus]||'受付終了';const badgeClass=answer?'answered':answerable?'pending':targetStatus;const buttons=Object.entries(responseLabels).map(([value,label])=>'<button class="answer '+(answer===value?'selected '+value:'')+'" data-id="'+esc(target.tournament_id)+'" data-response="'+value+'" '+(answerable?'':'disabled')+'>'+label+'</button>').join('');const gradeName=target.all_grades?'すべて':grade(target.grade);const entryResult=target.own_entry_status?' ／ 申込・抽選結果: '+(entryStatusLabels[target.own_entry_status]||target.own_entry_status):'';return '<article class="card response-card"><div class="card-head"><div class="title-row"><h3 class="title">'+esc(target.title)+'</h3></div><span class="status '+esc(badgeClass)+'">'+esc(badgeLabel)+'</span></div><div class="info-grid"><div class="info-cell"><span class="info-label">大会日程</span><span class="info-value">'+esc(date(target.event_start_date))+'</span></div><div class="info-cell"><span class="info-label">開催級</span><span class="info-value">'+esc(gradeName)+'</span></div><div class="info-cell"><span class="info-label">回答締切</span><span class="info-value">'+esc(dateTime(target.internal_deadline))+'</span></div><div class="info-cell"><span class="info-label">要項</span><span class="info-value">'+documentLink(group,'PDFを開く')+'</span></div></div>'+(target.venue?'<p class="venue-note">会場 '+esc(target.venue)+'</p>':'')+'<div class="answer-area"><span class="answer-label">回答</span><div class="buttons">'+buttons+'</div><p class="message">'+(answerable?'現在の回答: '+esc(answer?responseLabels[answer]:'未回答'):'現在は回答を変更できません。')+esc(entryResult)+'</p></div></article>'}).join('');document.querySelectorAll('#answer-list .answer').forEach(button=>button.addEventListener('click',saveAnswer))}
     function renderTournamentList(){const list=document.querySelector('#tournament-list');const groups=filteredGroups();if(!groups.length){list.innerHTML='<div class="card empty">条件に一致する大会はありません。</div>';return}list.innerHTML=groups.map(group=>{const first=group[0];const displayStatuses=[...new Set(group.map(displayStatus))];const groupStatus=displayStatuses.length===1?displayStatuses[0]:'active';const gradeNames=[...new Set(group.map(item=>item.all_grades?'すべて':grade(item.grade)))];const uniqueDates=[...new Set(group.map(item=>item.event_start_date))];const dateLabel=uniqueDates.length===1?date(uniqueDates[0]):group.map(item=>(item.all_grades?'すべて':grade(item.grade))+' '+date(item.event_start_date)).join(' / ');const participants=group.flatMap(item=>item.participants.map(person=>({...person,tournamentGrade:item.all_grades?person.grade:item.grade})));const people=participants.length?participants.map(person=>{const result=person.entry_status?' ／ '+(entryStatusLabels[person.entry_status]||person.entry_status):'';return '<li><strong>'+esc(grade(person.tournamentGrade))+'</strong><span>'+esc(person.display_name)+(person.display_name_kana?' <small>('+esc(person.display_name_kana)+')</small>':'')+esc(result)+'</span></li>'}).join(''):'<li class="empty">まだ参加希望者はいません。</li>';return '<article class="card tournament-card"><div class="card-head"><div class="title-row"><h3 class="title">'+esc(first.title)+'</h3><span class="status '+esc(groupStatus)+'">'+esc(statusLabels[groupStatus]||groupStatus)+'</span></div><span class="count">'+participants.length+'名</span></div><div class="meta"><span>大会日 '+esc(dateLabel)+'</span><span>締切 '+esc(dateTime(first.internal_deadline))+'</span><span>開催級 '+esc(gradeNames.join('、'))+'</span>'+(first.venue?'<span>会場 '+esc(first.venue)+'</span>':'')+'</div><ul class="participants">'+people+'</ul><div class="section-title">'+documentLink(group,'▣ 大会要項PDFを開く')+'</div></article>'}).join('')}
-    function render(){renderAnswers();renderTournamentList()}
+    function renderArchives(){const list=document.querySelector('#archive-list');const groups=groupRows(tournaments).filter(group=>group.some(item=>item.archive_published_at)).sort((a,b)=>Math.max(...b.map(item=>new Date(item.event_start_date+'T00:00:00+09:00').getTime()))-Math.max(...a.map(item=>new Date(item.event_start_date+'T00:00:00+09:00').getTime())));if(!groups.length){list.innerHTML='<div class="card empty">公開済みの大会記録はまだありません。</div>';return}list.innerHTML=groups.map(group=>{const first=group[0];const uniqueDates=[...new Set(group.map(item=>item.event_start_date))];const dateLabel=uniqueDates.length===1?date(uniqueDates[0]):group.map(item=>(item.all_grades?'すべて':grade(item.grade))+' '+date(item.event_start_date)).join(' / ');const entrants=group.flatMap(item=>item.participants.filter(person=>person.entry_status==='submitted'||person.entry_status==='selected').map(person=>({...person,tournamentGrade:item.all_grades?person.grade:item.grade})));const rows=entrants.map(person=>'<li><strong>'+esc(grade(person.tournamentGrade))+'</strong><span>'+esc(person.display_name)+(person.display_name_kana?' <small>('+esc(person.display_name_kana)+')</small>':'')+' — '+esc(person.result_text||'成績未登録')+'</span></li>').join('');return '<article class="card archive-card"><div class="card-head"><div class="title-row"><h3 class="title">'+esc(first.title)+'</h3><span class="status applied">大会記録</span></div><span class="count">'+entrants.length+'名</span></div><div class="meta"><span>大会日 '+esc(dateLabel)+'</span>'+(first.venue?'<span>会場 '+esc(first.venue)+'</span>':'')+'</div><div class="section-title">出場者・成績</div><ul class="participants">'+rows+'</ul><div class="section-title">'+documentLink(group,'▣ 大会要項')+'　'+archiveDocumentLink(group,'roster','▣ 選手名簿')+'　'+archiveDocumentLink(group,'results','▣ 結果ファイル')+'</div></article>'}).join('')}
+    function render(){renderAnswers();renderTournamentList();renderArchives()}
     let toastTimer;function showToast(text){const toast=document.querySelector('#toast');toast.textContent=text;toast.hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>{toast.hidden=true},2600)}
-    function selectTab(name,updateHash=true){const selected=name==='tournaments'?'tournaments':'answer';document.querySelectorAll('.tab').forEach(tab=>tab.setAttribute('aria-selected',String(tab.dataset.tab===selected)));document.querySelector('#answer-panel').hidden=selected!=='answer';document.querySelector('#tournaments-panel').hidden=selected!=='tournaments';if(updateHash)history.replaceState(null,'','#'+selected)}
+    function selectTab(name,updateHash=true){const selected=name==='tournaments'||name==='archive'?name:'answer';document.querySelectorAll('.tab').forEach(tab=>tab.setAttribute('aria-selected',String(tab.dataset.tab===selected)));document.querySelector('#answer-panel').hidden=selected!=='answer';document.querySelector('#tournaments-panel').hidden=selected!=='tournaments';document.querySelector('#archive-panel').hidden=selected!=='archive';if(updateHash)history.replaceState(null,'','#'+selected)}
     async function saveAnswer(event){const button=event.currentTarget;const card=button.closest('.card');const buttons=[...card.querySelectorAll('.answer')];buttons.forEach(item=>item.disabled=true);const message=card.querySelector('.message');message.classList.remove('error');message.textContent='保存しています…';try{await api('/api/tournaments/'+encodeURIComponent(button.dataset.id)+'/response',{method:'PUT',body:JSON.stringify({response:button.dataset.response})});const target=tournaments.find(item=>item.tournament_id===button.dataset.id);if(target)target.own_response=button.dataset.response;render();showToast('回答を保存しました。')}catch(error){message.textContent=error.message;message.classList.add('error');buttons.forEach(item=>item.disabled=false)}}
     async function start(){try{const session=await api('/api/session');document.querySelector('#account').hidden=false;document.querySelector('#account-name').textContent=session.member.display_name;document.querySelector('#welcome').textContent=session.member.display_name+'さん';const data=await api('/api/tournaments');tournaments=data.tournaments;document.querySelector('#loading').hidden=true;document.querySelector('#app').hidden=false;render();selectTab(location.hash.slice(1),false)}catch(error){document.querySelector('#loading').hidden=true;if(error.status===401){document.querySelector('#login').hidden=false}else{const fatal=document.querySelector('#fatal');fatal.hidden=false;fatal.textContent=error.message}}}
     document.querySelectorAll('.tab').forEach(tab=>tab.addEventListener('click',()=>selectTab(tab.dataset.tab)));window.addEventListener('hashchange',()=>selectTab(location.hash.slice(1),false));document.querySelector('#answer-status-filter').addEventListener('change',renderAnswers);document.querySelector('#answer-sort').addEventListener('change',renderAnswers);document.querySelector('#status-filter').addEventListener('change',renderTournamentList);document.querySelector('#sort').addEventListener('change',renderTournamentList);start();
@@ -639,6 +710,12 @@ export async function handlePortalRequest(
   const documentPath = url.pathname.match(/^\/api\/tournaments\/(T-[0-9a-f-]{36})\/document$/);
   if (request.method === "GET" && documentPath) {
     return servePortalDocument(env, member, documentPath[1]);
+  }
+  const archiveDocumentPath = url.pathname.match(
+    /^\/api\/archives\/((?:T|TG)-[0-9a-f-]{36})\/documents\/(roster|results)$/,
+  );
+  if (request.method === "GET" && archiveDocumentPath) {
+    return servePortalArchiveDocument(env, archiveDocumentPath[1], archiveDocumentPath[2]);
   }
   return new Response("Not Found", { status: 404, headers: securityHeaders });
 }

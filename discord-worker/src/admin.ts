@@ -21,8 +21,11 @@ import {
   type MemberUpdateInput,
 } from "./admin-members";
 import {
+  buildArchivePdfFilename,
   DocumentUploadError,
+  storeTournamentPdf,
   uploadTournamentDocument,
+  type ArchiveDocumentType,
   type DocumentEnv,
 } from "./documents";
 import {
@@ -65,6 +68,19 @@ type TournamentEntryStatusUpdater = (
   status: string,
   changedByEmail: string,
 ) => Promise<TournamentEntryStatusUpdate>;
+type TournamentEntryResultUpdater = (
+  env: AdminEnv,
+  tournamentId: string,
+  memberId: string,
+  resultText: string,
+  changedByEmail: string,
+) => Promise<TournamentEntryResultUpdate>;
+type TournamentArchivePublisher = (
+  env: AdminEnv,
+  tournamentIds: string[],
+  published: boolean,
+  changedByEmail: string,
+) => Promise<TournamentArchivePublishResult>;
 type MemberLister = (env: AdminEnv) => Promise<AdminMember[]>;
 type MemberUpdater = (
   env: AdminEnv,
@@ -86,6 +102,7 @@ type MemberRegistrationCounter = (env: AdminEnv) => Promise<number>;
 interface AdminTournamentRow extends TournamentRow {
   status: string;
   closure_reason: "no_participants" | null;
+  archive_published_at: string | null;
   created_at: string;
   announcements_sent: number;
   invitation_dms_sent: number;
@@ -103,6 +120,16 @@ interface AdminResponseRow {
   is_eligible: number;
   updated_at: string;
   entry_status: string | null;
+  result_text: string | null;
+}
+
+interface AdminArchiveDocumentRow {
+  group_key: string;
+  document_type: ArchiveDocumentType;
+  document_url: string;
+  file_name: string;
+  file_size: number;
+  uploaded_at: string;
 }
 
 export interface AdminTournament extends AdminTournamentRow {
@@ -113,6 +140,7 @@ export interface AdminTournament extends AdminTournamentRow {
   response_total: number;
   response_pending: number;
   responses: AdminResponseRow[];
+  archive_documents: AdminArchiveDocumentRow[];
 }
 
 export interface TournamentStatusUpdate {
@@ -151,6 +179,19 @@ export interface TournamentEntryStatusUpdate {
   previousStatus: string | null;
   status: string;
   changed: boolean;
+}
+
+export interface TournamentEntryResultUpdate {
+  tournamentId: string;
+  memberId: string;
+  resultText: string;
+  changed: boolean;
+}
+
+export interface TournamentArchivePublishResult {
+  tournamentIds: string[];
+  published: boolean;
+  publishedAt: string | null;
 }
 
 class AdminRequestError extends Error {
@@ -269,6 +310,7 @@ export async function listAdminTournaments(
       tournaments.document_url,
       tournaments.status,
       tournaments.closure_reason,
+      tournaments.archive_published_at,
       tournaments.created_at,
       (SELECT COUNT(*) FROM notification_deliveries
         WHERE notification_deliveries.tournament_id = tournaments.tournament_id
@@ -321,7 +363,8 @@ export async function listAdminTournaments(
         )
       THEN 1 ELSE 0 END AS is_eligible,
       COALESCE(responses.updated_at, members.updated_at) AS updated_at,
-      tournament_entries.status AS entry_status
+      tournament_entries.status AS entry_status,
+      tournament_entries.result_text
     FROM tournaments
     INNER JOIN members
       ON (
@@ -356,6 +399,18 @@ export async function listAdminTournaments(
       members.display_name`,
   ).all<AdminResponseRow>();
 
+  const archiveDocuments = await env.DB.prepare(
+    `SELECT group_key, document_type, document_url, file_name, file_size, uploaded_at
+     FROM tournament_archive_documents
+     ORDER BY uploaded_at`,
+  ).all<AdminArchiveDocumentRow>();
+  const documentsByGroup = new Map<string, AdminArchiveDocumentRow[]>();
+  for (const document of archiveDocuments.results) {
+    const current = documentsByGroup.get(document.group_key) ?? [];
+    current.push(document);
+    documentsByGroup.set(document.group_key, current);
+  }
+
   const responsesByTournament = new Map<string, AdminResponseRow[]>();
   for (const response of responseRows.results) {
     const current = responsesByTournament.get(response.tournament_id) ?? [];
@@ -383,6 +438,9 @@ export async function listAdminTournaments(
       response_total: responseTotal,
       response_pending: responsePending,
       responses,
+      archive_documents: documentsByGroup.get(
+        tournament.registration_group_id ?? tournament.tournament_id,
+      ) ?? [],
     };
   });
 }
@@ -562,6 +620,227 @@ export async function updateTournamentEntryStatus(
     ),
   ]);
   return { tournamentId, memberId, previousStatus, status, changed: true };
+}
+
+export async function updateTournamentEntryResult(
+  env: AdminEnv,
+  tournamentId: string,
+  memberId: string,
+  rawResultText: string,
+  changedByEmail: string,
+): Promise<TournamentEntryResultUpdate> {
+  if (!/^T-[0-9a-f-]{36}$/.test(tournamentId) || !/^M-[0-9a-f-]{36}$/.test(memberId)) {
+    throw new AdminRequestError("大会またはメンバーIDが不正です。", 400);
+  }
+  const resultText = rawResultText.trim();
+  if (!resultText || resultText.length > 200) {
+    throw new AdminRequestError("個人成績は1〜200文字で入力してください。", 400);
+  }
+  const target = await env.DB.prepare(
+    `SELECT tournament_entries.result_text
+     FROM tournament_entries
+     INNER JOIN tournaments
+       ON tournaments.tournament_id = tournament_entries.tournament_id
+     WHERE tournament_entries.tournament_id = ?
+       AND tournament_entries.member_id = ?
+       AND tournament_entries.status IN ('submitted', 'selected')
+       AND tournaments.status <> 'deleted'
+     LIMIT 1`,
+  ).bind(tournamentId, memberId).first<{ result_text: string | null }>();
+  if (!target) {
+    throw new AdminRequestError("出場者として登録されたメンバーを確認できません。", 404);
+  }
+  if ((target.result_text ?? "") === resultText) {
+    return { tournamentId, memberId, resultText, changed: false };
+  }
+  const now = new Date().toISOString();
+  await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE tournament_entries
+       SET result_text = ?, result_updated_at = ?, result_updated_by_email = ?
+       WHERE tournament_id = ? AND member_id = ?`,
+    ).bind(resultText, now, changedByEmail, tournamentId, memberId),
+    env.DB.prepare(
+      `INSERT INTO tournament_entry_result_history (
+        tournament_id, member_id, previous_result, new_result,
+        changed_by_email, changed_at
+      ) VALUES (?, ?, ?, ?, ?, ?)`,
+    ).bind(
+      tournamentId,
+      memberId,
+      target.result_text,
+      resultText,
+      changedByEmail,
+      now,
+    ),
+  ]);
+  return { tournamentId, memberId, resultText, changed: true };
+}
+
+function archiveGroupKey(tournaments: EditableTournamentRow[]): string {
+  return tournaments[0].registration_group_id ?? tournaments[0].tournament_id;
+}
+
+export async function uploadTournamentArchiveDocument(
+  env: AdminEnv,
+  request: Request,
+  uploadedBy: string,
+): Promise<AdminArchiveDocumentRow> {
+  const form = await request.formData();
+  const file = form.get("file");
+  if (!(file instanceof File)) throw new DocumentUploadError("PDFファイルを選択してください。");
+  const documentType = String(form.get("documentType") ?? "") as ArchiveDocumentType;
+  if (documentType !== "roster" && documentType !== "results") {
+    throw new DocumentUploadError("書類の種類が不正です。");
+  }
+  let tournamentIds: string[];
+  try {
+    const parsed = JSON.parse(String(form.get("tournamentIds") ?? "")) as unknown;
+    if (!Array.isArray(parsed)) throw new Error();
+    tournamentIds = parsed.map(String);
+  } catch {
+    throw new DocumentUploadError("対象大会が不正です。");
+  }
+  let tournaments: EditableTournamentRow[];
+  try {
+    tournaments = await loadEditableTournaments(env, tournamentIds, tournamentIds.length > 1);
+  } catch (error) {
+    if (error instanceof AdminRequestError) throw new DocumentUploadError(error.message);
+    throw error;
+  }
+  const grades = tournaments.some((item) => item.all_grades === 1)
+    ? ["all"]
+    : tournaments.map((item) => item.grade);
+  const eventDates = [...new Set(tournaments.map((item) => item.event_start_date))];
+  const fileName = buildArchivePdfFilename(
+    tournaments[0].title,
+    grades,
+    eventDates,
+    documentType,
+  );
+  const stored = await storeTournamentPdf(file, env, uploadedBy, fileName);
+  const uploadedAt = new Date().toISOString();
+  const groupKey = archiveGroupKey(tournaments);
+  await env.DB.prepare(
+    `INSERT INTO tournament_archive_documents (
+      group_key, document_type, representative_tournament_id,
+      document_url, file_name, file_size, uploaded_by_email, uploaded_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(group_key, document_type) DO UPDATE SET
+      representative_tournament_id = excluded.representative_tournament_id,
+      document_url = excluded.document_url,
+      file_name = excluded.file_name,
+      file_size = excluded.file_size,
+      uploaded_by_email = excluded.uploaded_by_email,
+      uploaded_at = excluded.uploaded_at`,
+  ).bind(
+    groupKey,
+    documentType,
+    tournaments[0].tournament_id,
+    stored.url,
+    stored.fileName,
+    stored.size,
+    uploadedBy,
+    uploadedAt,
+  ).run();
+  return {
+    group_key: groupKey,
+    document_type: documentType,
+    document_url: stored.url,
+    file_name: stored.fileName,
+    file_size: stored.size,
+    uploaded_at: uploadedAt,
+  };
+}
+
+export async function setTournamentArchivePublished(
+  env: AdminEnv,
+  rawTournamentIds: string[],
+  published: boolean,
+  changedByEmail: string,
+): Promise<TournamentArchivePublishResult> {
+  const tournaments = await loadEditableTournaments(
+    env,
+    rawTournamentIds,
+    rawTournamentIds.length > 1,
+  );
+  const groupKey = archiveGroupKey(tournaments);
+  if (published) {
+    if (!tournaments.some((item) => Boolean(item.document_url))) {
+      throw new AdminRequestError("大会要項を登録してから公開してください。", 409);
+    }
+    const documents = await env.DB.prepare(
+      `SELECT document_type
+       FROM tournament_archive_documents
+       WHERE group_key = ?`,
+    ).bind(groupKey).all<{ document_type: string }>();
+    const documentTypes = new Set(documents.results.map((item) => item.document_type));
+    if (!documentTypes.has("roster") || !documentTypes.has("results")) {
+      throw new AdminRequestError("選手名簿と結果ファイルを登録してから公開してください。", 409);
+    }
+    const placeholders = tournaments.map(() => "?").join(", ");
+    const summary = await env.DB.prepare(
+      `SELECT
+        COUNT(*) AS participant_count,
+        SUM(CASE WHEN TRIM(COALESCE(result_text, '')) = '' THEN 1 ELSE 0 END) AS missing_results
+       FROM tournament_entries
+       WHERE tournament_id IN (${placeholders})
+         AND status IN ('submitted', 'selected')`,
+    ).bind(...tournaments.map((item) => item.tournament_id)).first<{
+      participant_count: number;
+      missing_results: number;
+    }>();
+    if (Number(summary?.participant_count ?? 0) === 0) {
+      throw new AdminRequestError("出場者が登録されていません。", 409);
+    }
+    if (Number(summary?.missing_results ?? 0) > 0) {
+      throw new AdminRequestError("全出場者の個人成績を登録してから公開してください。", 409);
+    }
+  }
+
+  const publishedAt = published ? new Date().toISOString() : null;
+  await env.DB.batch(
+    tournaments.flatMap((tournament) => [
+      ...(published ? [env.DB.prepare(
+        `UPDATE tournament_entries
+         SET
+           archive_display_name = COALESCE(
+             archive_display_name,
+             (SELECT members.display_name FROM members
+              WHERE members.member_id = tournament_entries.member_id)
+           ),
+           archive_display_name_kana = COALESCE(
+             archive_display_name_kana,
+             (SELECT members.display_name_kana FROM members
+              WHERE members.member_id = tournament_entries.member_id)
+           ),
+           archive_grade = COALESCE(
+             archive_grade,
+             (SELECT CASE WHEN tournaments.all_grades = 1
+                THEN members.grade ELSE tournaments.grade END
+              FROM tournaments
+              INNER JOIN members ON members.member_id = tournament_entries.member_id
+              WHERE tournaments.tournament_id = tournament_entries.tournament_id)
+           )
+         WHERE tournament_id = ? AND status IN ('submitted', 'selected')`,
+      ).bind(tournament.tournament_id)] : []),
+      env.DB.prepare(
+        `UPDATE tournaments
+         SET archive_published_at = ?, archive_published_by_email = ?, updated_at = ?
+         WHERE tournament_id = ? AND status <> 'deleted'`,
+      ).bind(
+        publishedAt,
+        published ? changedByEmail : null,
+        new Date().toISOString(),
+        tournament.tournament_id,
+      ),
+    ]),
+  );
+  return {
+    tournamentIds: tournaments.map((item) => item.tournament_id),
+    published,
+    publishedAt,
+  };
 }
 
 export async function editTournaments(
@@ -832,10 +1111,19 @@ function adminHtml(page: AdminPage): string {
     .notification-note { color: #697386; font-size: .78rem; margin-top: 10px; }
     .entry-management { margin: 15px 0; padding: 14px; border: 1px solid #dce1eb; border-radius: 9px; background: #fbfcff; }
     .entry-management h4 { margin: 0 0 10px; font-size: .9rem; }
-    .entry-row { display: grid; grid-template-columns: minmax(160px, 1fr) minmax(190px, auto) auto minmax(90px, auto); gap: 9px; align-items: center; padding: 8px 0; border-top: 1px solid #e7eaf0; }
+    .entry-row { display: grid; grid-template-columns: minmax(160px, 1fr) minmax(180px, auto) auto minmax(180px, 1fr) auto minmax(90px, auto); gap: 9px; align-items: center; padding: 8px 0; border-top: 1px solid #e7eaf0; }
     .entry-row select { padding: 8px 10px; }
     .entry-row button { padding: 8px 12px; }
     .entry-result { color: #596579; font-size: .78rem; }
+    .archive-management { margin: 15px 0; padding: 14px; border: 1px solid #cad5eb; border-radius: 9px; background: #f7f9ff; }
+    .archive-management h4 { margin: 0 0 6px; }
+    .archive-note { margin: 0 0 12px; color: #596579; font-size: .82rem; line-height: 1.55; }
+    .archive-documents { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .archive-document { display: grid; gap: 7px; padding: 11px; border-radius: 8px; background: white; border: 1px solid #dce1eb; }
+    .archive-document strong { font-size: .86rem; }
+    .archive-document a { color: #294796; font-size: .82rem; font-weight: 700; }
+    .archive-document button { justify-self: start; }
+    .archive-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
     #member-status { color: #697386; margin-bottom: 12px; }
     #member-list { display: grid; gap: 12px; }
     .member-card { border: 1px solid #dce1eb; border-radius: 10px; padding: 16px; }
@@ -866,7 +1154,7 @@ function adminHtml(page: AdminPage): string {
     .dialog-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; margin-top: 22px; flex-wrap: wrap; }
     .dialog-actions .status-message { margin-right: auto; }
     @media (max-width: 680px) {
-      .grid, .grade-date-grid, .response-sections, .member-grid, .request-comparison, .entry-row { grid-template-columns: minmax(0, 1fr); }
+      .grid, .grade-date-grid, .response-sections, .member-grid, .request-comparison, .entry-row, .archive-documents { grid-template-columns: minmax(0, 1fr); }
       input[type="date"], input[type="datetime-local"] {
         display: block;
         inline-size: 100%;
@@ -1239,7 +1527,20 @@ function adminHtml(page: AdminPage): string {
         });
         const save = element('button', 'secondary', '保存');
         save.type = 'button';
+        const resultInput = document.createElement('input');
+        resultInput.value = person.result_text || '';
+        resultInput.maxLength = 200;
+        resultInput.placeholder = '例：3回戦敗退、優勝';
+        const saveResult = element('button', 'secondary', '成績を保存');
+        saveResult.type = 'button';
         const message = element('span', 'entry-result', '');
+        const refreshResultState = () => {
+          const eligible = select.value === 'submitted' || select.value === 'selected';
+          resultInput.disabled = !eligible;
+          saveResult.disabled = !eligible;
+        };
+        select.addEventListener('change', refreshResultState);
+        refreshResultState();
         save.addEventListener('click', async () => {
           save.disabled = true;
           message.textContent = '保存中…';
@@ -1259,9 +1560,107 @@ function adminHtml(page: AdminPage): string {
             save.disabled = false;
           }
         });
-        row.append(name, select, save, message);
+        saveResult.addEventListener('click', async () => {
+          saveResult.disabled = true;
+          message.textContent = '成績を保存中…';
+          try {
+            const response = await fetch('/api/tournaments/' + encodeURIComponent(tournament.tournament_id) + '/entries/' + encodeURIComponent(person.member_id) + '/result', {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ resultText: resultInput.value }),
+            });
+            const body = await response.json();
+            if (!response.ok) throw new Error(body.error || '個人成績を保存できませんでした。');
+            message.textContent = body.changed ? '成績を保存しました。' : '成績の変更はありません。';
+          } catch (error) {
+            message.textContent = error instanceof Error ? error.message : '個人成績を保存できませんでした。';
+          } finally {
+            refreshResultState();
+          }
+        });
+        row.append(name, select, save, resultInput, saveResult, message);
         section.append(row);
       });
+      return section;
+    }
+
+    function renderArchiveManagement(tournaments) {
+      if (!tournaments.some((item) => item.status === 'applied' || item.status === 'closed')) return null;
+      const section = element('section', 'archive-management');
+      section.append(
+        element('h4', '', '大会記録'),
+        element('p', 'archive-note', '要項・選手名簿・結果ファイル・全出場者の個人成績が揃うと、メンバーポータルの「過去の大会結果」へ公開できます。名簿と結果ファイルはPDF形式・20MBまでです。'),
+      );
+      const documents = tournaments[0].archive_documents || [];
+      const documentGrid = element('div', 'archive-documents');
+      [['roster', '選手名簿'], ['results', '結果ファイル']].forEach(([type, label]) => {
+        const box = element('div', 'archive-document');
+        box.append(element('strong', '', label));
+        const current = documents.find((item) => item.document_type === type);
+        if (current) {
+          const link = element('a', '', current.file_name || (label + 'を開く'));
+          link.href = current.document_url;
+          link.target = '_blank';
+          link.rel = 'noopener noreferrer';
+          box.append(link);
+        } else {
+          box.append(element('span', 'response-empty', '未登録'));
+        }
+        const file = document.createElement('input');
+        file.type = 'file';
+        file.accept = 'application/pdf,.pdf';
+        const upload = element('button', 'secondary', current ? '差し替える' : 'アップロード');
+        upload.type = 'button';
+        const message = element('span', 'entry-result', '');
+        upload.addEventListener('click', async () => {
+          const selected = file.files?.[0];
+          if (!selected) { message.textContent = 'PDFを選択してください。'; return; }
+          upload.disabled = true;
+          message.textContent = 'アップロード中…';
+          const form = new FormData();
+          form.append('file', selected);
+          form.append('documentType', type);
+          form.append('tournamentIds', JSON.stringify(tournaments.map((item) => item.tournament_id)));
+          try {
+            const response = await fetch('/api/archive-documents', { method: 'POST', body: form });
+            const body = await response.json();
+            if (!response.ok) throw new Error(body.error || 'アップロードできませんでした。');
+            await loadTournaments();
+          } catch (error) {
+            message.textContent = error instanceof Error ? error.message : 'アップロードできませんでした。';
+            upload.disabled = false;
+          }
+        });
+        box.append(file, upload, message);
+        documentGrid.append(box);
+      });
+      section.append(documentGrid);
+      const published = tournaments.every((item) => Boolean(item.archive_published_at));
+      const actions = element('div', 'archive-actions');
+      const publish = element('button', published ? 'danger' : 'success', published ? '公開を取り下げる' : '過去大会として公開');
+      publish.type = 'button';
+      const message = element('span', 'status-message', published ? '公開中' : '未公開');
+      publish.addEventListener('click', async () => {
+        const nextPublished = !published;
+        if (!confirm(nextPublished ? '大会記録をメンバーポータルへ公開しますか？' : '大会記録の公開を取り下げますか？')) return;
+        publish.disabled = true;
+        message.textContent = nextPublished ? '公開処理中…' : '取り下げ中…';
+        try {
+          const response = await fetch('/api/tournaments/archive', {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tournamentIds: tournaments.map((item) => item.tournament_id), published: nextPublished }),
+          });
+          const body = await response.json();
+          if (!response.ok) throw new Error(body.error || '大会記録を更新できませんでした。');
+          await loadTournaments();
+        } catch (error) {
+          message.textContent = error instanceof Error ? error.message : '大会記録を更新できませんでした。';
+          publish.disabled = false;
+        }
+      });
+      actions.append(publish, message);
+      section.append(actions);
       return section;
     }
 
@@ -1377,6 +1776,9 @@ function adminHtml(page: AdminPage): string {
 
       const entryManagement = renderEntryManagement(tournaments);
       if (entryManagement) card.append(entryManagement);
+
+      const archiveManagement = renderArchiveManagement(tournaments);
+      if (archiveManagement) card.append(archiveManagement);
 
       tournaments.forEach((item) => card.append(renderTournamentStatusControl(item)));
 
@@ -1835,6 +2237,8 @@ export async function handleAdminRequest(
   statusesUpdater: TournamentStatusesUpdater = updateTournamentStatuses,
   tournamentEditor: TournamentEditor = editTournaments,
   entryStatusUpdater: TournamentEntryStatusUpdater = updateTournamentEntryStatus,
+  entryResultUpdater: TournamentEntryResultUpdater = updateTournamentEntryResult,
+  archivePublisher: TournamentArchivePublisher = setTournamentArchivePublished,
 ): Promise<Response> {
   const url = new URL(request.url);
   const authResponse = await handleAdminAuthRequest(request, env);
@@ -1918,6 +2322,26 @@ export async function handleAdminRequest(
       }
       console.error("大会要項PDFの保存エラー", error);
       return json({ error: "PDFを保存できませんでした。" }, 500);
+    }
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/archive-documents") {
+    if (!isSameOrigin(request)) {
+      return json({ error: "不正な送信元です。" }, 403);
+    }
+    if (!request.headers.get("Content-Type")?.toLowerCase().startsWith("multipart/form-data")) {
+      return json({ error: "PDFをフォーム形式で送信してください。" }, 415);
+    }
+    try {
+      return json({
+        document: await uploadTournamentArchiveDocument(env, request, actor),
+      }, 201);
+    } catch (error: unknown) {
+      if (error instanceof DocumentUploadError) {
+        return json({ error: error.message }, 400);
+      }
+      console.error("大会記録PDFの保存エラー", error);
+      return json({ error: "大会記録PDFを保存できませんでした。" }, 500);
     }
   }
 
@@ -2155,6 +2579,70 @@ export async function handleAdminRequest(
       }
       console.error("大会ステータス一括変更エラー", error);
       return json({ error: "ステータスを変更できませんでした。" }, 500);
+    }
+  }
+
+  if (request.method === "PATCH" && url.pathname === "/api/tournaments/archive") {
+    if (!isSameOrigin(request)) {
+      return json({ error: "不正な送信元です。" }, 403);
+    }
+    if (!request.headers.get("Content-Type")?.toLowerCase().startsWith("application/json")) {
+      return json({ error: "JSON形式で送信してください。" }, 415);
+    }
+    try {
+      const body = (await request.json()) as {
+        tournamentIds?: unknown;
+        published?: unknown;
+      };
+      if (!Array.isArray(body.tournamentIds) || typeof body.published !== "boolean") {
+        throw new AdminRequestError("大会IDと公開状態を指定してください。", 400);
+      }
+      return json(await archivePublisher(
+        env,
+        body.tournamentIds.map(String),
+        body.published,
+        actor,
+      ));
+    } catch (error: unknown) {
+      if (error instanceof AdminRequestError) {
+        return json({ error: error.message }, error.status);
+      }
+      console.error("大会記録の公開状態変更エラー", error);
+      return json({ error: "大会記録の公開状態を変更できませんでした。" }, 500);
+    }
+  }
+
+  const entryResultPath = url.pathname.match(
+    /^\/api\/tournaments\/(T-[0-9a-f-]{36})\/entries\/(M-[0-9a-f-]{36})\/result$/,
+  );
+  if (request.method === "PATCH" && entryResultPath) {
+    if (!isSameOrigin(request)) {
+      return json({ error: "不正な送信元です。" }, 403);
+    }
+    if (!request.headers.get("Content-Type")?.toLowerCase().startsWith("application/json")) {
+      return json({ error: "JSON形式で送信してください。" }, 415);
+    }
+    let resultText = "";
+    try {
+      const body = (await request.json()) as { resultText?: unknown };
+      resultText = typeof body.resultText === "string" ? body.resultText : "";
+    } catch {
+      return json({ error: "入力内容を確認してください。" }, 400);
+    }
+    try {
+      return json(await entryResultUpdater(
+        env,
+        entryResultPath[1],
+        entryResultPath[2],
+        resultText,
+        actor,
+      ));
+    } catch (error: unknown) {
+      if (error instanceof AdminRequestError) {
+        return json({ error: error.message }, error.status);
+      }
+      console.error("個人成績の変更エラー", error);
+      return json({ error: "個人成績を変更できませんでした。" }, 500);
     }
   }
 

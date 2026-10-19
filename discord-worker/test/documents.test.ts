@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  buildArchivePdfFilename,
   buildPdfFilename,
   serveTournamentDocument,
   uploadTournamentDocument,
@@ -14,6 +15,21 @@ describe("tournament PDF documents", () => {
         ["2026-11-01", "2026-12-02"],
       ),
     ).toBe("2026年11月・2026年12月_第1回_埼玉大会_B級・C級.pdf");
+  });
+
+  it("adds the archive document type to roster and result filenames", () => {
+    expect(buildArchivePdfFilename(
+      "埼玉大会",
+      ["C"],
+      ["2026-11-01"],
+      "roster",
+    )).toBe("2026年11月_埼玉大会_C級_選手名簿.pdf");
+    expect(buildArchivePdfFilename(
+      "埼玉大会",
+      ["C"],
+      ["2026-11-01"],
+      "results",
+    )).toBe("2026年11月_埼玉大会_C級_大会結果.pdf");
   });
 
   it("stores a valid PDF in a private R2 bucket and returns its Worker URL", async () => {

@@ -70,8 +70,13 @@ describe("member portal", () => {
     expect(html).toContain("Discordでログイン");
     expect(html).toContain('id="answer-tab"');
     expect(html).toContain('id="tournaments-tab"');
+    expect(html).toContain('id="archive-tab"');
     expect(html).toContain('id="answer-list"');
     expect(html).toContain('id="tournament-list"');
+    expect(html).toContain('id="archive-list"');
+    expect(html).toContain("過去の大会結果");
+    expect(html).toContain("function renderArchives()");
+    expect(html).toContain("結果ファイル");
     expect(html).toContain('id="answer-status-filter"');
     expect(html).toContain('id="answer-sort"');
     expect(html).toContain('<option value="open" selected>回答受付中</option>');

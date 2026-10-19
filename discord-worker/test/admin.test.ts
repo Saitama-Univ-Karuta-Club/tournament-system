@@ -3,7 +3,9 @@ import {
   editTournaments,
   handleAdminRequest,
   listAdminTournaments,
+  setTournamentArchivePublished,
   updateTournamentEntryStatus,
+  updateTournamentEntryResult,
   type AdminEnv,
 } from "../src/admin";
 
@@ -78,6 +80,9 @@ describe("Admin Worker", () => {
     expect(html).toContain(`>${label}`);
     expect(html).toContain(`href="/${path}" aria-current="page"`);
     expect(html).toContain(`data-page="${path}"`);
+    const script = html.match(/<script>([\s\S]*)<\/script>/)?.[1];
+    expect(script).toBeTruthy();
+    expect(() => new Function(script!)).not.toThrow();
   });
 
   it("shows the queue notice only on the registration page", async () => {
@@ -160,6 +165,82 @@ describe("Admin Worker", () => {
     expect(statements.some((item) => item.sql.includes("INSERT INTO tournament_entries"))).toBe(true);
     expect(statements.some((item) => item.sql.includes("INSERT INTO tournament_entry_history"))).toBe(true);
     expect(statements.every((item) => !item.sql.includes("UPDATE responses"))).toBe(true);
+  });
+
+  it("stores an entrant result without changing the participation response", async () => {
+    const statements: Array<{ sql: string; values: unknown[] }> = [];
+    const prepare = vi.fn((sql: string) => ({
+      bind: vi.fn((...values: unknown[]) => ({
+        first: vi.fn().mockResolvedValue({ result_text: null }),
+        sql,
+        values,
+      })),
+    }));
+    const batch = vi.fn(async (items: Array<{ sql: string; values: unknown[] }>) => {
+      statements.push(...items);
+      return items.map(() => ({ success: true }));
+    });
+
+    const result = await updateTournamentEntryResult(
+      { DB: { prepare, batch } as unknown as D1Database },
+      "T-11111111-1111-4111-8111-111111111111",
+      "M-11111111-1111-4111-8111-111111111111",
+      " 3回戦敗退 ",
+      "discord:admin",
+    );
+
+    expect(result).toMatchObject({ resultText: "3回戦敗退", changed: true });
+    expect(statements.some((item) => item.sql.includes("UPDATE tournament_entries"))).toBe(true);
+    expect(statements.some((item) => item.sql.includes("tournament_entry_result_history"))).toBe(true);
+    expect(statements.every((item) => !item.sql.includes("UPDATE responses"))).toBe(true);
+  });
+
+  it("publishes a complete tournament archive", async () => {
+    const updates: Array<{ sql: string; values: unknown[] }> = [];
+    const tournament = {
+      tournament_id: "T-11111111-1111-4111-8111-111111111111",
+      registration_group_id: null,
+      title: "記録テスト大会",
+      event_start_date: "2026-11-01",
+      event_end_date: "2026-11-01",
+      grade: "C",
+      all_grades: 0,
+      tournament_type: "official",
+      venue: null,
+      true_deadline: "2026-10-28T14:59:00.000Z",
+      internal_deadline: "2026-10-25T14:59:00.000Z",
+      document_url: "https://example.com/guide.pdf",
+      status: "applied",
+    };
+    const prepare = vi.fn((sql: string) => ({
+      bind: vi.fn((...values: unknown[]) => ({
+        all: vi.fn().mockResolvedValue({
+          results: sql.includes("tournament_archive_documents")
+            ? [{ document_type: "roster" }, { document_type: "results" }]
+            : [tournament],
+        }),
+        first: vi.fn().mockResolvedValue({ participant_count: 1, missing_results: 0 }),
+        sql,
+        values,
+      })),
+    }));
+    const batch = vi.fn(async (items: Array<{ sql: string; values: unknown[] }>) => {
+      updates.push(...items);
+      return items.map(() => ({ success: true }));
+    });
+
+    const result = await setTournamentArchivePublished(
+      { DB: { prepare, batch } as unknown as D1Database },
+      [tournament.tournament_id],
+      true,
+      "discord:admin",
+    );
+
+    expect(result.published).toBe(true);
+    expect(result.publishedAt).toBeTruthy();
+    expect(updates).toHaveLength(2);
+    expect(updates.some((item) => item.sql.includes("archive_display_name"))).toBe(true);
+    expect(updates.some((item) => item.sql.includes("archive_published_at"))).toBe(true);
   });
 
   it("uses 23:59 as the default organizer deadline time", async () => {
