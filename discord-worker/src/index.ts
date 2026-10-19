@@ -16,7 +16,17 @@ import {
 import { processMemberApprovalNotificationQueue } from "./member-notifications";
 import { processBackupFailureAlerts } from "./backup-alerts";
 import {
+  processParticipantGuidanceQueue,
+  recordParticipantPaymentResponse,
+  type ParticipantPaymentResponseInput,
+} from "./participant-guidance";
+import {
+  enqueueDuePaymentReminders,
+  processPostDeadlineQueue,
+} from "./post-deadline";
+import {
   createTestTournamentAndNotify,
+  loadApplicationEmailTemplate,
   notifyPendingTournaments,
   recordAttendanceResponse,
   sendTestDeadlineReminder,
@@ -26,6 +36,39 @@ import {
   upsertAnnouncementChannel,
   upsertReminderChannel,
 } from "./tournaments";
+
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
+async function applicationEmailPage(
+  env: Env,
+  tournamentId: string,
+): Promise<Response> {
+  try {
+    const template = await loadApplicationEmailTemplate(env.DB, tournamentId);
+    const mailto = escapeHtml(template.mailto);
+    const html = `<!doctype html><html lang="ja"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="0;url=${mailto}"><title>申込メールを作成</title><style>body{font-family:system-ui,sans-serif;margin:0;background:#f4f6fa;color:#172033}.card{max-width:560px;margin:12vh auto;padding:28px;background:#fff;border:1px solid #dce1eb;border-radius:14px}a{display:inline-block;padding:12px 18px;border-radius:9px;background:#425ba8;color:#fff;text-decoration:none;font-weight:700}</style><main class="card"><h1>申込メールを開きます</h1><p>自動で開かない場合は、下のボタンを押してください。メール作成後、申込名簿を添付してください。</p><a href="${mailto}">既定のメーラーを開く</a></main></html>`;
+    return new Response(html, {
+      headers: {
+        "Content-Type": "text/html; charset=utf-8",
+        "Cache-Control": "no-store",
+        "X-Robots-Tag": "noindex, nofollow",
+        "X-Content-Type-Options": "nosniff",
+      },
+    });
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : "申込メールを作成できません。";
+    return new Response(message, {
+      status: 404,
+      headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" },
+    });
+  }
+}
 
 export interface Env {
   DB: D1Database;
@@ -83,6 +126,10 @@ type TestTournamentCreator = (
 type AttendanceRecorder = (
   env: Env,
   input: AttendanceInput,
+) => Promise<import("./discord-api").DiscordMessagePayload>;
+type ParticipantPaymentRecorder = (
+  env: Env,
+  input: ParticipantPaymentResponseInput,
 ) => Promise<import("./discord-api").DiscordMessagePayload>;
 type MemberRegistrar = (
   db: D1Database,
@@ -193,11 +240,19 @@ export async function handleRequest(
   memberRegistrar: MemberRegistrar = submitMemberRegistrationRequest,
   reminderChannelSetter: ReminderChannelSetter = upsertReminderChannel,
   testReminderSender: TestReminderSender = sendTestDeadlineReminder,
+  participantPaymentRecorder: ParticipantPaymentRecorder = recordParticipantPaymentResponse,
 ): Promise<Response> {
   const url = new URL(request.url);
 
   const documentResponse = await serveTournamentDocument(request, env.DOCUMENTS);
   if (documentResponse) return documentResponse;
+
+  const emailMatch = request.method === "GET"
+    ? url.pathname.match(/^\/application-email\/(T-[0-9a-f-]{36})$/)
+    : null;
+  if (emailMatch) {
+    return applicationEmailPage(env, emailMatch[1]);
+  }
 
   if (request.method === "GET" && url.pathname === "/health") {
     try {
@@ -456,6 +511,30 @@ export async function handleRequest(
     }
   }
 
+  if (
+    interaction.type === InteractionType.MESSAGE_COMPONENT &&
+    interaction.data?.custom_id?.startsWith("payment:")
+  ) {
+    const [, tournamentId, status] = interaction.data.custom_id.split(":");
+    if (status !== "paid" && status !== "unpaid") {
+      return ephemeralMessage("支払い操作が不正です。");
+    }
+    try {
+      const payload = await participantPaymentRecorder(env, {
+        tournamentId: tournamentId ?? "",
+        discordUserId:
+          interaction.member?.user?.id ?? interaction.user?.id ?? "",
+        status,
+      });
+      return json({ type: InteractionResponseType.UPDATE_MESSAGE, data: payload });
+    } catch (error: unknown) {
+      console.error("参加費支払い状態の変更エラー", error);
+      const message =
+        error instanceof Error ? error.message : "支払い状態の保存に失敗しました。";
+      return ephemeralMessage(`支払い状態を保存できません。\n${message}`);
+    }
+  }
+
   return ephemeralMessage("この操作にはまだ対応していません。");
 }
 
@@ -468,10 +547,16 @@ export default {
     env: Env,
     ctx: ExecutionContext,
   ): void {
+    const processPostDeadlineWorkflow = async (): Promise<void> => {
+      await enqueueDuePaymentReminders(env);
+      await processPostDeadlineQueue(env);
+    };
     ctx.waitUntil(
       Promise.all([
         notifyPendingTournaments(env),
         processMemberApprovalNotificationQueue(env),
+        processParticipantGuidanceQueue(env),
+        processPostDeadlineWorkflow(),
         processBackupFailureAlerts(env),
       ]).then(() => undefined),
     );

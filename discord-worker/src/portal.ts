@@ -50,6 +50,7 @@ interface PortalTournamentRow {
   eligible: number;
   own_response: ResponseValue | null;
   own_entry_status: string | null;
+  own_waitlist_number: number | null;
   archive_published_at: string | null;
 }
 
@@ -59,6 +60,8 @@ interface ParticipantRow {
   display_name_kana: string;
   grade: string;
   entry_status: string | null;
+  waitlist_number: number | null;
+  payment_status: "unpaid" | "paid" | null;
   result_text: string | null;
 }
 
@@ -369,11 +372,21 @@ async function listPortalTournaments(env: PortalEnv, member: PortalMemberRow): P
        FROM tournament_entries
        WHERE tournament_entries.tournament_id = tournaments.tournament_id
          AND tournament_entries.member_id = ?
-       LIMIT 1) AS own_entry_status
+       LIMIT 1) AS own_entry_status,
+      (SELECT tournament_entries.waitlist_number
+       FROM tournament_entries
+       WHERE tournament_entries.tournament_id = tournaments.tournament_id
+         AND tournament_entries.member_id = ?
+       LIMIT 1) AS own_waitlist_number
      FROM tournaments
      WHERE tournaments.status NOT IN ('draft', 'deleted')
      ORDER BY tournaments.internal_deadline ASC, tournaments.event_start_date ASC`,
-  ).bind(member.grade, member.member_id, member.member_id).all<PortalTournamentRow>();
+  ).bind(
+    member.grade,
+    member.member_id,
+    member.member_id,
+    member.member_id,
+  ).all<PortalTournamentRow>();
 
   const participants = await env.DB.prepare(
     `SELECT
@@ -387,6 +400,8 @@ async function listPortalTournaments(env: PortalEnv, member: PortalMemberRow): P
       ) AS display_name_kana,
       COALESCE(tournament_entries.archive_grade, members.grade) AS grade,
       tournament_entries.status AS entry_status,
+      tournament_entries.waitlist_number,
+      tournament_entry_payments.status AS payment_status,
       tournament_entries.result_text
      FROM responses
      INNER JOIN members ON members.member_id = responses.member_id
@@ -394,6 +409,9 @@ async function listPortalTournaments(env: PortalEnv, member: PortalMemberRow): P
      LEFT JOIN tournament_entries
        ON tournament_entries.tournament_id = responses.tournament_id
       AND tournament_entries.member_id = responses.member_id
+     LEFT JOIN tournament_entry_payments
+       ON tournament_entry_payments.tournament_id = responses.tournament_id
+      AND tournament_entry_payments.member_id = responses.member_id
      WHERE responses.response = 'yes'
        AND responses.is_valid = 1
        AND (members.status = 'active' OR tournaments.archive_published_at IS NOT NULL)
@@ -610,7 +628,7 @@ function portalHtml(): string {
   <script>
     const responseLabels={yes:'参加希望',maybe:'未定・条件付き',no:'不参加'};
     const statusLabels={active:'回答受付中',applied:'申込済み',closed:'終了',no_participants:'参加者なし終了',canceled:'中止'};
-    const entryStatusLabels={submitted:'申込済み（結果待ち）',selected:'出場確定',not_selected:'抽選落選',withdrawn:'辞退'};
+    const entryStatusLabels={submitted:'申込済み（結果待ち）',selected:'出場確定',not_selected:'キャンセル待ち',withdrawn:'辞退'};
     const gradeLabels={beginner:'初心者',all:'すべて'};
     const typeLabels={official:'公認大会',support:'後援大会',event:'イベント'};
     let tournaments=[];
@@ -627,8 +645,8 @@ function portalHtml(): string {
     function canAnswer(target){return target.status==='active'&&new Date(target.internal_deadline).getTime()>=Date.now()}
     function displayStatus(target){return target.status==='closed'&&target.closure_reason==='no_participants'?'no_participants':target.status}
     function answerGroups(){const filter=document.querySelector('#answer-status-filter').value;const sort=document.querySelector('#answer-sort').value;const groups=eligibleAnswerGroups().filter(({target})=>{const open=canAnswer(target);if(filter==='all')return true;if(filter==='open')return open;if(filter==='unanswered')return open&&!target.own_response;if(filter==='closed')return !open;return target.own_response===filter});const value=({target})=>{if(sort==='event')return new Date(target.event_start_date+'T00:00:00+09:00').getTime();if(sort==='created')return -new Date(target.created_at).getTime();return new Date(target.internal_deadline).getTime()};groups.sort((a,b)=>{if(sort==='action'){const priority=({target})=>canAnswer(target)&&!target.own_response?0:canAnswer(target)?1:2;const difference=priority(a)-priority(b);if(difference)return difference}return value(a)-value(b)});return groups}
-    function renderAnswers(){const list=document.querySelector('#answer-list');const allGroups=eligibleAnswerGroups();const groups=answerGroups();const unanswered=allGroups.filter(({target})=>canAnswer(target)&&!target.own_response).length;const badge=document.querySelector('#unanswered-count');badge.hidden=unanswered===0;badge.textContent=String(unanswered);if(!allGroups.length){list.innerHTML='<div class="card empty">現在の級が対象になっている大会はありません。</div>';return}if(!groups.length){list.innerHTML='<div class="card empty">条件に一致する大会はありません。</div>';return}list.innerHTML=groups.map(({group,target})=>{const answerable=canAnswer(target);const answer=target.own_response||'';const targetStatus=displayStatus(target);const badgeLabel=answer?'回答済み':answerable?'未回答':statusLabels[targetStatus]||'受付終了';const badgeClass=answer?'answered':answerable?'pending':targetStatus;const buttons=Object.entries(responseLabels).map(([value,label])=>'<button class="answer '+(answer===value?'selected '+value:'')+'" data-id="'+esc(target.tournament_id)+'" data-response="'+value+'" '+(answerable?'':'disabled')+'>'+label+'</button>').join('');const gradeName=target.all_grades?'すべて':grade(target.grade);const entryResult=target.own_entry_status?' ／ 申込・抽選結果: '+(entryStatusLabels[target.own_entry_status]||target.own_entry_status):'';return '<article class="card response-card"><div class="card-head"><div class="title-row"><h3 class="title">'+esc(target.title)+'</h3></div><span class="status '+esc(badgeClass)+'">'+esc(badgeLabel)+'</span></div><div class="info-grid"><div class="info-cell"><span class="info-label">大会日程</span><span class="info-value">'+esc(date(target.event_start_date))+'</span></div><div class="info-cell"><span class="info-label">開催級</span><span class="info-value">'+esc(gradeName)+'</span></div><div class="info-cell"><span class="info-label">回答締切</span><span class="info-value">'+esc(dateTime(target.internal_deadline))+'</span></div><div class="info-cell"><span class="info-label">要項</span><span class="info-value">'+documentLink(group,'PDFを開く')+'</span></div></div>'+(target.venue?'<p class="venue-note">会場 '+esc(target.venue)+'</p>':'')+'<div class="answer-area"><span class="answer-label">回答</span><div class="buttons">'+buttons+'</div><p class="message">'+(answerable?'現在の回答: '+esc(answer?responseLabels[answer]:'未回答'):'現在は回答を変更できません。')+esc(entryResult)+'</p></div></article>'}).join('');document.querySelectorAll('#answer-list .answer').forEach(button=>button.addEventListener('click',saveAnswer))}
-    function renderTournamentList(){const list=document.querySelector('#tournament-list');const groups=filteredGroups();if(!groups.length){list.innerHTML='<div class="card empty">条件に一致する大会はありません。</div>';return}list.innerHTML=groups.map(group=>{const first=group[0];const displayStatuses=[...new Set(group.map(displayStatus))];const groupStatus=displayStatuses.length===1?displayStatuses[0]:'active';const gradeNames=[...new Set(group.map(item=>item.all_grades?'すべて':grade(item.grade)))];const uniqueDates=[...new Set(group.map(item=>item.event_start_date))];const dateLabel=uniqueDates.length===1?date(uniqueDates[0]):group.map(item=>(item.all_grades?'すべて':grade(item.grade))+' '+date(item.event_start_date)).join(' / ');const participants=group.flatMap(item=>item.participants.map(person=>({...person,tournamentGrade:item.all_grades?person.grade:item.grade})));const people=participants.length?participants.map(person=>{const result=person.entry_status?' ／ '+(entryStatusLabels[person.entry_status]||person.entry_status):'';return '<li><strong>'+esc(grade(person.tournamentGrade))+'</strong><span>'+esc(person.display_name)+(person.display_name_kana?' <small>('+esc(person.display_name_kana)+')</small>':'')+esc(result)+'</span></li>'}).join(''):'<li class="empty">まだ参加希望者はいません。</li>';return '<article class="card tournament-card"><div class="card-head"><div class="title-row"><h3 class="title">'+esc(first.title)+'</h3><span class="status '+esc(groupStatus)+'">'+esc(statusLabels[groupStatus]||groupStatus)+'</span></div><span class="count">'+participants.length+'名</span></div><div class="meta"><span>大会日 '+esc(dateLabel)+'</span><span>締切 '+esc(dateTime(first.internal_deadline))+'</span><span>開催級 '+esc(gradeNames.join('、'))+'</span>'+(first.venue?'<span>会場 '+esc(first.venue)+'</span>':'')+'</div><ul class="participants">'+people+'</ul><div class="section-title">'+documentLink(group,'▣ 大会要項PDFを開く')+'</div></article>'}).join('')}
+    function renderAnswers(){const list=document.querySelector('#answer-list');const allGroups=eligibleAnswerGroups();const groups=answerGroups();const unanswered=allGroups.filter(({target})=>canAnswer(target)&&!target.own_response).length;const badge=document.querySelector('#unanswered-count');badge.hidden=unanswered===0;badge.textContent=String(unanswered);if(!allGroups.length){list.innerHTML='<div class="card empty">現在の級が対象になっている大会はありません。</div>';return}if(!groups.length){list.innerHTML='<div class="card empty">条件に一致する大会はありません。</div>';return}list.innerHTML=groups.map(({group,target})=>{const answerable=canAnswer(target);const answer=target.own_response||'';const targetStatus=displayStatus(target);const badgeLabel=answer?'回答済み':answerable?'未回答':statusLabels[targetStatus]||'受付終了';const badgeClass=answer?'answered':answerable?'pending':targetStatus;const buttons=Object.entries(responseLabels).map(([value,label])=>'<button class="answer '+(answer===value?'selected '+value:'')+'" data-id="'+esc(target.tournament_id)+'" data-response="'+value+'" '+(answerable?'':'disabled')+'>'+label+'</button>').join('');const gradeName=target.all_grades?'すべて':grade(target.grade);const waitlist=target.own_entry_status==='not_selected'&&target.own_waitlist_number?' '+target.own_waitlist_number+'番':'';const entryResult=target.own_entry_status?' ／ 申込・抽選結果: '+(entryStatusLabels[target.own_entry_status]||target.own_entry_status)+waitlist:'';return '<article class="card response-card"><div class="card-head"><div class="title-row"><h3 class="title">'+esc(target.title)+'</h3></div><span class="status '+esc(badgeClass)+'">'+esc(badgeLabel)+'</span></div><div class="info-grid"><div class="info-cell"><span class="info-label">大会日程</span><span class="info-value">'+esc(date(target.event_start_date))+'</span></div><div class="info-cell"><span class="info-label">開催級</span><span class="info-value">'+esc(gradeName)+'</span></div><div class="info-cell"><span class="info-label">回答締切</span><span class="info-value">'+esc(dateTime(target.internal_deadline))+'</span></div><div class="info-cell"><span class="info-label">要項</span><span class="info-value">'+documentLink(group,'PDFを開く')+'</span></div></div>'+(target.venue?'<p class="venue-note">会場 '+esc(target.venue)+'</p>':'')+'<div class="answer-area"><span class="answer-label">回答</span><div class="buttons">'+buttons+'</div><p class="message">'+(answerable?'現在の回答: '+esc(answer?responseLabels[answer]:'未回答'):'現在は回答を変更できません。')+esc(entryResult)+'</p></div></article>'}).join('');document.querySelectorAll('#answer-list .answer').forEach(button=>button.addEventListener('click',saveAnswer))}
+    function renderTournamentList(){const list=document.querySelector('#tournament-list');const groups=filteredGroups();if(!groups.length){list.innerHTML='<div class="card empty">条件に一致する大会はありません。</div>';return}list.innerHTML=groups.map(group=>{const first=group[0];const displayStatuses=[...new Set(group.map(displayStatus))];const groupStatus=displayStatuses.length===1?displayStatuses[0]:'active';const gradeNames=[...new Set(group.map(item=>item.all_grades?'すべて':grade(item.grade)))];const uniqueDates=[...new Set(group.map(item=>item.event_start_date))];const dateLabel=uniqueDates.length===1?date(uniqueDates[0]):group.map(item=>(item.all_grades?'すべて':grade(item.grade))+' '+date(item.event_start_date)).join(' / ');const participants=group.flatMap(item=>item.participants.map(person=>({...person,tournamentGrade:item.all_grades?person.grade:item.grade})));const people=participants.length?participants.map(person=>{const waitlist=person.entry_status==='not_selected'&&person.waitlist_number?' '+person.waitlist_number+'番':'';const result=person.entry_status?' ／ '+(entryStatusLabels[person.entry_status]||person.entry_status)+waitlist:'';const payment=person.entry_status==='selected'?' ／ '+(person.payment_status==='paid'?'支払済み':'未納'):'';return '<li><strong>'+esc(grade(person.tournamentGrade))+'</strong><span>'+esc(person.display_name)+(person.display_name_kana?' <small>('+esc(person.display_name_kana)+')</small>':'')+esc(result+payment)+'</span></li>'}).join(''):'<li class="empty">まだ参加希望者はいません。</li>';return '<article class="card tournament-card"><div class="card-head"><div class="title-row"><h3 class="title">'+esc(first.title)+'</h3><span class="status '+esc(groupStatus)+'">'+esc(statusLabels[groupStatus]||groupStatus)+'</span></div><span class="count">'+participants.length+'名</span></div><div class="meta"><span>大会日 '+esc(dateLabel)+'</span><span>締切 '+esc(dateTime(first.internal_deadline))+'</span><span>開催級 '+esc(gradeNames.join('、'))+'</span>'+(first.venue?'<span>会場 '+esc(first.venue)+'</span>':'')+'</div><ul class="participants">'+people+'</ul><div class="section-title">'+documentLink(group,'▣ 大会要項PDFを開く')+'</div></article>'}).join('')}
     function renderArchives(){const list=document.querySelector('#archive-list');const groups=groupRows(tournaments).filter(group=>group.some(item=>item.archive_published_at)).sort((a,b)=>Math.max(...b.map(item=>new Date(item.event_start_date+'T00:00:00+09:00').getTime()))-Math.max(...a.map(item=>new Date(item.event_start_date+'T00:00:00+09:00').getTime())));if(!groups.length){list.innerHTML='<div class="card empty">公開済みの大会記録はまだありません。</div>';return}list.innerHTML=groups.map(group=>{const first=group[0];const uniqueDates=[...new Set(group.map(item=>item.event_start_date))];const dateLabel=uniqueDates.length===1?date(uniqueDates[0]):group.map(item=>(item.all_grades?'すべて':grade(item.grade))+' '+date(item.event_start_date)).join(' / ');const entrants=group.flatMap(item=>item.participants.filter(person=>person.entry_status==='submitted'||person.entry_status==='selected').map(person=>({...person,tournamentGrade:item.all_grades?person.grade:item.grade})));const rows=entrants.map(person=>'<li><strong>'+esc(grade(person.tournamentGrade))+'</strong><span>'+esc(person.display_name)+(person.display_name_kana?' <small>('+esc(person.display_name_kana)+')</small>':'')+' — '+esc(person.result_text||'成績未登録')+'</span></li>').join('');return '<article class="card archive-card"><div class="card-head"><div class="title-row"><h3 class="title">'+esc(first.title)+'</h3><span class="status applied">大会記録</span></div><span class="count">'+entrants.length+'名</span></div><div class="meta"><span>大会日 '+esc(dateLabel)+'</span>'+(first.venue?'<span>会場 '+esc(first.venue)+'</span>':'')+'</div><div class="section-title">出場者・成績</div><ul class="participants">'+rows+'</ul><div class="section-title">'+documentLink(group,'▣ 大会要項')+'　'+archiveDocumentLink(group,'roster','▣ 選手名簿')+'　'+archiveDocumentLink(group,'results','▣ 結果ファイル')+'</div></article>'}).join('')}
     function render(){renderAnswers();renderTournamentList();renderArchives()}
     let toastTimer;function showToast(text){const toast=document.querySelector('#toast');toast.textContent=text;toast.hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>{toast.hidden=true},2600)}

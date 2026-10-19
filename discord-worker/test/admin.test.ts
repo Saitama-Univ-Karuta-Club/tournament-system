@@ -4,8 +4,11 @@ import {
   handleAdminRequest,
   listAdminTournaments,
   setTournamentArchivePublished,
+  uploadTournamentArchiveDocument,
+  updateTournamentEntriesBatch,
   updateTournamentEntryStatus,
   updateTournamentEntryResult,
+  updateTournamentStatuses,
   type AdminEnv,
 } from "../src/admin";
 
@@ -23,6 +26,19 @@ function authenticatedContext(waitUntil = vi.fn()) {
 }
 
 describe("Admin Worker", () => {
+  it("serves syntactically valid management-page JavaScript", async () => {
+    const response = await handleAdminRequest(
+      new Request("https://admin.example.com/tournaments"),
+      env,
+      authenticatedContext(),
+    );
+    const html = await response.text();
+    const script = html.match(/<script>([\s\S]*)<\/script>/)?.[1];
+
+    expect(script).toBeTruthy();
+    expect(() => new Function(script ?? "")).not.toThrow();
+  });
+
   it("redirects an unauthenticated browser to Discord login", async () => {
     const response = await handleAdminRequest(
       new Request("https://admin.example.com/"),
@@ -99,6 +115,24 @@ describe("Admin Worker", () => {
     expect(html).toContain("selectedRegistrationGrades()");
   });
 
+  it("shows read-only member summaries until an editor is opened", async () => {
+    const response = await handleAdminRequest(
+      new Request("https://admin.example.com/members"),
+      env,
+      authenticatedContext(),
+    );
+
+    const html = await response.text();
+    expect(html).toContain("['氏名', 'よみがな', '出場級', '段位', '状態', 'DM', '操作']");
+    expect(html).toContain("renderMemberTableHeader()");
+    expect(html).toContain("member-summary-grid");
+    expect(html).toContain("item.dataset.label = label");
+    expect(html).toContain("summaryItem('DM', member.dmEnabled ? '送信する' : '送信しない')");
+    expect(html).toContain("const edit = element('button', 'secondary', '編集')");
+    expect(html).toContain("editor.hidden = true");
+    expect(html).toContain("const cancel = element('button', 'secondary', 'キャンセル')");
+  });
+
   it("renders compact response lists with grouping, sorting, and status filters", async () => {
     const response = await handleAdminRequest(
       new Request("https://admin.example.com/tournaments"),
@@ -110,14 +144,21 @@ describe("Admin Worker", () => {
     expect(html).toContain('id="tournament-sort"');
     expect(html).toContain('<option value="deadline_asc">締切日が近い順</option>');
     expect(html).toContain('id="tournament-status-filter"');
+    expect(html).toContain('<option value="default" selected>通常表示（中止・参加者なしを除く）</option>');
+    expect(html).toContain("displayStatus !== 'canceled' && displayStatus !== 'no_participants'");
     expect(html).toContain("responseLabels[response] + '(' + people.length + '人)'");
+    expect(html).toContain("yes: '参加希望'");
+    expect(html).toContain("person.entry_status === 'selected'");
+    expect(html).toContain("person.payment_status === 'paid' ? '支払済み' : '未納'");
+    expect(html).toContain("item.status === 'applied' || item.status === 'closed'");
+    expect(html).toContain("if (!applicationCompleted)");
     expect(html).toContain("groupTournaments(loadedTournaments)");
     expect(html).toContain("person.display_name_kana || 'よみがな未登録'");
     expect(html).not.toContain("回答者の内訳");
     expect(html).not.toContain('class="stats"');
   });
 
-  it("shows tournament editing and grouped application-completion controls", async () => {
+  it("shows tournament editing and grouped status controls", async () => {
     const response = await handleAdminRequest(
       new Request("https://admin.example.com/tournaments"),
       env,
@@ -127,19 +168,222 @@ describe("Admin Worker", () => {
     const html = await response.text();
     expect(html).toContain('id="edit-tournament-dialog"');
     expect(html).toContain("大会情報を編集");
-    expect(html).toContain("申込完了にする");
+    expect(html).toContain("ステータスを変更");
     expect(html).toContain("tournamentIds: tournaments.map");
     expect(html).toContain("開催級はこの画面では変更できません");
-    expect(html).toContain("申込・抽選結果");
-    expect(html).toContain("抽選落選");
+    expect(html).toContain("1. 申込確認名簿（抽選前・");
+    expect(html).toContain("2. 抽選結果・確定名簿・参加費・当日案内");
+    expect(html).toContain("3. 大会結果");
+    expect(html).toContain("選手ごとの当落・入金状態");
+    expect(html).toContain("確定名簿（PDF・Excel）");
+    expect(html).toContain("参加費・当日案内");
+    expect(html).toContain("キャンセル待ち");
+    expect(html).toContain("waitlistNumber");
+    expect(html).toContain("全員分の変更を保存");
+    expect(html).toContain("/api/tournament-entries/batch");
+    expect(html).toContain("document.createElement('details')");
+    expect(html).toContain("entry-management-body");
+    expect(html).toContain("archive-management-body");
+    expect(html).toContain("抽選結果・確定名簿・当日案内を送信");
+    expect(html).toContain("/api/lottery-results/send");
     expect(html).toContain("参加者なし終了");
+    expect(html).toContain("applicationBlocked");
+    expect(html).toContain("一度ほかのステータスへ変更してください");
+    expect(html).not.toContain("function renderTournamentStatusControl");
+    const entryManagementSource = html.slice(
+      html.indexOf("function renderEntryManagement"),
+      html.indexOf("function renderArchiveManagement"),
+    );
+    expect(entryManagementSource).not.toContain("成績を保存");
+    expect(entryManagementSource).not.toContain("entry-save");
+    expect(html).toContain("選手ごとの個人成績");
+  });
+
+  it("saves all entrant statuses and payments in one D1 batch", async () => {
+    const tournamentId = "T-11111111-1111-4111-8111-111111111111";
+    const selectedMemberId = "M-11111111-1111-4111-8111-111111111111";
+    const waitlistedMemberId = "M-22222222-2222-4222-8222-222222222222";
+    const statements: Array<{ sql: string; values: unknown[] }> = [];
+    const prepare = vi.fn((sql: string) => ({
+      bind: vi.fn((...values: unknown[]) => ({
+        all: vi.fn().mockResolvedValue({
+          results: [
+            {
+              tournament_id: tournamentId,
+              member_id: selectedMemberId,
+              entry_status: "submitted",
+              waitlist_number: null,
+              payment_status: null,
+            },
+            {
+              tournament_id: tournamentId,
+              member_id: waitlistedMemberId,
+              entry_status: "submitted",
+              waitlist_number: null,
+              payment_status: null,
+            },
+          ],
+        }),
+        sql,
+        values,
+      })),
+    }));
+    const batch = vi.fn(async (items: Array<{ sql: string; values: unknown[] }>) => {
+      statements.push(...items);
+      return items.map(() => ({ success: true }));
+    });
+
+    const result = await updateTournamentEntriesBatch(
+      { DB: { prepare, batch } as unknown as D1Database },
+      [
+        {
+          tournamentId,
+          memberId: selectedMemberId,
+          status: "selected",
+          waitlistNumber: null,
+          paymentStatus: "unpaid",
+        },
+        {
+          tournamentId,
+          memberId: waitlistedMemberId,
+          status: "not_selected",
+          waitlistNumber: 1,
+          paymentStatus: null,
+        },
+      ],
+      "discord:admin",
+    );
+
+    expect(result).toEqual({ entryCount: 2, changedCount: 2 });
+    expect(batch).toHaveBeenCalledTimes(1);
+    expect(statements.filter((item) => item.sql.includes("INSERT INTO tournament_entries"))).toHaveLength(2);
+    expect(statements.some((item) => item.sql.includes("INSERT INTO tournament_entry_payments"))).toBe(true);
+  });
+
+  it("rejects an invalid waitlist number before a bulk database write", async () => {
+    const prepare = vi.fn();
+    const batch = vi.fn();
+
+    await expect(updateTournamentEntriesBatch(
+      { DB: { prepare, batch } as unknown as D1Database },
+      [{
+        tournamentId: "T-11111111-1111-4111-8111-111111111111",
+        memberId: "M-11111111-1111-4111-8111-111111111111",
+        status: "not_selected",
+        waitlistNumber: null,
+        paymentStatus: null,
+      }],
+      "discord:admin",
+    )).rejects.toMatchObject({
+      message: expect.stringContaining("キャンセル待ち番号"),
+      status: 400,
+    });
+    expect(prepare).not.toHaveBeenCalled();
+    expect(batch).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { documentType: "roster", fileLabel: "選手名簿" },
+    { documentType: "results", fileLabel: "大会結果" },
+  ])("stores an Excel file as $documentType", async ({ documentType, fileLabel }) => {
+    const tournamentId = "T-11111111-1111-4111-8111-111111111111";
+    const put = vi.fn().mockResolvedValue(undefined);
+    const run = vi.fn().mockResolvedValue({ success: true });
+    const prepare = vi.fn((sql: string) => ({
+      bind: vi.fn(() => ({
+        all: vi.fn().mockResolvedValue({
+          results: [{
+            tournament_id: tournamentId,
+            registration_group_id: null,
+            title: "埼玉大会",
+            event_start_date: "2026-11-01",
+            event_end_date: "2026-11-01",
+            grade: "C",
+            all_grades: 0,
+            tournament_type: "official",
+            venue: null,
+            true_deadline: "2026-10-28T14:59:00.000Z",
+            internal_deadline: "2026-10-25T14:59:00.000Z",
+            document_url: null,
+            status: "applied",
+            closure_reason: null,
+          }],
+        }),
+        run,
+      })),
+      sql,
+    }));
+    const form = new FormData();
+    form.append("file", new File(
+      [new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0, 0, 0, 0])],
+      "confirmed.xlsx",
+      { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" },
+    ));
+    form.append("documentType", documentType);
+    form.append("tournamentIds", JSON.stringify([tournamentId]));
+
+    const result = await uploadTournamentArchiveDocument(
+      {
+        DB: { prepare } as unknown as D1Database,
+        DOCUMENTS: { put } as unknown as R2Bucket,
+        DOCUMENT_PUBLIC_BASE_URL: "https://bot.example.com",
+      },
+      new Request("https://admin.example.com/api/archive-documents", { method: "POST", body: form }),
+      "admin@example.com",
+    );
+
+    expect(result.file_name).toBe(`2026年11月_埼玉大会_C級_${fileLabel}.xlsx`);
+    expect(put).toHaveBeenCalledOnce();
+    expect(put.mock.calls[0][2].httpMetadata.contentType).toContain("spreadsheetml");
+    expect(run).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    { status: "canceled", closureReason: null },
+    { status: "closed", closureReason: "no_participants" },
+  ])("prevents application completion for $status tournaments", async ({ status, closureReason }) => {
+    const tournament = {
+      tournament_id: "T-11111111-1111-4111-8111-111111111111",
+      registration_group_id: null,
+      title: "申込不可大会",
+      event_start_date: "2026-11-01",
+      event_end_date: "2026-11-01",
+      grade: "C",
+      all_grades: 0,
+      tournament_type: "official",
+      venue: null,
+      true_deadline: "2026-10-28T14:59:00.000Z",
+      internal_deadline: "2026-10-25T14:59:00.000Z",
+      document_url: null,
+      status,
+      closure_reason: closureReason,
+    };
+    const all = vi.fn().mockResolvedValue({ results: [tournament] });
+    const batch = vi.fn();
+    const prepare = vi.fn().mockReturnValue({
+      bind: vi.fn().mockReturnValue({ all }),
+    });
+
+    await expect(updateTournamentStatuses(
+      { DB: { prepare, batch } as unknown as D1Database },
+      [tournament.tournament_id],
+      "applied",
+      "admin@example.com",
+    )).rejects.toMatchObject({
+      message: expect.stringContaining("申込完了にできません"),
+      status: 409,
+    });
+    expect(batch).not.toHaveBeenCalled();
   });
 
   it("stores a lottery result separately from the participation response", async () => {
     const statements: Array<{ sql: string; values: unknown[] }> = [];
     const prepare = vi.fn((sql: string) => ({
       bind: vi.fn((...values: unknown[]) => ({
-        first: vi.fn().mockResolvedValue({ entry_status: "submitted" }),
+        first: vi.fn().mockResolvedValue({
+          entry_status: "submitted",
+          waitlist_number: null,
+        }),
         sql,
         values,
       })),
@@ -154,17 +398,36 @@ describe("Admin Worker", () => {
       "T-11111111-1111-4111-8111-111111111111",
       "M-11111111-1111-4111-8111-111111111111",
       "not_selected",
+      45,
       "discord:admin",
     );
 
     expect(result).toMatchObject({
       previousStatus: "submitted",
+      previousWaitlistNumber: null,
       status: "not_selected",
+      waitlistNumber: 45,
       changed: true,
     });
     expect(statements.some((item) => item.sql.includes("INSERT INTO tournament_entries"))).toBe(true);
     expect(statements.some((item) => item.sql.includes("INSERT INTO tournament_entry_history"))).toBe(true);
     expect(statements.every((item) => !item.sql.includes("UPDATE responses"))).toBe(true);
+  });
+
+  it("requires a positive waitlist number for a waitlisted entrant", async () => {
+    const prepare = vi.fn();
+    await expect(updateTournamentEntryStatus(
+      { DB: { prepare } as unknown as D1Database },
+      "T-11111111-1111-4111-8111-111111111111",
+      "M-11111111-1111-4111-8111-111111111111",
+      "not_selected",
+      null,
+      "discord:admin",
+    )).rejects.toMatchObject({
+      message: expect.stringContaining("キャンセル待ち番号"),
+      status: 400,
+    });
+    expect(prepare).not.toHaveBeenCalled();
   });
 
   it("stores an entrant result without changing the participation response", async () => {
@@ -193,6 +456,21 @@ describe("Admin Worker", () => {
     expect(statements.some((item) => item.sql.includes("UPDATE tournament_entries"))).toBe(true);
     expect(statements.some((item) => item.sql.includes("tournament_entry_result_history"))).toBe(true);
     expect(statements.every((item) => !item.sql.includes("UPDATE responses"))).toBe(true);
+  });
+
+  it("rejects an entrant result outside the selectable options", async () => {
+    const prepare = vi.fn();
+    await expect(updateTournamentEntryResult(
+      { DB: { prepare } as unknown as D1Database },
+      "T-11111111-1111-4111-8111-111111111111",
+      "M-11111111-1111-4111-8111-111111111111",
+      "ベスト8",
+      "discord:admin",
+    )).rejects.toMatchObject({
+      message: expect.stringContaining("選択肢"),
+      status: 400,
+    });
+    expect(prepare).not.toHaveBeenCalled();
   });
 
   it("publishes a complete tournament archive", async () => {
@@ -294,7 +572,6 @@ describe("Admin Worker", () => {
       "大会種別",
       "主催締切日",
       "サークル内締切日",
-      "会場",
       "大会要項",
     ];
     const positions = orderedLabels.map((label) => formHtml.indexOf(label));
@@ -315,6 +592,8 @@ describe("Admin Worker", () => {
     expect(html).toContain("payload.eventEndDate = payload.eventDate");
     expect(formHtml).toContain('id="grade-date-settings"');
     expect(html).toContain("payload.eventDatesByGrade");
+    expect(formHtml).not.toContain('name="venue"');
+    expect(formHtml).not.toContain('name="documentUrl"');
   });
 
   it("keeps date and deadline inputs within the mobile viewport", async () => {
@@ -329,7 +608,7 @@ describe("Admin Worker", () => {
       '.grade-date-grid > label { width: 100%; min-width: 0; }',
     );
     expect(html).toContain(
-      'input, select { width: 100%; min-width: 0; max-width: 100%;',
+      'input, select, textarea { width: 100%; min-width: 0; max-width: 100%;',
     );
     expect(html).toContain('inline-size: 100%;');
     expect(html).toContain('min-inline-size: 0;');
@@ -386,6 +665,27 @@ describe("Admin Worker", () => {
     expect(html).toContain("resetTournamentForm()");
   });
 
+  it("switches registration instructions for all three application methods", async () => {
+    const response = await handleAdminRequest(
+      new Request("https://admin.example.com/register"),
+      env,
+      authenticatedContext(),
+    );
+
+    const html = await response.text();
+    expect(html).toContain('value="excel_email"');
+    expect(html).toContain('value="excel_form"');
+    expect(html).toContain('value="direct_form"');
+    expect(html).toContain('name="applicationRosterFile"');
+    expect(html).toContain('name="applicationFormUrl"');
+    expect(html).toContain('name="applicationEmail"');
+    expect(html).toContain("const usesEmail = method === 'excel_email'");
+    expect(html).toContain('name="applicationRosterFilenameMode"');
+    expect(html).toContain('name="applicationRosterCustomFileName"');
+    expect(html).toContain("fetch('/api/application-roster'");
+    expect(html).toContain("refreshApplicationMethodFields()");
+  });
+
   it("stores a valid tournament for the notification worker", async () => {
     const waitUntil = vi.fn();
     const creator = vi.fn().mockResolvedValue([
@@ -414,6 +714,8 @@ describe("Admin Worker", () => {
           eventEndDate: "2026-11-01",
           internalDeadline: "2026-10-25T23:59:00+09:00",
           trueDeadline: "2026-10-28T23:59:00+09:00",
+          applicationMethod: "direct_form",
+          applicationFormUrl: "https://example.com/apply",
         }),
       }),
       env,
@@ -456,6 +758,8 @@ describe("Admin Worker", () => {
           eventDatesByGrade: { B: "2026-11-01", C: "2026-11-08" },
           internalDeadline: "2026-10-25T23:59:00+09:00",
           trueDeadline: "2026-10-28T23:59:00+09:00",
+          applicationMethod: "direct_form",
+          applicationFormUrl: "https://example.com/apply",
         }),
       }),
       env,

@@ -410,4 +410,50 @@ describe("Discord Worker", () => {
       data: { content: expect.stringContaining("参加希望") },
     });
   });
+
+  it("updates payment status from a participant-guidance DM button", async () => {
+    const verifier = vi.fn().mockResolvedValue(true);
+    const paymentRecorder = vi.fn().mockResolvedValue({
+      content: "支払い状態を更新しました。",
+      components: [],
+    });
+
+    const response = await handleRequest(
+      new Request("https://example.com/interactions", {
+        method: "POST",
+        headers: {
+          "X-Signature-Ed25519": "signature",
+          "X-Signature-Timestamp": "timestamp",
+        },
+        body: JSON.stringify({
+          type: 3,
+          user: { id: "discord-user-id" },
+          data: {
+            custom_id: "payment:T-11111111-1111-4111-8111-111111111111:paid",
+          },
+        }),
+      }),
+      env,
+      verifier,
+      undefined,
+      vi.fn(),
+      vi.fn(),
+      vi.fn(),
+      vi.fn(),
+      vi.fn(),
+      vi.fn(),
+      vi.fn(),
+      paymentRecorder,
+    );
+
+    expect(paymentRecorder).toHaveBeenCalledWith(env, {
+      tournamentId: "T-11111111-1111-4111-8111-111111111111",
+      discordUserId: "discord-user-id",
+      status: "paid",
+    });
+    await expect(response.json()).resolves.toMatchObject({
+      type: 7,
+      data: { content: "支払い状態を更新しました。" },
+    });
+  });
 });

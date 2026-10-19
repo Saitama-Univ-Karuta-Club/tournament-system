@@ -1,0 +1,501 @@
+import { sendChannelMessage, sendDirectMessage, type DiscordMessagePayload } from "./discord-api";
+import { formatGrade } from "./members";
+import {
+  buildEntryResultsAnnouncementMessage,
+  type EntryResultAnnouncementParticipant,
+  type TournamentRow,
+} from "./tournaments";
+
+export interface PostDeadlineEnv {
+  DB: D1Database;
+  DISCORD_BOT_TOKEN?: string;
+}
+
+type DeliveryKind =
+  | "confirmation_roster_dm"
+  | "lottery_result_channel"
+  | "payment_reminder_dm"
+  | "payment_reminder_channel";
+
+interface DeliveryTarget {
+  idempotencyKey: string;
+  groupKey: string;
+  tournamentId: string;
+  memberId?: string;
+  kind: DeliveryKind;
+  destinationType: "channel" | "dm";
+  destinationId: string;
+  revision: number;
+}
+
+interface QueuedDelivery {
+  delivery_id: number;
+  group_key: string;
+  tournament_id: string;
+  member_id: string | null;
+  delivery_kind: DeliveryKind;
+  destination_type: "channel" | "dm";
+  destination_id: string;
+  payload_revision: number;
+  attempt_count: number;
+}
+
+interface RecipientRow {
+  member_id: string;
+  discord_user_id: string | null;
+  status: string;
+  dm_enabled: number;
+}
+
+interface UnpaidRow extends RecipientRow {
+  display_name: string;
+  display_name_kana: string;
+  grade: string;
+  participation_fee_yen: number;
+}
+
+const MAX_ATTEMPTS = 5;
+const LEASE_MILLISECONDS = 5 * 60 * 1000;
+const INSERT_BATCH_SIZE = 50;
+
+function retryDelayMinutes(attemptCount: number): number {
+  return [1, 5, 15, 60][Math.min(Math.max(attemptCount - 1, 0), 3)];
+}
+
+function formatJstDateTime(value: string): string {
+  return new Intl.DateTimeFormat("ja-JP", {
+    timeZone: "Asia/Tokyo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(value));
+}
+
+async function insertTargets(env: PostDeadlineEnv, targets: DeliveryTarget[]): Promise<number> {
+  let queued = 0;
+  for (let offset = 0; offset < targets.length; offset += INSERT_BATCH_SIZE) {
+    const statements = targets.slice(offset, offset + INSERT_BATCH_SIZE).map((target) =>
+      env.DB.prepare(
+        `INSERT INTO post_deadline_deliveries (
+          idempotency_key, group_key, tournament_id, member_id,
+          delivery_kind, destination_type, destination_id,
+          payload_revision, status, next_attempt_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+        ON CONFLICT(idempotency_key) DO NOTHING`,
+      ).bind(
+        target.idempotencyKey,
+        target.groupKey,
+        target.tournamentId,
+        target.memberId ?? null,
+        target.kind,
+        target.destinationType,
+        target.destinationId,
+        target.revision,
+        new Date().toISOString(),
+      )
+    );
+    const results = await env.DB.batch(statements);
+    queued += results.reduce((sum, result) => sum + Number(result.meta.changes ?? 0), 0);
+  }
+  return queued;
+}
+
+export function buildConfirmationRosterMessage(
+  title: string,
+  documentUrl: string,
+  fileName: string,
+): DiscordMessagePayload {
+  return {
+    content: "【申込確認名簿】主催者から抽選前の確認名簿が届きました。",
+    embeds: [{
+      title,
+      description: "登録内容は正しい前提で手続きを進めます。万が一、氏名・級などに誤りがある場合のみ、大会担当者へDMしてください。",
+      color: 0xfee75c,
+      fields: [{
+        name: "申込確認名簿",
+        value: `[${fileName}](${documentUrl})`,
+        inline: false,
+      }],
+    }],
+    allowed_mentions: { parse: [] },
+  };
+}
+
+export function buildPaymentReminderDmMessage(
+  title: string,
+  participationFeeYen: number,
+  paymentDeadline: string,
+): DiscordMessagePayload {
+  return {
+    content: "【参加費未納リマインダー】サークル内支払期限を過ぎています。",
+    embeds: [{
+      title,
+      color: 0xed4245,
+      fields: [
+        { name: "参加費", value: `${new Intl.NumberFormat("ja-JP").format(participationFeeYen)}円`, inline: true },
+        { name: "支払い方法", value: "大会担当者へ事前に支払い", inline: true },
+        { name: "サークル内支払期限", value: formatJstDateTime(paymentDeadline), inline: false },
+      ],
+    }],
+    allowed_mentions: { parse: [] },
+  };
+}
+
+export async function enqueueConfirmationRosterDms(
+  env: PostDeadlineEnv,
+  groupKey: string,
+  tournamentIds: string[],
+): Promise<{ queued: number; unavailable: number }> {
+  const roster = await env.DB.prepare(
+    `SELECT revision, representative_tournament_id
+     FROM tournament_confirmation_rosters WHERE group_key = ?`,
+  ).bind(groupKey).first<{ revision: number; representative_tournament_id: string }>();
+  if (!roster) throw new Error("申込確認名簿が登録されていません。");
+  const placeholders = tournamentIds.map(() => "?").join(", ");
+  const recipients = await env.DB.prepare(
+    `SELECT DISTINCT members.member_id, members.discord_user_id,
+      members.status, members.dm_enabled
+     FROM tournament_entries
+     INNER JOIN members ON members.member_id = tournament_entries.member_id
+     WHERE tournament_entries.tournament_id IN (${placeholders})
+       AND tournament_entries.status <> 'withdrawn'
+     ORDER BY members.member_id`,
+  ).bind(...tournamentIds).all<RecipientRow>();
+  const available = recipients.results.filter((recipient) =>
+    recipient.status === "active" && recipient.dm_enabled === 1 && Boolean(recipient.discord_user_id)
+  );
+  const queued = await insertTargets(env, available.map((recipient) => ({
+    idempotencyKey: `confirmation_roster:${groupKey}:r${roster.revision}:${recipient.member_id}`,
+    groupKey,
+    tournamentId: roster.representative_tournament_id,
+    memberId: recipient.member_id,
+    kind: "confirmation_roster_dm",
+    destinationType: "dm",
+    destinationId: recipient.discord_user_id!,
+    revision: roster.revision,
+  })));
+  return { queued, unavailable: recipients.results.length - available.length };
+}
+
+export async function enqueueLotteryResultAnnouncement(
+  env: PostDeadlineEnv,
+  groupKey: string,
+  representativeTournamentId: string,
+  revision: number,
+): Promise<number> {
+  const settings = await env.DB.prepare(
+    `SELECT announcement_channel_id FROM discord_settings
+     WHERE announcement_channel_id IS NOT NULL
+     ORDER BY updated_at DESC LIMIT 1`,
+  ).first<{ announcement_channel_id: string }>();
+  if (!settings?.announcement_channel_id) throw new Error("大会お知らせチャンネルが未設定です。");
+  return insertTargets(env, [{
+    idempotencyKey: `lottery_result:${groupKey}:r${revision}`,
+    groupKey,
+    tournamentId: representativeTournamentId,
+    kind: "lottery_result_channel",
+    destinationType: "channel",
+    destinationId: settings.announcement_channel_id,
+    revision,
+  }]);
+}
+
+async function unpaidParticipants(db: D1Database, groupKey: string): Promise<UnpaidRow[]> {
+  const rows = await db.prepare(
+    `SELECT DISTINCT
+      members.member_id,
+      members.discord_user_id,
+      members.status,
+      members.dm_enabled,
+      members.display_name,
+      COALESCE(NULLIF(members.display_name_kana, ''), '') AS display_name_kana,
+      CASE WHEN tournaments.all_grades = 1 THEN members.grade ELSE tournaments.grade END AS grade,
+      tournament_participation_fees.amount_yen AS participation_fee_yen
+     FROM tournament_entries
+     INNER JOIN tournaments ON tournaments.tournament_id = tournament_entries.tournament_id
+     INNER JOIN members ON members.member_id = tournament_entries.member_id
+     INNER JOIN tournament_participation_fees
+       ON tournament_participation_fees.group_key = COALESCE(tournaments.registration_group_id, tournaments.tournament_id)
+      AND tournament_participation_fees.grade = CASE
+        WHEN tournaments.all_grades = 1 THEN members.grade ELSE tournaments.grade
+      END
+     LEFT JOIN tournament_entry_payments
+       ON tournament_entry_payments.tournament_id = tournament_entries.tournament_id
+      AND tournament_entry_payments.member_id = tournament_entries.member_id
+     WHERE COALESCE(tournaments.registration_group_id, tournaments.tournament_id) = ?
+       AND tournament_entries.status = 'selected'
+       AND COALESCE(tournament_entry_payments.status, 'unpaid') = 'unpaid'
+       AND tournaments.status NOT IN ('canceled', 'deleted')
+     ORDER BY grade, display_name_kana, members.display_name`,
+  ).bind(groupKey).all<UnpaidRow>();
+  return rows.results;
+}
+
+export async function enqueueDuePaymentReminders(
+  env: PostDeadlineEnv,
+  now = new Date(),
+): Promise<number> {
+  const due = await env.DB.prepare(
+    `SELECT group_key, representative_tournament_id, revision, payment_deadline
+     FROM tournament_participant_guidance
+     WHERE payment_collection_method = 'advance_manager'
+       AND payment_deadline IS NOT NULL AND payment_deadline <= ?`,
+  ).bind(now.toISOString()).all<{
+    group_key: string;
+    representative_tournament_id: string;
+    revision: number;
+    payment_deadline: string;
+  }>();
+  const settings = await env.DB.prepare(
+    `SELECT admin_reminder_channel_id FROM discord_settings
+     WHERE admin_reminder_channel_id IS NOT NULL
+     ORDER BY updated_at DESC LIMIT 1`,
+  ).first<{ admin_reminder_channel_id: string }>();
+  let queued = 0;
+  for (const guidance of due.results) {
+    const unpaid = await unpaidParticipants(env.DB, guidance.group_key);
+    const available = unpaid.filter((participant) =>
+      participant.status === "active" && participant.dm_enabled === 1 && Boolean(participant.discord_user_id)
+    );
+    const deadlineKey = guidance.payment_deadline.replace(/[^0-9]/g, "");
+    const targets: DeliveryTarget[] = available.map((participant) => ({
+      idempotencyKey: `payment_reminder_dm:${guidance.group_key}:${deadlineKey}:${participant.member_id}`,
+      groupKey: guidance.group_key,
+      tournamentId: guidance.representative_tournament_id,
+      memberId: participant.member_id,
+      kind: "payment_reminder_dm",
+      destinationType: "dm",
+      destinationId: participant.discord_user_id!,
+      revision: guidance.revision,
+    }));
+    if (unpaid.length > 0 && settings?.admin_reminder_channel_id) {
+      targets.push({
+        idempotencyKey: `payment_reminder_channel:${guidance.group_key}:${deadlineKey}`,
+        groupKey: guidance.group_key,
+        tournamentId: guidance.representative_tournament_id,
+        kind: "payment_reminder_channel",
+        destinationType: "channel",
+        destinationId: settings.admin_reminder_channel_id,
+        revision: guidance.revision,
+      });
+    }
+    queued += await insertTargets(env, targets);
+  }
+  return queued;
+}
+
+async function markSkipped(db: D1Database, deliveryId: number, reason: string): Promise<void> {
+  await db.prepare(
+    `UPDATE post_deadline_deliveries SET status = 'skipped', error_message = ?, lease_until = NULL
+     WHERE delivery_id = ?`,
+  ).bind(reason.slice(0, 1000), deliveryId).run();
+}
+
+async function confirmationPayload(db: D1Database, delivery: QueuedDelivery): Promise<DiscordMessagePayload> {
+  const row = await db.prepare(
+    `SELECT tournament_confirmation_rosters.document_url,
+      tournament_confirmation_rosters.file_name,
+      tournament_confirmation_rosters.revision,
+      tournaments.title
+     FROM tournament_confirmation_rosters
+     INNER JOIN tournaments
+       ON tournaments.tournament_id = tournament_confirmation_rosters.representative_tournament_id
+     WHERE tournament_confirmation_rosters.group_key = ?`,
+  ).bind(delivery.group_key).first<{
+    document_url: string;
+    file_name: string;
+    revision: number;
+    title: string;
+  }>();
+  if (!row || Number(row.revision) !== delivery.payload_revision) {
+    throw new Error("申込確認名簿が更新または削除されています。");
+  }
+  return buildConfirmationRosterMessage(row.title, row.document_url, row.file_name);
+}
+
+async function lotteryPayload(db: D1Database, groupKey: string): Promise<DiscordMessagePayload> {
+  const tournaments = await db.prepare(
+    `SELECT tournament_id, registration_group_id, title, event_start_date,
+      event_end_date, grade, all_grades, internal_deadline, true_deadline,
+      tournament_type, venue, document_url
+     FROM tournaments
+     WHERE COALESCE(registration_group_id, tournament_id) = ?
+       AND status NOT IN ('canceled', 'deleted')
+     ORDER BY grade`,
+  ).bind(groupKey).all<TournamentRow>();
+  if (!tournaments.results.length) throw new Error("抽選結果の対象大会がありません。");
+  const participants = await db.prepare(
+    `SELECT members.display_name,
+      COALESCE(NULLIF(members.display_name_kana, ''), '') AS display_name_kana,
+      CASE WHEN tournaments.all_grades = 1 THEN members.grade ELSE tournaments.grade END AS grade,
+      tournament_entries.status, tournament_entries.waitlist_number
+     FROM tournament_entries
+     INNER JOIN tournaments ON tournaments.tournament_id = tournament_entries.tournament_id
+     INNER JOIN members ON members.member_id = tournament_entries.member_id
+     WHERE COALESCE(tournaments.registration_group_id, tournaments.tournament_id) = ?
+       AND tournament_entries.status IN ('selected', 'not_selected')`,
+  ).bind(groupKey).all<{
+    display_name: string;
+    display_name_kana: string;
+    grade: string;
+    status: "selected" | "not_selected";
+    waitlist_number: number | null;
+  }>();
+  const roster = await db.prepare(
+    `SELECT document_url FROM tournament_archive_documents
+     WHERE group_key = ? AND document_type = 'roster'`,
+  ).bind(groupKey).first<{ document_url: string }>();
+  if (!roster) throw new Error("確定名簿が登録されていません。");
+  return buildEntryResultsAnnouncementMessage(
+    tournaments.results[0].title,
+    participants.results.map((participant): EntryResultAnnouncementParticipant => ({
+      displayName: participant.display_name,
+      displayNameKana: participant.display_name_kana,
+      grade: participant.grade,
+      entryStatus: participant.status,
+      waitlistNumber: participant.waitlist_number,
+    })),
+    roster.document_url,
+  );
+}
+
+async function paymentGuidance(db: D1Database, groupKey: string): Promise<{
+  title: string;
+  payment_deadline: string;
+}> {
+  const row = await db.prepare(
+    `SELECT tournaments.title, tournament_participant_guidance.payment_deadline
+     FROM tournament_participant_guidance
+     INNER JOIN tournaments
+       ON tournaments.tournament_id = tournament_participant_guidance.representative_tournament_id
+     WHERE tournament_participant_guidance.group_key = ?
+       AND tournament_participant_guidance.payment_collection_method = 'advance_manager'`,
+  ).bind(groupKey).first<{
+    title: string;
+    payment_deadline: string | null;
+  }>();
+  if (!row?.payment_deadline) throw new Error("事前集金の支払期限が登録されていません。");
+  return { ...row, payment_deadline: row.payment_deadline };
+}
+
+export async function processPostDeadlineQueue(
+  env: PostDeadlineEnv,
+  batchSize = 20,
+): Promise<number> {
+  if (!env.DISCORD_BOT_TOKEN) throw new Error("Discord Bot Tokenが未設定です。");
+  const nowIso = new Date().toISOString();
+  const queued = await env.DB.prepare(
+    `SELECT delivery_id, group_key, tournament_id, member_id,
+      delivery_kind, destination_type, destination_id,
+      payload_revision, attempt_count
+     FROM post_deadline_deliveries
+     WHERE status IN ('pending', 'failed') AND attempt_count < ?
+       AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+       AND (lease_until IS NULL OR lease_until <= ?)
+     ORDER BY created_at, delivery_id LIMIT ?`,
+  ).bind(MAX_ATTEMPTS, nowIso, nowIso, batchSize).all<QueuedDelivery>();
+  let processed = 0;
+  for (const delivery of queued.results) {
+    const attemptedAt = new Date();
+    const leaseUntil = new Date(attemptedAt.getTime() + LEASE_MILLISECONDS).toISOString();
+    const claim = await env.DB.prepare(
+      `UPDATE post_deadline_deliveries
+       SET lease_until = ?, last_attempt_at = ?, attempt_count = attempt_count + 1
+       WHERE delivery_id = ? AND attempt_count = ? AND status IN ('pending', 'failed')
+         AND (lease_until IS NULL OR lease_until <= ?)`,
+    ).bind(leaseUntil, attemptedAt.toISOString(), delivery.delivery_id,
+      delivery.attempt_count, attemptedAt.toISOString()).run();
+    if (Number(claim.meta.changes ?? 0) !== 1) continue;
+    processed += 1;
+    try {
+      let payload: DiscordMessagePayload;
+      if (delivery.delivery_kind === "confirmation_roster_dm") {
+        const eligible = await env.DB.prepare(
+          `SELECT members.member_id FROM members
+           INNER JOIN tournament_entries ON tournament_entries.member_id = members.member_id
+           INNER JOIN tournaments ON tournaments.tournament_id = tournament_entries.tournament_id
+           WHERE members.member_id = ? AND members.discord_user_id = ?
+             AND members.status = 'active' AND members.dm_enabled = 1
+             AND tournament_entries.status <> 'withdrawn'
+             AND COALESCE(tournaments.registration_group_id, tournaments.tournament_id) = ?
+           LIMIT 1`,
+        ).bind(delivery.member_id, delivery.destination_id, delivery.group_key)
+          .first<{ member_id: string }>();
+        if (!eligible) {
+          await markSkipped(env.DB, delivery.delivery_id, "申込者またはDM対象ではなくなりました。");
+          continue;
+        }
+        payload = await confirmationPayload(env.DB, delivery);
+      } else if (delivery.delivery_kind === "lottery_result_channel") {
+        payload = await lotteryPayload(env.DB, delivery.group_key);
+      } else {
+        const guidance = await paymentGuidance(env.DB, delivery.group_key);
+        const unpaid = await unpaidParticipants(env.DB, delivery.group_key);
+        if (delivery.delivery_kind === "payment_reminder_dm") {
+          const participant = unpaid.find((candidate) =>
+            candidate.member_id === delivery.member_id &&
+            candidate.discord_user_id === delivery.destination_id &&
+            candidate.status === "active" && candidate.dm_enabled === 1
+          );
+          if (!participant) {
+            await markSkipped(env.DB, delivery.delivery_id, "支払済みまたはDM対象外になりました。");
+            continue;
+          }
+          payload = buildPaymentReminderDmMessage(
+            guidance.title,
+            Number(participant.participation_fee_yen),
+            guidance.payment_deadline,
+          );
+        } else {
+          if (!unpaid.length) {
+            await markSkipped(env.DB, delivery.delivery_id, "未納者がいないため送信しませんでした。");
+            continue;
+          }
+          const lines = unpaid.map((participant) =>
+            `${formatGrade(participant.grade)} ${participant.display_name}`
+          ).join("\n");
+          payload = {
+            content: "【参加費未納リマインダー】サークル内支払期限を過ぎました。",
+            embeds: [{
+              title: guidance.title,
+              color: 0xed4245,
+              fields: [
+                { name: `未納者（${unpaid.length}人）`, value: lines, inline: false },
+                {
+                  name: "サークル内支払期限",
+                  value: formatJstDateTime(guidance.payment_deadline),
+                  inline: false,
+                },
+              ],
+            }],
+            allowed_mentions: { parse: [] },
+          };
+        }
+      }
+
+      const message = delivery.destination_type === "channel"
+        ? await sendChannelMessage(env.DISCORD_BOT_TOKEN, delivery.destination_id, payload)
+        : await sendDirectMessage(env.DISCORD_BOT_TOKEN, delivery.destination_id, payload);
+      await env.DB.prepare(
+        `UPDATE post_deadline_deliveries
+         SET status = 'sent', discord_message_id = ?, sent_at = ?,
+           error_message = NULL, next_attempt_at = NULL, lease_until = NULL
+         WHERE delivery_id = ?`,
+      ).bind(message.id, new Date().toISOString(), delivery.delivery_id).run();
+    } catch (error: unknown) {
+      const nextAttemptCount = delivery.attempt_count + 1;
+      const nextAttemptAt = nextAttemptCount >= MAX_ATTEMPTS ? null : new Date(
+        Date.now() + retryDelayMinutes(nextAttemptCount) * 60 * 1000,
+      ).toISOString();
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      await env.DB.prepare(
+        `UPDATE post_deadline_deliveries
+         SET status = 'failed', error_message = ?, next_attempt_at = ?, lease_until = NULL
+         WHERE delivery_id = ?`,
+      ).bind(errorMessage.slice(0, 1000), nextAttemptAt, delivery.delivery_id).run();
+    }
+  }
+  return processed;
+}

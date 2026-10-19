@@ -22,8 +22,13 @@ import {
 } from "./admin-members";
 import {
   buildArchivePdfFilename,
+  buildConfirmationRosterFilename,
+  buildGuidanceFilename,
+  buildOrganizerPaymentFilename,
   DocumentUploadError,
+  storeParticipantGuidanceDocument,
   storeTournamentPdf,
+  uploadApplicationRoster,
   uploadTournamentDocument,
   type ArchiveDocumentType,
   type DocumentEnv,
@@ -33,6 +38,14 @@ import {
   readAdminDiscordPrincipal,
   type AdminAuthEnv,
 } from "./admin-auth";
+import {
+  enqueueParticipantGuidance,
+  type GuidanceEnqueueResult,
+} from "./participant-guidance";
+import {
+  enqueueConfirmationRosterDms,
+  enqueueLotteryResultAnnouncement,
+} from "./post-deadline";
 
 export interface AdminEnv extends TournamentEnv, DocumentEnv, AdminAuthEnv {}
 
@@ -66,6 +79,7 @@ type TournamentEntryStatusUpdater = (
   tournamentId: string,
   memberId: string,
   status: string,
+  waitlistNumber: number | null,
   changedByEmail: string,
 ) => Promise<TournamentEntryStatusUpdate>;
 type TournamentEntryResultUpdater = (
@@ -108,6 +122,11 @@ interface AdminTournamentRow extends TournamentRow {
   invitation_dms_sent: number;
   notifications_queued: number;
   notification_failures: number;
+  application_method: "excel_email" | "excel_form" | "direct_form" | null;
+  application_roster_url: string | null;
+  application_roster_file_name: string | null;
+  application_form_url: string | null;
+  application_email: string | null;
 }
 
 interface AdminResponseRow {
@@ -120,6 +139,8 @@ interface AdminResponseRow {
   is_eligible: number;
   updated_at: string;
   entry_status: string | null;
+  waitlist_number: number | null;
+  payment_status: "unpaid" | "paid" | null;
   result_text: string | null;
 }
 
@@ -132,6 +153,45 @@ interface AdminArchiveDocumentRow {
   uploaded_at: string;
 }
 
+interface AdminParticipantGuidanceRow {
+  group_key: string;
+  body_text: string | null;
+  document_url: string | null;
+  file_name: string | null;
+  file_size: number | null;
+  content_type: string | null;
+  payment_details: string | null;
+  payment_collection_method: "advance_manager" | "onsite_cash";
+  organizer_payment_source: "text" | "file" | "guidance";
+  organizer_payment_document_url: string | null;
+  organizer_payment_file_name: string | null;
+  organizer_payment_file_size: number | null;
+  organizer_payment_content_type: string | null;
+  organizer_payment_deadline: string | null;
+  payment_deadline: string | null;
+  revision: number;
+  updated_at: string;
+  sent_count: number;
+  pending_count: number;
+  failed_count: number;
+}
+
+interface AdminParticipationFeeRow {
+  group_key: string;
+  grade: string;
+  amount_yen: number;
+}
+
+interface AdminConfirmationRosterRow {
+  group_key: string;
+  document_url: string;
+  file_name: string;
+  file_size: number;
+  content_type: string;
+  revision: number;
+  uploaded_at: string;
+}
+
 export interface AdminTournament extends AdminTournamentRow {
   response_yes: number;
   response_maybe: number;
@@ -141,6 +201,9 @@ export interface AdminTournament extends AdminTournamentRow {
   response_pending: number;
   responses: AdminResponseRow[];
   archive_documents: AdminArchiveDocumentRow[];
+  participant_guidance: AdminParticipantGuidanceRow | null;
+  participation_fees: AdminParticipationFeeRow[];
+  confirmation_roster: AdminConfirmationRosterRow | null;
 }
 
 export interface TournamentStatusUpdate {
@@ -177,7 +240,9 @@ export interface TournamentEntryStatusUpdate {
   tournamentId: string;
   memberId: string;
   previousStatus: string | null;
+  previousWaitlistNumber: number | null;
   status: string;
+  waitlistNumber: number | null;
   changed: boolean;
 }
 
@@ -192,6 +257,52 @@ export interface TournamentArchivePublishResult {
   tournamentIds: string[];
   published: boolean;
   publishedAt: string | null;
+}
+
+export interface ParticipantGuidanceSaveResult {
+  groupKey: string;
+  bodyText: string | null;
+  documentUrl: string | null;
+  fileName: string | null;
+  fileSize: number | null;
+  contentType: string | null;
+  paymentCollectionMethod: "advance_manager" | "onsite_cash";
+  organizerPaymentSource: "text" | "file" | "guidance";
+  organizerPaymentDetails: string | null;
+  organizerPaymentDocumentUrl: string | null;
+  organizerPaymentFileName: string | null;
+  feesByGrade: Record<string, number>;
+  organizerPaymentDeadline: string | null;
+  paymentDeadline: string | null;
+  revision: number;
+  updatedAt: string;
+}
+
+export interface LotteryNotificationQueueResult {
+  channelQueued: number;
+  dmQueued: number;
+  dmUnavailable: number;
+}
+
+export interface EntryPaymentUpdateResult {
+  tournamentId: string;
+  memberId: string;
+  previousStatus: "unpaid" | "paid" | null;
+  status: "unpaid" | "paid";
+  changed: boolean;
+}
+
+export interface TournamentEntryBatchInput {
+  tournamentId: string;
+  memberId: string;
+  status: string;
+  waitlistNumber: number | null;
+  paymentStatus: "unpaid" | "paid" | null;
+}
+
+export interface TournamentEntryBatchUpdateResult {
+  entryCount: number;
+  changedCount: number;
 }
 
 class AdminRequestError extends Error {
@@ -213,9 +324,43 @@ const ENTRY_STATUSES = new Set([
   "not_selected",
   "withdrawn",
 ]);
+const ENTRY_RESULT_OPTIONS = new Set([
+  "1回戦敗退",
+  "2回戦敗退",
+  "3回戦敗退",
+  "4回戦敗退",
+  "4位入賞",
+  "3位入賞",
+  "準優勝",
+  "優勝",
+]);
+
+export function defaultPaymentDeadline(organizerDeadline: string): string {
+  const organizer = new Date(organizerDeadline);
+  if (Number.isNaN(organizer.getTime())) {
+    throw new AdminRequestError("主催者締切日が不正です。", 400);
+  }
+  const jst = new Date(organizer.getTime() + 9 * 60 * 60 * 1000);
+  const candidate = new Date(Date.UTC(
+    jst.getUTCFullYear(),
+    jst.getUTCMonth(),
+    jst.getUTCDate() - 2,
+  ));
+  while (candidate.getUTCDay() === 0 || candidate.getUTCDay() === 6) {
+    candidate.setUTCDate(candidate.getUTCDate() - 1);
+  }
+  return new Date(Date.UTC(
+    candidate.getUTCFullYear(),
+    candidate.getUTCMonth(),
+    candidate.getUTCDate(),
+    14,
+    59,
+  )).toISOString();
+}
 
 interface EditableTournamentRow extends TournamentRow {
   status: string;
+  closure_reason?: "no_participants" | null;
 }
 
 function normalizeTournamentIds(rawIds: string[]): string[] {
@@ -251,7 +396,8 @@ async function loadEditableTournaments(
       true_deadline,
       internal_deadline,
       document_url,
-      status
+      status,
+      closure_reason
      FROM tournaments
      WHERE tournament_id IN (${placeholders})
        AND status <> 'deleted'
@@ -308,6 +454,11 @@ export async function listAdminTournaments(
       tournaments.true_deadline,
       tournaments.internal_deadline,
       tournaments.document_url,
+      tournament_application_methods.application_method,
+      tournament_application_methods.roster_document_url AS application_roster_url,
+      tournament_application_methods.roster_file_name AS application_roster_file_name,
+      tournament_application_methods.form_url AS application_form_url,
+      tournament_application_methods.application_email,
       tournaments.status,
       tournaments.closure_reason,
       tournaments.archive_published_at,
@@ -336,6 +487,11 @@ export async function listAdminTournaments(
           AND notification_deliveries.status = 'failed'
           AND notification_deliveries.attempt_count >= 5) AS notification_failures
     FROM tournaments
+    LEFT JOIN tournament_application_methods
+      ON tournament_application_methods.group_key = COALESCE(
+        tournaments.registration_group_id,
+        tournaments.tournament_id
+      )
     WHERE tournaments.status <> 'deleted'
     ORDER BY tournaments.created_at DESC
     LIMIT 100`,
@@ -364,6 +520,8 @@ export async function listAdminTournaments(
       THEN 1 ELSE 0 END AS is_eligible,
       COALESCE(responses.updated_at, members.updated_at) AS updated_at,
       tournament_entries.status AS entry_status,
+      tournament_entries.waitlist_number,
+      tournament_entry_payments.status AS payment_status,
       tournament_entries.result_text
     FROM tournaments
     INNER JOIN members
@@ -391,6 +549,9 @@ export async function listAdminTournaments(
     LEFT JOIN tournament_entries
       ON tournament_entries.tournament_id = tournaments.tournament_id
       AND tournament_entries.member_id = members.member_id
+    LEFT JOIN tournament_entry_payments
+      ON tournament_entry_payments.tournament_id = tournaments.tournament_id
+      AND tournament_entry_payments.member_id = members.member_id
     WHERE tournaments.status <> 'deleted'
     ORDER BY
       tournaments.tournament_id,
@@ -410,6 +571,73 @@ export async function listAdminTournaments(
     current.push(document);
     documentsByGroup.set(document.group_key, current);
   }
+
+  const participantGuidance = await env.DB.prepare(
+    `SELECT
+      tournament_participant_guidance.group_key,
+      tournament_participant_guidance.body_text,
+      tournament_participant_guidance.document_url,
+      tournament_participant_guidance.file_name,
+      tournament_participant_guidance.file_size,
+      tournament_participant_guidance.content_type,
+      tournament_participant_guidance.payment_details,
+      tournament_participant_guidance.payment_collection_method,
+      tournament_participant_guidance.organizer_payment_source,
+      tournament_participant_guidance.organizer_payment_document_url,
+      tournament_participant_guidance.organizer_payment_file_name,
+      tournament_participant_guidance.organizer_payment_file_size,
+      tournament_participant_guidance.organizer_payment_content_type,
+      tournament_participant_guidance.organizer_payment_deadline,
+      tournament_participant_guidance.payment_deadline,
+      tournament_participant_guidance.revision,
+      tournament_participant_guidance.updated_at,
+      (SELECT COUNT(*) FROM participant_guidance_deliveries
+       WHERE participant_guidance_deliveries.group_key = tournament_participant_guidance.group_key
+         AND participant_guidance_deliveries.guidance_revision = tournament_participant_guidance.revision
+         AND participant_guidance_deliveries.status = 'sent') AS sent_count,
+      (SELECT COUNT(*) FROM participant_guidance_deliveries
+       WHERE participant_guidance_deliveries.group_key = tournament_participant_guidance.group_key
+         AND participant_guidance_deliveries.guidance_revision = tournament_participant_guidance.revision
+         AND participant_guidance_deliveries.status IN ('pending', 'failed')
+         AND participant_guidance_deliveries.attempt_count < 5) AS pending_count,
+      (SELECT COUNT(*) FROM participant_guidance_deliveries
+       WHERE participant_guidance_deliveries.group_key = tournament_participant_guidance.group_key
+         AND participant_guidance_deliveries.guidance_revision = tournament_participant_guidance.revision
+         AND participant_guidance_deliveries.status = 'failed'
+         AND participant_guidance_deliveries.attempt_count >= 5) AS failed_count
+     FROM tournament_participant_guidance`,
+  ).all<AdminParticipantGuidanceRow>();
+  const guidanceByGroup = new Map(
+    participantGuidance.results.map((guidance) => [guidance.group_key, {
+      ...guidance,
+      revision: Number(guidance.revision),
+      sent_count: Number(guidance.sent_count),
+      pending_count: Number(guidance.pending_count),
+      failed_count: Number(guidance.failed_count),
+    }]),
+  );
+  const participationFees = await env.DB.prepare(
+    `SELECT group_key, grade, amount_yen
+     FROM tournament_participation_fees
+     ORDER BY grade`,
+  ).all<AdminParticipationFeeRow>();
+  const feesByGroup = new Map<string, AdminParticipationFeeRow[]>();
+  for (const fee of participationFees.results) {
+    const current = feesByGroup.get(fee.group_key) ?? [];
+    current.push({ ...fee, amount_yen: Number(fee.amount_yen) });
+    feesByGroup.set(fee.group_key, current);
+  }
+  const confirmationRosters = await env.DB.prepare(
+    `SELECT group_key, document_url, file_name, file_size,
+      content_type, revision, uploaded_at
+     FROM tournament_confirmation_rosters`,
+  ).all<AdminConfirmationRosterRow>();
+  const confirmationRosterByGroup = new Map(
+    confirmationRosters.results.map((roster) => [roster.group_key, {
+      ...roster,
+      revision: Number(roster.revision),
+    }]),
+  );
 
   const responsesByTournament = new Map<string, AdminResponseRow[]>();
   for (const response of responseRows.results) {
@@ -441,6 +669,15 @@ export async function listAdminTournaments(
       archive_documents: documentsByGroup.get(
         tournament.registration_group_id ?? tournament.tournament_id,
       ) ?? [],
+      participant_guidance: guidanceByGroup.get(
+        tournament.registration_group_id ?? tournament.tournament_id,
+      ) ?? null,
+      participation_fees: feesByGroup.get(
+        tournament.registration_group_id ?? tournament.tournament_id,
+      ) ?? [],
+      confirmation_roster: confirmationRosterByGroup.get(
+        tournament.registration_group_id ?? tournament.tournament_id,
+      ) ?? null,
     };
   });
 }
@@ -481,6 +718,18 @@ export async function updateTournamentStatuses(
     rawTournamentIds,
     rawTournamentIds.length > 1,
   );
+  if (
+    status === "applied" &&
+    tournaments.some((tournament) =>
+      tournament.status === "canceled" ||
+      (tournament.status === "closed" && tournament.closure_reason === "no_participants")
+    )
+  ) {
+    throw new AdminRequestError(
+      "中止または参加者なし終了の大会は申込完了にできません。先に大会ステータスを変更してください。",
+      409,
+    );
+  }
   const changed = tournaments.filter((tournament) => tournament.status !== status);
   if (changed.length > 0) {
     const now = new Date().toISOString();
@@ -560,6 +809,7 @@ export async function updateTournamentEntryStatus(
   tournamentId: string,
   memberId: string,
   status: string,
+  rawWaitlistNumber: number | null,
   changedByEmail: string,
 ): Promise<TournamentEntryStatusUpdate> {
   if (!/^T-[0-9a-f-]{36}$/.test(tournamentId) || !/^M-[0-9a-f-]{36}$/.test(memberId)) {
@@ -568,8 +818,17 @@ export async function updateTournamentEntryStatus(
   if (!ENTRY_STATUSES.has(status)) {
     throw new AdminRequestError("申込・抽選結果が不正です。", 400);
   }
+  const waitlistNumber = status === "not_selected" ? rawWaitlistNumber : null;
+  if (
+    status === "not_selected" &&
+    (!Number.isInteger(waitlistNumber) || Number(waitlistNumber) < 1 || Number(waitlistNumber) > 9999)
+  ) {
+    throw new AdminRequestError("キャンセル待ち番号は1〜9999の整数で入力してください。", 400);
+  }
   const target = await env.DB.prepare(
-    `SELECT tournament_entries.status AS entry_status
+    `SELECT
+      tournament_entries.status AS entry_status,
+      tournament_entries.waitlist_number
      FROM tournaments
      INNER JOIN responses
        ON responses.tournament_id = tournaments.tournament_id
@@ -582,7 +841,10 @@ export async function updateTournamentEntryStatus(
      WHERE tournaments.tournament_id = ?
        AND tournaments.status IN ('applied', 'closed')
      LIMIT 1`,
-  ).bind(memberId, tournamentId).first<{ entry_status: string | null }>();
+  ).bind(memberId, tournamentId).first<{
+    entry_status: string | null;
+    waitlist_number: number | null;
+  }>();
   if (!target) {
     throw new AdminRequestError(
       "申込完了済み大会の有効な参加希望者を確認できません。",
@@ -590,36 +852,58 @@ export async function updateTournamentEntryStatus(
     );
   }
   const previousStatus = target.entry_status ?? null;
-  if (previousStatus === status) {
-    return { tournamentId, memberId, previousStatus, status, changed: false };
+  const previousWaitlistNumber = target.waitlist_number ?? null;
+  if (previousStatus === status && previousWaitlistNumber === waitlistNumber) {
+    return {
+      tournamentId,
+      memberId,
+      previousStatus,
+      previousWaitlistNumber,
+      status,
+      waitlistNumber,
+      changed: false,
+    };
   }
 
   const now = new Date().toISOString();
   await env.DB.batch([
     env.DB.prepare(
       `INSERT INTO tournament_entries (
-        tournament_id, member_id, status, created_at, updated_at, updated_by_email
-      ) VALUES (?, ?, ?, ?, ?, ?)
+        tournament_id, member_id, status, waitlist_number,
+        created_at, updated_at, updated_by_email
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(tournament_id, member_id) DO UPDATE SET
         status = excluded.status,
+        waitlist_number = excluded.waitlist_number,
         updated_at = excluded.updated_at,
         updated_by_email = excluded.updated_by_email`,
-    ).bind(tournamentId, memberId, status, now, now, changedByEmail),
+    ).bind(tournamentId, memberId, status, waitlistNumber, now, now, changedByEmail),
     env.DB.prepare(
       `INSERT INTO tournament_entry_history (
         tournament_id, member_id, previous_status, new_status,
+        previous_waitlist_number, new_waitlist_number,
         changed_by_email, changed_at
-      ) VALUES (?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     ).bind(
       tournamentId,
       memberId,
       previousStatus,
       status,
+      previousWaitlistNumber,
+      waitlistNumber,
       changedByEmail,
       now,
     ),
   ]);
-  return { tournamentId, memberId, previousStatus, status, changed: true };
+  return {
+    tournamentId,
+    memberId,
+    previousStatus,
+    previousWaitlistNumber,
+    status,
+    waitlistNumber,
+    changed: true,
+  };
 }
 
 export async function updateTournamentEntryResult(
@@ -633,8 +917,8 @@ export async function updateTournamentEntryResult(
     throw new AdminRequestError("大会またはメンバーIDが不正です。", 400);
   }
   const resultText = rawResultText.trim();
-  if (!resultText || resultText.length > 200) {
-    throw new AdminRequestError("個人成績は1〜200文字で入力してください。", 400);
+  if (!ENTRY_RESULT_OPTIONS.has(resultText)) {
+    throw new AdminRequestError("個人成績を選択肢から選んでください。", 400);
   }
   const target = await env.DB.prepare(
     `SELECT tournament_entries.result_text
@@ -681,6 +965,111 @@ function archiveGroupKey(tournaments: EditableTournamentRow[]): string {
   return tournaments[0].registration_group_id ?? tournaments[0].tournament_id;
 }
 
+async function tournamentIdsFromForm(
+  form: FormData,
+  env: AdminEnv,
+): Promise<EditableTournamentRow[]> {
+  let tournamentIds: string[];
+  try {
+    const parsed = JSON.parse(String(form.get("tournamentIds") ?? "")) as unknown;
+    if (!Array.isArray(parsed)) throw new Error();
+    tournamentIds = parsed.map(String);
+  } catch {
+    throw new DocumentUploadError("対象大会が不正です。");
+  }
+  try {
+    return await loadEditableTournaments(env, tournamentIds, tournamentIds.length > 1);
+  } catch (error) {
+    if (error instanceof AdminRequestError) throw new DocumentUploadError(error.message);
+    throw error;
+  }
+}
+
+export async function saveConfirmationRoster(
+  env: AdminEnv,
+  request: Request,
+  uploadedBy: string,
+): Promise<AdminConfirmationRosterRow> {
+  const form = await request.formData();
+  const file = form.get("file");
+  if (!(file instanceof File) || file.size === 0) {
+    throw new DocumentUploadError("申込確認名簿を選択してください。");
+  }
+  const extensionMatch = file.name.toLowerCase().match(/\.(pdf|doc|docx|xls|xlsx)$/);
+  if (!extensionMatch) {
+    throw new DocumentUploadError("申込確認名簿はPDF・Word・Excel（.xls/.xlsx）のみ登録できます。");
+  }
+  const tournaments = await tournamentIdsFromForm(form, env);
+  const groupKey = archiveGroupKey(tournaments);
+  const current = await env.DB.prepare(
+    `SELECT revision FROM tournament_confirmation_rosters WHERE group_key = ?`,
+  ).bind(groupKey).first<{ revision: number }>();
+  const grades = tournaments.some((item) => item.all_grades === 1)
+    ? ["all"]
+    : tournaments.map((item) => item.grade);
+  const eventDates = [...new Set(tournaments.map((item) => item.event_start_date))];
+  const fileName = buildConfirmationRosterFilename(
+    tournaments[0].title,
+    grades,
+    eventDates,
+    extensionMatch[1] as "pdf" | "doc" | "docx" | "xls" | "xlsx",
+  );
+  const stored = await storeParticipantGuidanceDocument(file, env, uploadedBy, fileName);
+  const revision = Number(current?.revision ?? 0) + 1;
+  const uploadedAt = new Date().toISOString();
+  await env.DB.prepare(
+    `INSERT INTO tournament_confirmation_rosters (
+      group_key, representative_tournament_id, document_url,
+      file_name, file_size, content_type, revision,
+      uploaded_by_email, uploaded_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(group_key) DO UPDATE SET
+      representative_tournament_id = excluded.representative_tournament_id,
+      document_url = excluded.document_url,
+      file_name = excluded.file_name,
+      file_size = excluded.file_size,
+      content_type = excluded.content_type,
+      revision = excluded.revision,
+      uploaded_by_email = excluded.uploaded_by_email,
+      uploaded_at = excluded.uploaded_at`,
+  ).bind(
+    groupKey,
+    tournaments[0].tournament_id,
+    stored.url,
+    stored.fileName,
+    stored.size,
+    stored.contentType,
+    revision,
+    uploadedBy,
+    uploadedAt,
+  ).run();
+  return {
+    group_key: groupKey,
+    document_url: stored.url,
+    file_name: stored.fileName,
+    file_size: stored.size,
+    content_type: stored.contentType,
+    revision,
+    uploaded_at: uploadedAt,
+  };
+}
+
+export async function queueConfirmationRoster(
+  env: AdminEnv,
+  rawTournamentIds: string[],
+): Promise<{ queued: number; unavailable: number }> {
+  const tournaments = await loadEditableTournaments(
+    env,
+    rawTournamentIds,
+    rawTournamentIds.length > 1,
+  );
+  return enqueueConfirmationRosterDms(
+    env,
+    archiveGroupKey(tournaments),
+    tournaments.map((tournament) => tournament.tournament_id),
+  );
+}
+
 export async function uploadTournamentArchiveDocument(
   env: AdminEnv,
   request: Request,
@@ -688,10 +1077,20 @@ export async function uploadTournamentArchiveDocument(
 ): Promise<AdminArchiveDocumentRow> {
   const form = await request.formData();
   const file = form.get("file");
-  if (!(file instanceof File)) throw new DocumentUploadError("PDFファイルを選択してください。");
+  if (!(file instanceof File) || file.size === 0) {
+    throw new DocumentUploadError("ファイルを選択してください。");
+  }
   const documentType = String(form.get("documentType") ?? "") as ArchiveDocumentType;
   if (documentType !== "roster" && documentType !== "results") {
     throw new DocumentUploadError("書類の種類が不正です。");
+  }
+  const extensionMatch = file.name.toLowerCase().match(/\.([a-z0-9]+)$/);
+  const extension = extensionMatch?.[1] ?? "";
+  if (documentType === "roster" && !["pdf", "xls", "xlsx"].includes(extension)) {
+    throw new DocumentUploadError("確定名簿はPDF・Excel（.xls/.xlsx）のみ登録できます。");
+  }
+  if (documentType === "results" && !["pdf", "xls", "xlsx"].includes(extension)) {
+    throw new DocumentUploadError("大会結果はPDF・Excel（.xls/.xlsx）のみ登録できます。");
   }
   let tournamentIds: string[];
   try {
@@ -712,13 +1111,18 @@ export async function uploadTournamentArchiveDocument(
     ? ["all"]
     : tournaments.map((item) => item.grade);
   const eventDates = [...new Set(tournaments.map((item) => item.event_start_date))];
-  const fileName = buildArchivePdfFilename(
+  const pdfFileName = buildArchivePdfFilename(
     tournaments[0].title,
     grades,
     eventDates,
     documentType,
   );
-  const stored = await storeTournamentPdf(file, env, uploadedBy, fileName);
+  const fileName = extension === "pdf"
+    ? pdfFileName
+    : pdfFileName.replace(/\.pdf$/i, `.${extension}`);
+  const stored = extension === "pdf"
+    ? await storeTournamentPdf(file, env, uploadedBy, fileName)
+    : await storeParticipantGuidanceDocument(file, env, uploadedBy, fileName);
   const uploadedAt = new Date().toISOString();
   const groupKey = archiveGroupKey(tournaments);
   await env.DB.prepare(
@@ -751,6 +1155,604 @@ export async function uploadTournamentArchiveDocument(
     file_size: stored.size,
     uploaded_at: uploadedAt,
   };
+}
+
+export async function saveParticipantGuidance(
+  env: AdminEnv,
+  request: Request,
+  updatedBy: string,
+): Promise<ParticipantGuidanceSaveResult> {
+  const form = await request.formData();
+  const bodyText = String(form.get("bodyText") ?? "").trim();
+  const paymentCollectionMethod = String(form.get("paymentCollectionMethod") ?? "").trim();
+  const organizerPaymentSource = String(form.get("organizerPaymentSource") ?? "").trim();
+  const organizerPaymentDetails = String(form.get("organizerPaymentDetails") ?? "").trim();
+  const organizerPaymentDeadline = String(form.get("organizerPaymentDeadline") ?? "").trim();
+  const paymentDeadline = String(form.get("paymentDeadline") ?? "").trim();
+  if (bodyText.length > 3500) {
+    throw new DocumentUploadError("参加者向け案内の本文は3500文字以内にしてください。");
+  }
+  if (!new Set(["advance_manager", "onsite_cash"]).has(paymentCollectionMethod)) {
+    throw new DocumentUploadError("参加費の支払い方法を選択してください。");
+  }
+  if (!new Set(["text", "file", "guidance"]).has(organizerPaymentSource)) {
+    throw new DocumentUploadError("主催者への振込情報の形式を選択してください。");
+  }
+  if (organizerPaymentDetails.length > 3500) {
+    throw new DocumentUploadError("主催者への振込先情報は3500文字以内にしてください。");
+  }
+  let feesByGrade: Record<string, number>;
+  try {
+    const parsed = JSON.parse(String(form.get("feesByGrade") ?? "")) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error();
+    feesByGrade = Object.fromEntries(Object.entries(parsed).map(([grade, amount]) => {
+      const numericAmount = Number(amount);
+      if (
+        !new Set(["A", "B", "C", "D", "E", "F", "beginner"]).has(grade) ||
+        !Number.isInteger(numericAmount) || numericAmount < 500 || numericAmount > 3000 ||
+        numericAmount % 500 !== 0
+      ) throw new Error();
+      return [grade, numericAmount];
+    }));
+    if (Object.keys(feesByGrade).length === 0) throw new Error();
+  } catch {
+    throw new DocumentUploadError("級別参加費を500〜3,000円の500円刻みで選択してください。");
+  }
+  const advancePayment = paymentCollectionMethod === "advance_manager";
+  const parsedOrganizerPaymentDeadline = organizerPaymentDeadline
+    ? new Date(organizerPaymentDeadline)
+    : null;
+  const parsedPaymentDeadline = paymentDeadline ? new Date(paymentDeadline) : null;
+  if (
+    advancePayment &&
+    (!parsedOrganizerPaymentDeadline || Number.isNaN(parsedOrganizerPaymentDeadline.getTime()))
+  ) {
+    throw new DocumentUploadError("主催者への振込期限を入力してください。");
+  }
+  if (advancePayment && (!parsedPaymentDeadline || Number.isNaN(parsedPaymentDeadline.getTime()))) {
+    throw new DocumentUploadError("サークル内支払期限を入力してください。");
+  }
+  if (
+    advancePayment && parsedOrganizerPaymentDeadline && parsedPaymentDeadline &&
+    parsedOrganizerPaymentDeadline.getTime() - parsedPaymentDeadline.getTime() < 2 * 86400000
+  ) {
+    throw new DocumentUploadError("サークル内支払期限は主催者への振込期限の2日以上前にしてください。");
+  }
+  let tournamentIds: string[];
+  try {
+    const parsed = JSON.parse(String(form.get("tournamentIds") ?? "")) as unknown;
+    if (!Array.isArray(parsed)) throw new Error();
+    tournamentIds = parsed.map(String);
+  } catch {
+    throw new DocumentUploadError("対象大会が不正です。");
+  }
+  let tournaments: EditableTournamentRow[];
+  try {
+    tournaments = await loadEditableTournaments(env, tournamentIds, tournamentIds.length > 1);
+  } catch (error) {
+    if (error instanceof AdminRequestError) throw new DocumentUploadError(error.message);
+    throw error;
+  }
+  const groupKey = archiveGroupKey(tournaments);
+  const existing = await env.DB.prepare(
+    `SELECT document_url, file_name, file_size, content_type, revision,
+      organizer_payment_document_url, organizer_payment_file_name,
+      organizer_payment_file_size, organizer_payment_content_type
+     FROM tournament_participant_guidance
+     WHERE group_key = ?`,
+  ).bind(groupKey).first<{
+    document_url: string | null;
+    file_name: string | null;
+    file_size: number | null;
+    content_type: string | null;
+    revision: number;
+    organizer_payment_document_url: string | null;
+    organizer_payment_file_name: string | null;
+    organizer_payment_file_size: number | null;
+    organizer_payment_content_type: string | null;
+  }>();
+
+  let documentUrl = existing?.document_url ?? null;
+  let fileName = existing?.file_name ?? null;
+  let fileSize = existing?.file_size ?? null;
+  let contentType = existing?.content_type ?? null;
+  const file = form.get("file");
+  if (file instanceof File && file.size > 0) {
+    const extensionMatch = file.name.toLowerCase().match(/\.(pdf|doc|docx)$/);
+    if (!extensionMatch) {
+      throw new DocumentUploadError("案内ファイルはPDF・Word（.doc/.docx）のみ登録できます。");
+    }
+    const grades = tournaments.some((item) => item.all_grades === 1)
+      ? ["all"]
+      : tournaments.map((item) => item.grade);
+    const eventDates = [...new Set(tournaments.map((item) => item.event_start_date))];
+    fileName = buildGuidanceFilename(
+      tournaments[0].title,
+      grades,
+      eventDates,
+      extensionMatch[1] as "pdf" | "doc" | "docx",
+    );
+    const stored = await storeParticipantGuidanceDocument(
+      file,
+      env,
+      updatedBy,
+      fileName,
+    );
+    documentUrl = stored.url;
+    fileSize = stored.size;
+    contentType = stored.contentType;
+  }
+  if (!bodyText && !documentUrl) {
+    throw new DocumentUploadError("案内本文または案内ファイルを登録してください。");
+  }
+  let organizerPaymentDocumentUrl = existing?.organizer_payment_document_url ?? null;
+  let organizerPaymentFileName = existing?.organizer_payment_file_name ?? null;
+  let organizerPaymentFileSize = existing?.organizer_payment_file_size ?? null;
+  let organizerPaymentContentType = existing?.organizer_payment_content_type ?? null;
+  const organizerPaymentFile = form.get("organizerPaymentFile");
+  if (organizerPaymentFile instanceof File && organizerPaymentFile.size > 0) {
+    const extensionMatch = organizerPaymentFile.name.toLowerCase().match(/\.(pdf|doc|docx)$/);
+    if (!extensionMatch) {
+      throw new DocumentUploadError("主催者振込情報はPDF・Word（.doc/.docx）のみ登録できます。");
+    }
+    const grades = tournaments.some((item) => item.all_grades === 1)
+      ? ["all"]
+      : tournaments.map((item) => item.grade);
+    const eventDates = [...new Set(tournaments.map((item) => item.event_start_date))];
+    organizerPaymentFileName = buildOrganizerPaymentFilename(
+      tournaments[0].title,
+      grades,
+      eventDates,
+      extensionMatch[1] as "pdf" | "doc" | "docx",
+    );
+    const stored = await storeParticipantGuidanceDocument(
+      organizerPaymentFile,
+      env,
+      updatedBy,
+      organizerPaymentFileName,
+    );
+    organizerPaymentDocumentUrl = stored.url;
+    organizerPaymentFileSize = stored.size;
+    organizerPaymentContentType = stored.contentType;
+  }
+  if (advancePayment && organizerPaymentSource === "text" && !organizerPaymentDetails) {
+    throw new DocumentUploadError("主催者への振込先情報を入力してください。");
+  }
+  if (advancePayment && organizerPaymentSource === "file" && !organizerPaymentDocumentUrl) {
+    throw new DocumentUploadError("主催者振込情報のPDFまたはWordを登録してください。");
+  }
+  if (advancePayment && organizerPaymentSource === "guidance" && !bodyText && !documentUrl) {
+    throw new DocumentUploadError("振込情報を含む当日案内を登録してください。");
+  }
+  const revision = Number(existing?.revision ?? 0) + 1;
+  const updatedAt = new Date().toISOString();
+  const statements: D1PreparedStatement[] = [env.DB.prepare(
+    `INSERT INTO tournament_participant_guidance (
+      group_key, representative_tournament_id, body_text,
+      document_url, file_name, file_size, content_type,
+      payment_details, organizer_payment_deadline, payment_deadline,
+      payment_collection_method, organizer_payment_source, organizer_payment_document_url,
+      organizer_payment_file_name, organizer_payment_file_size,
+      organizer_payment_content_type,
+      revision, updated_by_email, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(group_key) DO UPDATE SET
+      representative_tournament_id = excluded.representative_tournament_id,
+      body_text = excluded.body_text,
+      document_url = excluded.document_url,
+      file_name = excluded.file_name,
+      file_size = excluded.file_size,
+      content_type = excluded.content_type,
+      payment_details = excluded.payment_details,
+      organizer_payment_deadline = excluded.organizer_payment_deadline,
+      payment_deadline = excluded.payment_deadline,
+      payment_collection_method = excluded.payment_collection_method,
+      organizer_payment_source = excluded.organizer_payment_source,
+      organizer_payment_document_url = excluded.organizer_payment_document_url,
+      organizer_payment_file_name = excluded.organizer_payment_file_name,
+      organizer_payment_file_size = excluded.organizer_payment_file_size,
+      organizer_payment_content_type = excluded.organizer_payment_content_type,
+      revision = excluded.revision,
+      updated_by_email = excluded.updated_by_email,
+      updated_at = excluded.updated_at`,
+  ).bind(
+    groupKey,
+    tournaments[0].tournament_id,
+    bodyText || null,
+    documentUrl,
+    fileName,
+    fileSize,
+    contentType,
+    organizerPaymentDetails || null,
+    advancePayment ? parsedOrganizerPaymentDeadline!.toISOString() : null,
+    advancePayment ? parsedPaymentDeadline!.toISOString() : null,
+    paymentCollectionMethod,
+    organizerPaymentSource,
+    organizerPaymentDocumentUrl,
+    organizerPaymentFileName,
+    organizerPaymentFileSize,
+    organizerPaymentContentType,
+    revision,
+    updatedBy,
+    updatedAt,
+  ), env.DB.prepare(
+    `DELETE FROM tournament_participation_fees WHERE group_key = ?`,
+  ).bind(groupKey)];
+  for (const [grade, amount] of Object.entries(feesByGrade)) {
+    statements.push(env.DB.prepare(
+      `INSERT INTO tournament_participation_fees (
+        group_key, grade, amount_yen, updated_by_email, updated_at
+      ) VALUES (?, ?, ?, ?, ?)`,
+    ).bind(groupKey, grade, amount, updatedBy, updatedAt));
+  }
+  await env.DB.batch(statements);
+  return {
+    groupKey,
+    bodyText: bodyText || null,
+    documentUrl,
+    fileName,
+    fileSize,
+    contentType,
+    paymentCollectionMethod: paymentCollectionMethod as "advance_manager" | "onsite_cash",
+    organizerPaymentSource: organizerPaymentSource as "text" | "file" | "guidance",
+    organizerPaymentDetails: organizerPaymentDetails || null,
+    organizerPaymentDocumentUrl,
+    organizerPaymentFileName,
+    feesByGrade,
+    organizerPaymentDeadline: advancePayment ? parsedOrganizerPaymentDeadline!.toISOString() : null,
+    paymentDeadline: advancePayment ? parsedPaymentDeadline!.toISOString() : null,
+    revision,
+    updatedAt,
+  };
+}
+
+export async function queueParticipantGuidance(
+  env: AdminEnv,
+  rawTournamentIds: string[],
+): Promise<GuidanceEnqueueResult> {
+  const tournaments = await loadEditableTournaments(
+    env,
+    rawTournamentIds,
+    rawTournamentIds.length > 1,
+  );
+  return enqueueParticipantGuidance(
+    env,
+    archiveGroupKey(tournaments),
+    tournaments.map((tournament) => tournament.tournament_id),
+  );
+}
+
+export async function queueLotteryResultsAndGuidance(
+  env: AdminEnv,
+  rawTournamentIds: string[],
+  changedByEmail: string,
+): Promise<LotteryNotificationQueueResult> {
+  const tournaments = await loadEditableTournaments(
+    env,
+    rawTournamentIds,
+    rawTournamentIds.length > 1,
+  );
+  const groupKey = archiveGroupKey(tournaments);
+  const placeholders = tournaments.map(() => "?").join(", ");
+  const entries = await env.DB.prepare(
+    `SELECT tournament_entries.tournament_id, tournament_entries.member_id,
+      tournament_entries.status, tournament_entries.waitlist_number,
+      CASE WHEN tournaments.all_grades = 1 THEN members.grade ELSE tournaments.grade END AS fee_grade
+     FROM tournament_entries
+     INNER JOIN tournaments ON tournaments.tournament_id = tournament_entries.tournament_id
+     INNER JOIN members ON members.member_id = tournament_entries.member_id
+     WHERE tournament_entries.tournament_id IN (${placeholders})`,
+  ).bind(...tournaments.map((tournament) => tournament.tournament_id)).all<{
+    tournament_id: string;
+    member_id: string;
+    status: string;
+    waitlist_number: number | null;
+    fee_grade: string;
+  }>();
+  if (entries.results.some((entry) => entry.status === "submitted")) {
+    throw new AdminRequestError("全員の出場確定・キャンセル待ち・辞退を登録してください。", 409);
+  }
+  if (entries.results.some((entry) => entry.status === "not_selected" && !entry.waitlist_number)) {
+    throw new AdminRequestError("キャンセル待ちの全員に待ち番号を登録してください。", 409);
+  }
+  const selected = entries.results.filter((entry) => entry.status === "selected");
+  if (selected.length === 0) {
+    throw new AdminRequestError("出場確定者が登録されていません。", 409);
+  }
+  const roster = await env.DB.prepare(
+    `SELECT document_url FROM tournament_archive_documents
+     WHERE group_key = ? AND document_type = 'roster'`,
+  ).bind(groupKey).first<{ document_url: string }>();
+  if (!roster) throw new AdminRequestError("確定名簿を登録してください。", 409);
+  const guidance = await env.DB.prepare(
+    `SELECT revision, body_text, document_url, payment_details,
+      payment_collection_method, organizer_payment_source, organizer_payment_document_url,
+      organizer_payment_deadline, payment_deadline
+     FROM tournament_participant_guidance WHERE group_key = ?`,
+  ).bind(groupKey).first<{
+    revision: number;
+    body_text: string | null;
+    document_url: string | null;
+    payment_details: string | null;
+    payment_collection_method: "advance_manager" | "onsite_cash";
+    organizer_payment_source: "text" | "file" | "guidance";
+    organizer_payment_document_url: string | null;
+    organizer_payment_deadline: string | null;
+    payment_deadline: string | null;
+  }>();
+  if (
+    !guidance ||
+    (!guidance.body_text && !guidance.document_url)
+  ) {
+    throw new AdminRequestError("当日案内を保存してください。", 409);
+  }
+  if (
+    guidance.payment_collection_method === "advance_manager" &&
+    (
+      !guidance.organizer_payment_deadline ||
+      !guidance.payment_deadline ||
+      (guidance.organizer_payment_source === "text" && !guidance.payment_details) ||
+      (guidance.organizer_payment_source === "file" && !guidance.organizer_payment_document_url)
+    )
+  ) {
+    throw new AdminRequestError("主催者振込情報と支払期限を保存してください。", 409);
+  }
+  const feeRows = await env.DB.prepare(
+    `SELECT grade, amount_yen FROM tournament_participation_fees WHERE group_key = ?`,
+  ).bind(groupKey).all<{ grade: string; amount_yen: number }>();
+  const feeGrades = new Set(feeRows.results.map((fee) => fee.grade));
+  const missingFeeGrades = [...new Set(selected.map((entry) => entry.fee_grade))]
+    .filter((grade) => !feeGrades.has(grade));
+  if (missingFeeGrades.length > 0) {
+    throw new AdminRequestError(
+      `${missingFeeGrades.join("・")}級の参加費を登録してください。`,
+      409,
+    );
+  }
+  if (guidance.payment_collection_method === "advance_manager") {
+    const now = new Date().toISOString();
+    await env.DB.batch(selected.map((entry) => env.DB.prepare(
+      `INSERT INTO tournament_entry_payments (
+        tournament_id, member_id, status, updated_by_email, updated_at
+      ) VALUES (?, ?, 'unpaid', ?, ?)
+      ON CONFLICT(tournament_id, member_id) DO NOTHING`,
+    ).bind(entry.tournament_id, entry.member_id, changedByEmail, now)));
+  }
+  const channelQueued = await enqueueLotteryResultAnnouncement(
+    env,
+    groupKey,
+    tournaments[0].tournament_id,
+    Number(guidance.revision),
+  );
+  const dms = await enqueueParticipantGuidance(
+    env,
+    groupKey,
+    tournaments.map((tournament) => tournament.tournament_id),
+  );
+  return {
+    channelQueued,
+    dmQueued: dms.queued,
+    dmUnavailable: dms.unavailable,
+  };
+}
+
+export async function updateTournamentEntryPayment(
+  env: AdminEnv,
+  tournamentId: string,
+  memberId: string,
+  rawStatus: string,
+  changedByEmail: string,
+): Promise<EntryPaymentUpdateResult> {
+  if (!/^T-[0-9a-f-]{36}$/.test(tournamentId) || !/^M-[0-9a-f-]{36}$/.test(memberId)) {
+    throw new AdminRequestError("大会またはメンバーIDが不正です。", 400);
+  }
+  if (rawStatus !== "unpaid" && rawStatus !== "paid") {
+    throw new AdminRequestError("入金状態が不正です。", 400);
+  }
+  const entry = await env.DB.prepare(
+    `SELECT tournament_entry_payments.status AS payment_status
+     FROM tournament_entries
+     INNER JOIN tournaments ON tournaments.tournament_id = tournament_entries.tournament_id
+     LEFT JOIN tournament_entry_payments
+       ON tournament_entry_payments.tournament_id = tournament_entries.tournament_id
+      AND tournament_entry_payments.member_id = tournament_entries.member_id
+     WHERE tournament_entries.tournament_id = ?
+       AND tournament_entries.member_id = ?
+       AND tournament_entries.status = 'selected'
+       AND tournaments.status NOT IN ('canceled', 'deleted')
+     LIMIT 1`,
+  ).bind(tournamentId, memberId).first<{ payment_status: "unpaid" | "paid" | null }>();
+  if (!entry) throw new AdminRequestError("出場確定者を確認できません。", 404);
+  const previousStatus = entry.payment_status ?? null;
+  if ((previousStatus ?? "unpaid") === rawStatus) {
+    return { tournamentId, memberId, previousStatus, status: rawStatus, changed: false };
+  }
+  const now = new Date().toISOString();
+  await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO tournament_entry_payments (
+        tournament_id, member_id, status, paid_at, updated_by_email, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(tournament_id, member_id) DO UPDATE SET
+        status = excluded.status,
+        paid_at = excluded.paid_at,
+        updated_by_email = excluded.updated_by_email,
+        updated_at = excluded.updated_at`,
+    ).bind(
+      tournamentId,
+      memberId,
+      rawStatus,
+      rawStatus === "paid" ? now : null,
+      changedByEmail,
+      now,
+    ),
+    env.DB.prepare(
+      `INSERT INTO tournament_entry_payment_history (
+        tournament_id, member_id, previous_status, new_status,
+        changed_by_email, changed_at
+      ) VALUES (?, ?, ?, ?, ?, ?)`,
+    ).bind(tournamentId, memberId, previousStatus, rawStatus, changedByEmail, now),
+  ]);
+  return { tournamentId, memberId, previousStatus, status: rawStatus, changed: true };
+}
+
+export async function updateTournamentEntriesBatch(
+  env: AdminEnv,
+  rawEntries: TournamentEntryBatchInput[],
+  changedByEmail: string,
+): Promise<TournamentEntryBatchUpdateResult> {
+  if (!Array.isArray(rawEntries) || rawEntries.length === 0 || rawEntries.length > 200) {
+    throw new AdminRequestError("保存対象は1〜200人で指定してください。", 400);
+  }
+  const entries = rawEntries.map((entry) => {
+    if (
+      !/^T-[0-9a-f-]{36}$/.test(entry.tournamentId) ||
+      !/^M-[0-9a-f-]{36}$/.test(entry.memberId) ||
+      !ENTRY_STATUSES.has(entry.status)
+    ) {
+      throw new AdminRequestError("大会・メンバー・抽選結果の指定が不正です。", 400);
+    }
+    const waitlistNumber = entry.status === "not_selected" ? entry.waitlistNumber : null;
+    if (
+      entry.status === "not_selected" &&
+      (!Number.isInteger(waitlistNumber) || Number(waitlistNumber) < 1 || Number(waitlistNumber) > 9999)
+    ) {
+      throw new AdminRequestError("キャンセル待ち番号は1〜9999の整数で入力してください。", 400);
+    }
+    const paymentStatus = entry.status === "selected" ? entry.paymentStatus : null;
+    if (entry.status === "selected" && paymentStatus !== "unpaid" && paymentStatus !== "paid") {
+      throw new AdminRequestError("出場確定者の入金状態が不正です。", 400);
+    }
+    return { ...entry, waitlistNumber, paymentStatus };
+  });
+  const keys = entries.map((entry) => `${entry.tournamentId}:${entry.memberId}`);
+  if (new Set(keys).size !== keys.length) {
+    throw new AdminRequestError("同じ選手が重複して指定されています。", 400);
+  }
+
+  const requestedValues = entries.map(() => "(?, ?)").join(", ");
+  const targets = await env.DB.prepare(
+    `WITH requested(tournament_id, member_id) AS (VALUES ${requestedValues})
+     SELECT requested.tournament_id, requested.member_id,
+       tournament_entries.status AS entry_status,
+       tournament_entries.waitlist_number,
+       tournament_entry_payments.status AS payment_status
+     FROM requested
+     INNER JOIN tournaments
+       ON tournaments.tournament_id = requested.tournament_id
+      AND tournaments.status IN ('applied', 'closed')
+     INNER JOIN responses
+       ON responses.tournament_id = requested.tournament_id
+      AND responses.member_id = requested.member_id
+      AND responses.response = 'yes'
+      AND responses.is_valid = 1
+     LEFT JOIN tournament_entries
+       ON tournament_entries.tournament_id = requested.tournament_id
+      AND tournament_entries.member_id = requested.member_id
+     LEFT JOIN tournament_entry_payments
+       ON tournament_entry_payments.tournament_id = requested.tournament_id
+      AND tournament_entry_payments.member_id = requested.member_id`,
+  ).bind(...entries.flatMap((entry) => [entry.tournamentId, entry.memberId])).all<{
+    tournament_id: string;
+    member_id: string;
+    entry_status: string | null;
+    waitlist_number: number | null;
+    payment_status: "unpaid" | "paid" | null;
+  }>();
+  if (targets.results.length !== entries.length) {
+    throw new AdminRequestError("保存対象に無効な参加希望者が含まれています。", 409);
+  }
+  const targetByKey = new Map(
+    targets.results.map((target) => [`${target.tournament_id}:${target.member_id}`, target]),
+  );
+  const now = new Date().toISOString();
+  const statements: D1PreparedStatement[] = [];
+  let changedCount = 0;
+  for (const entry of entries) {
+    const target = targetByKey.get(`${entry.tournamentId}:${entry.memberId}`)!;
+    let changed = false;
+    if (
+      target.entry_status !== entry.status ||
+      (target.waitlist_number ?? null) !== entry.waitlistNumber
+    ) {
+      statements.push(
+        env.DB.prepare(
+          `INSERT INTO tournament_entries (
+            tournament_id, member_id, status, waitlist_number,
+            created_at, updated_at, updated_by_email
+          ) VALUES (?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(tournament_id, member_id) DO UPDATE SET
+            status = excluded.status,
+            waitlist_number = excluded.waitlist_number,
+            updated_at = excluded.updated_at,
+            updated_by_email = excluded.updated_by_email`,
+        ).bind(
+          entry.tournamentId,
+          entry.memberId,
+          entry.status,
+          entry.waitlistNumber,
+          now,
+          now,
+          changedByEmail,
+        ),
+        env.DB.prepare(
+          `INSERT INTO tournament_entry_history (
+            tournament_id, member_id, previous_status, new_status,
+            previous_waitlist_number, new_waitlist_number,
+            changed_by_email, changed_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).bind(
+          entry.tournamentId,
+          entry.memberId,
+          target.entry_status,
+          entry.status,
+          target.waitlist_number,
+          entry.waitlistNumber,
+          changedByEmail,
+          now,
+        ),
+      );
+      changed = true;
+    }
+    if (entry.status === "selected" && target.payment_status !== entry.paymentStatus) {
+      statements.push(
+        env.DB.prepare(
+          `INSERT INTO tournament_entry_payments (
+            tournament_id, member_id, status, paid_at, updated_by_email, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?)
+          ON CONFLICT(tournament_id, member_id) DO UPDATE SET
+            status = excluded.status,
+            paid_at = excluded.paid_at,
+            updated_by_email = excluded.updated_by_email,
+            updated_at = excluded.updated_at`,
+        ).bind(
+          entry.tournamentId,
+          entry.memberId,
+          entry.paymentStatus,
+          entry.paymentStatus === "paid" ? now : null,
+          changedByEmail,
+          now,
+        ),
+        env.DB.prepare(
+          `INSERT INTO tournament_entry_payment_history (
+            tournament_id, member_id, previous_status, new_status,
+            changed_by_email, changed_at
+          ) VALUES (?, ?, ?, ?, ?, ?)`,
+        ).bind(
+          entry.tournamentId,
+          entry.memberId,
+          target.payment_status,
+          entry.paymentStatus,
+          changedByEmail,
+          now,
+        ),
+      );
+      changed = true;
+    }
+    if (changed) changedCount += 1;
+  }
+  if (statements.length > 0) await env.DB.batch(statements);
+  return { entryCount: entries.length, changedCount };
 }
 
 export async function setTournamentArchivePublished(
@@ -1057,8 +2059,8 @@ function adminHtml(page: AdminPage): string {
     label { display: grid; gap: 7px; font-weight: 650; font-size: .9rem; }
     .wide { grid-column: 1 / -1; }
     .optional { color: #697386; font-size: .78rem; font-weight: 500; }
-    input, select { width: 100%; min-width: 0; max-width: 100%; border: 1px solid #b9c1d0; border-radius: 8px; padding: 11px 12px; font: inherit; color: inherit; background: white; }
-    input:focus, select:focus { outline: 3px solid #7c9cff3b; border-color: #526fc4; }
+    input, select, textarea { width: 100%; min-width: 0; max-width: 100%; border: 1px solid #b9c1d0; border-radius: 8px; padding: 11px 12px; font: inherit; color: inherit; background: white; }
+    input:focus, select:focus, textarea:focus { outline: 3px solid #7c9cff3b; border-color: #526fc4; }
     .grade-picker { min-width: 0; margin: 0; padding: 0; border: 0; }
     .grade-picker legend { margin-bottom: 7px; padding: 0; font-size: .9rem; font-weight: 650; }
     .grade-options { display: flex; flex-wrap: wrap; gap: 8px; padding: 9px; border: 1px solid #b9c1d0; border-radius: 8px; background: #fff; }
@@ -1069,6 +2071,10 @@ function adminHtml(page: AdminPage): string {
     .grade-date-settings > strong { display: block; margin-bottom: 10px; font-size: .9rem; }
     .grade-date-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
     .file-note { color: #697386; font-size: .78rem; font-weight: 500; }
+    .application-method { min-width: 0; margin: 0; padding: 14px; border: 1px solid #d7dfef; border-radius: 9px; background: #f8faff; }
+    .application-method legend { padding: 0 5px; font-size: .9rem; font-weight: 750; }
+    .application-method-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 12px; }
+    .application-method-fields > .wide { grid-column: 1 / -1; }
     .actions { margin-top: 24px; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
     button { border: 0; border-radius: 8px; padding: 12px 20px; background: #3658b2; color: white; font: inherit; font-weight: 700; cursor: pointer; }
     button:hover { background: #294796; }
@@ -1087,9 +2093,13 @@ function adminHtml(page: AdminPage): string {
     #tournament-list { display: grid; gap: 14px; }
     .tournament-card { border: 1px solid #dce1eb; border-radius: 10px; padding: 18px; }
     .card-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 10px 0 4px; }
+    .card-status-select { width: auto; min-width: 145px; padding: 8px 10px; }
     button.success { padding: 9px 14px; background: #18794e; }
     button.success:hover { background: #12633f; }
     .meta { color: #596579; margin: 8px 0 14px; font-size: .88rem; line-height: 1.6; }
+    .application-summary { display: flex; align-items: center; gap: 8px 12px; flex-wrap: wrap; margin: -4px 0 12px; padding: 9px 11px; border-radius: 8px; color: #465166; background: #f5f7fb; font-size: .8rem; }
+    .application-summary strong { color: #263550; }
+    .application-summary a { color: #294796; font-weight: 700; }
     .badge { display: inline-flex; align-items: center; border-radius: 999px; padding: 5px 10px; font-size: .78rem; font-weight: 750; white-space: nowrap; }
     .badge.active { color: #17643a; background: #e4f7ec; }
     .badge.applied { color: #2452a4; background: #e7efff; }
@@ -1109,24 +2119,90 @@ function adminHtml(page: AdminPage): string {
     .status-message { font-size: .84rem; font-weight: 650; }
     .status-message.error { color: #b42318; }
     .notification-note { color: #697386; font-size: .78rem; margin-top: 10px; }
-    .entry-management { margin: 15px 0; padding: 14px; border: 1px solid #dce1eb; border-radius: 9px; background: #fbfcff; }
-    .entry-management h4 { margin: 0 0 10px; font-size: .9rem; }
-    .entry-row { display: grid; grid-template-columns: minmax(160px, 1fr) minmax(180px, auto) auto minmax(180px, 1fr) auto minmax(90px, auto); gap: 9px; align-items: center; padding: 8px 0; border-top: 1px solid #e7eaf0; }
-    .entry-row select { padding: 8px 10px; }
-    .entry-row button { padding: 8px 12px; }
-    .entry-result { color: #596579; font-size: .78rem; }
-    .archive-management { margin: 15px 0; padding: 14px; border: 1px solid #cad5eb; border-radius: 9px; background: #f7f9ff; }
-    .archive-management h4 { margin: 0 0 6px; }
+    .entry-management { margin: 15px 0; border: 1px solid #dce1eb; border-radius: 9px; background: #fbfcff; }
+    .entry-management > summary { cursor: pointer; padding: 13px 14px; font-size: .9rem; font-weight: 800; color: #263550; user-select: none; }
+    .entry-management > summary:hover { background: #f3f6fc; border-radius: 9px; }
+    .entry-management[open] > summary { border-bottom: 1px solid #e7eaf0; border-radius: 9px 9px 0 0; }
+    .entry-management-body { padding: 0 14px 14px; }
+    .entry-row { display: grid; grid-template-columns: minmax(230px, 1.35fr) minmax(190px, .85fr) minmax(90px, .42fr) minmax(130px, .58fr) minmax(140px, .55fr); column-gap: 12px; row-gap: 4px; align-items: end; padding: 7px 0; border-top: 1px solid #e7eaf0; }
+    .entry-name { align-self: center; line-height: 1.35; font-weight: 700; }
+    .entry-field { display: grid; gap: 2px; min-width: 0; }
+    .entry-field-label { color: #697386; font-size: .68rem; line-height: 1.2; font-weight: 700; }
+    .entry-status-field { grid-column: 2; }
+    .waitlist-field { grid-column: 3; }
+    .payment-field { grid-column: 4; }
+    .waitlist-control { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 5px; }
+    .waitlist-suffix { color: #596579; font-size: .84rem; font-weight: 700; }
+    .entry-row select, .entry-row input { padding: 6px 9px; }
+    .entry-row button { padding: 7px 12px; white-space: nowrap; }
+    .entry-result { grid-column: 1 / -1; color: #596579; font-size: .75rem; line-height: 1.25; }
+    .entry-result:empty { display: none; }
+    .entry-bulk-actions { display: flex; justify-content: flex-end; align-items: center; gap: 10px; flex-wrap: wrap; padding: 12px 0 0; border-top: 1px solid #e7eaf0; }
+    .entry-bulk-actions .entry-result { flex: 1 1 220px; }
+    .stage-box { display: grid; gap: 9px; margin: 12px 0; padding: 12px; border: 1px solid #d7dfef; border-radius: 9px; background: white; }
+    .stage-box h5 { margin: 0; font-size: .9rem; }
+    .stage-actions { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+    .result-list { display: grid; }
+    .result-row { display: grid; grid-template-columns: minmax(230px, 1fr) minmax(190px, .72fr) auto; gap: 9px; align-items: center; padding: 5px 0; border-top: 1px solid #e7eaf0; }
+    .result-row:first-child { border-top: 0; }
+    .result-row select { padding-block: 7px; }
+    .result-row button { padding: 7px 12px; white-space: nowrap; }
+    .result-row .entry-result { grid-column: 1 / -1; }
+    .guidance-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; align-items: start; }
+    .guidance-subsection { display: grid; gap: 9px; padding: 11px; border: 1px solid #dce1eb; border-radius: 8px; background: #fbfcff; }
+    .guidance-subsection h6 { margin: 0; font-size: .86rem; }
+    .guidance-guide-grid { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(260px, .65fr); gap: 10px; align-items: start; }
+    .guidance-file-box { display: grid; gap: 7px; padding: 9px; border-radius: 7px; background: #f5f7fb; }
+    .payment-setup-grid { display: grid; grid-template-columns: minmax(280px, .8fr) minmax(0, 1.2fr); gap: 10px; align-items: start; }
+    .fee-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; padding: 10px; border-radius: 8px; background: #f5f7fb; }
+    .fee-grid h6 { grid-column: 1 / -1; margin: 0; font-size: .84rem; }
+    .fee-grid select { padding-block: 8px; }
+    .organizer-payment-box { display: grid; gap: 9px; padding: 10px; border-radius: 8px; border: 1px solid #dce1eb; background: #fbfcff; }
+    .organizer-payment-box h6 { margin: 0; font-size: .84rem; }
+    .organizer-payment-selector { max-width: 520px; }
+    .organizer-payment-branch { display: grid; gap: 8px; }
+    .organizer-payment-note { color: #596579; font-size: .8rem; line-height: 1.5; }
+    .archive-management { margin: 15px 0; border: 1px solid #cad5eb; border-radius: 9px; background: #f7f9ff; }
+    .archive-management > summary { cursor: pointer; padding: 13px 14px; font-size: .9rem; font-weight: 800; color: #263550; user-select: none; }
+    .archive-management > summary:hover { background: #eef3ff; border-radius: 9px; }
+    .archive-management[open] > summary { border-bottom: 1px solid #dce1eb; border-radius: 9px 9px 0 0; }
+    .archive-management-body { padding: 14px; }
     .archive-note { margin: 0 0 12px; color: #596579; font-size: .82rem; line-height: 1.55; }
+    .guidance-management { display: grid; gap: 9px; padding: 12px; margin-bottom: 14px; border: 1px solid #d7dfef; border-radius: 9px; background: #fff; }
+    .guidance-management h5 { margin: 0; font-size: .9rem; }
+    .guidance-management textarea { height: 72px; min-height: 72px; resize: vertical; line-height: 1.45; }
+    .guidance-fields input[type="datetime-local"] { min-height: 42px; padding-block: 8px; }
+    .deadline-control { display: grid; grid-template-columns: minmax(0, 1fr) 112px; gap: 8px; }
+    .deadline-control input { min-width: 0; }
+    .guidance-actions { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+    .guidance-current { color: #596579; font-size: .8rem; }
+    .guidance-current a { color: #294796; font-weight: 700; }
     .archive-documents { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
     .archive-document { display: grid; gap: 7px; padding: 11px; border-radius: 8px; background: white; border: 1px solid #dce1eb; }
     .archive-document strong { font-size: .86rem; }
     .archive-document a { color: #294796; font-size: .82rem; font-weight: 700; }
     .archive-document button { justify-self: start; }
     .archive-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
+    .result-archive-body { padding-block: 10px; }
+    .result-archive-body > .archive-note { margin-bottom: 7px; }
+    .result-document-upload { grid-template-columns: minmax(190px, auto) minmax(0, 1fr) auto; align-items: center; gap: 7px 10px; padding: 8px 10px; }
+    .result-document-upload > input[type="file"] { grid-column: 1 / 3; }
+    .result-document-upload > button { grid-column: 3; grid-row: 2; }
+    .result-document-upload > .entry-result { grid-column: 1 / -1; }
+    .result-stage { margin: 8px 0; padding: 9px 11px; gap: 5px; }
+    .result-stage > .archive-note { margin-bottom: 2px; }
+    .result-archive-body .archive-actions { margin-top: 8px; }
     #member-status { color: #697386; margin-bottom: 12px; }
-    #member-list { display: grid; gap: 12px; }
-    .member-card { border: 1px solid #dce1eb; border-radius: 10px; padding: 16px; }
+    #member-list.has-members { overflow: hidden; border: 1px solid #dce1eb; border-radius: 10px; }
+    .member-table-header, .member-summary-grid { display: grid; grid-template-columns: minmax(125px, 1.15fr) minmax(150px, 1.35fr) minmax(68px, .55fr) minmax(68px, .55fr) minmax(72px, .6fr) minmax(82px, .65fr) minmax(105px, .8fr); gap: 12px; align-items: center; }
+    .member-table-header { padding: 10px 14px; color: #697386; background: #f5f7fb; border-bottom: 1px solid #dce1eb; font-size: .76rem; font-weight: 750; }
+    .member-card { border-bottom: 1px solid #e7eaf0; }
+    .member-card:last-child { border-bottom: 0; }
+    .member-summary-grid { min-height: 58px; padding: 10px 14px; }
+    .member-summary-item { min-width: 0; color: #172033; font-size: .88rem; font-weight: 700; overflow-wrap: anywhere; }
+    .member-row-actions { min-width: 0; display: grid; justify-items: start; gap: 4px; }
+    .member-row-actions button { padding: 7px 11px; }
+    .member-editor { padding: 14px; background: #fafbfe; }
     .member-grid { display: grid; grid-template-columns: minmax(145px, 1.3fr) minmax(145px, 1.3fr) minmax(90px, .65fr) minmax(90px, .65fr) minmax(115px, .8fr) auto; gap: 12px; align-items: end; }
     .member-grid .checkbox { display: flex; align-items: center; gap: 8px; min-height: 42px; }
     .member-grid .checkbox input { width: auto; }
@@ -1154,7 +2230,19 @@ function adminHtml(page: AdminPage): string {
     .dialog-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; margin-top: 22px; flex-wrap: wrap; }
     .dialog-actions .status-message { margin-right: auto; }
     @media (max-width: 680px) {
-      .grid, .grade-date-grid, .response-sections, .member-grid, .request-comparison, .entry-row, .archive-documents { grid-template-columns: minmax(0, 1fr); }
+      .grid, .grade-date-grid, .application-method-fields, .response-sections, .member-grid, .request-comparison, .entry-row, .archive-documents, .guidance-fields, .guidance-guide-grid, .payment-setup-grid, .result-row { grid-template-columns: minmax(0, 1fr); }
+      #member-list.has-members { overflow: visible; border: 0; border-radius: 0; display: grid; gap: 10px; }
+      .member-table-header { display: none; }
+      .member-card, .member-card:last-child { overflow: hidden; border: 1px solid #dce1eb; border-radius: 9px; }
+      .member-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); min-height: 0; padding: 12px; }
+      .member-summary-item::before { content: attr(data-label); display: block; margin-bottom: 3px; color: #697386; font-size: .7rem; font-weight: 650; }
+      .member-summary-item:nth-child(-n + 2) { grid-column: 1 / -1; }
+      .member-row-actions { grid-column: 1 / -1; display: flex; align-items: center; gap: 10px; }
+      .entry-status-field, .waitlist-field, .payment-field { grid-column: auto; }
+      .entry-bulk-actions { justify-content: stretch; }
+      .entry-bulk-actions button { width: 100%; }
+      .result-document-upload { grid-template-columns: minmax(0, 1fr); }
+      .result-document-upload > input[type="file"], .result-document-upload > button { grid-column: auto; grid-row: auto; }
       input[type="date"], input[type="datetime-local"] {
         display: block;
         inline-size: 100%;
@@ -1206,9 +2294,23 @@ function adminHtml(page: AdminPage): string {
         <div id="grade-date-settings" class="grade-date-settings" hidden><strong>級ごとの開催日 <span class="optional">同じ大会で日程が異なる級だけ変更してください</span></strong><div id="grade-date-grid" class="grade-date-grid"></div></div>
         <label>主催締切日<input type="datetime-local" name="trueDeadline" required></label>
         <label><span>サークル内締切日 <span class="optional">（基本的に主催締切日の3日前を自動入力）</span></span><input type="datetime-local" name="internalDeadline" required></label>
-        <label class="wide">会場 <span class="optional">任意</span><input name="venue" maxlength="200" autocomplete="off"></label>
+        <fieldset class="application-method wide">
+          <legend>申込方法</legend>
+          <label>主催者への申込方法<select name="applicationMethod" required><option value="">選択してください</option><option value="excel_email">Excel名簿に選手名を記入してメール送信</option><option value="excel_form">Excel名簿に選手名を記入してフォームで送信</option><option value="direct_form">フォームに選手名を直接入力して送信</option></select></label>
+          <div id="application-roster-fields" class="application-method-fields" hidden>
+            <label class="wide">申込名簿Excel <span class="file-note">Excel形式、20MBまで。登録時にR2へ保存します</span><input type="file" name="applicationRosterFile" accept="application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,.xls,.xlsx"></label>
+            <label>保存ファイル名<select name="applicationRosterFilenameMode"><option value="automatic">標準名を自動生成</option><option value="custom">主催者指定のファイル名を使用</option></select></label>
+            <label id="application-roster-custom-name" hidden>指定ファイル名 <span class="file-note">拡張子は省略可能</span><input name="applicationRosterCustomFileName" maxlength="240" autocomplete="off" placeholder="主催者指定のファイル名"></label>
+            <div class="wide file-note">標準名：大会名_級_申込名簿_埼玉大学かるた会.xls / .xlsx</div>
+          </div>
+          <div id="application-form-url-field" class="application-method-fields" hidden>
+            <label class="wide">申込フォームURL<input type="url" name="applicationFormUrl" maxlength="500" placeholder="https://..."></label>
+          </div>
+          <div id="application-email-field" class="application-method-fields" hidden>
+            <label class="wide">申込先メールアドレス<input type="email" name="applicationEmail" maxlength="320" autocomplete="email" placeholder="entry@example.com"></label>
+          </div>
+        </fieldset>
         <label class="wide">大会要項PDF <span class="file-note">任意・PDF形式、20MBまで。開催月・大会名・級に自動でリネームします</span><input type="file" name="documentFile" accept="application/pdf,.pdf"></label>
-        <label class="wide">大会要項URL <span class="optional">任意・外部リンクを使う場合</span><input type="url" name="documentUrl" maxlength="500" placeholder="https://..."></label>
       </div>
       <div class="actions"><button id="submit" type="submit">登録して通知を開始</button><span id="result" role="status" aria-live="polite"></span></div>
       <div class="footnote">複数級を選ぶと、共通の申込フロー・締切を持つ同一大会として登録します。級ごとに開催日を変えることもできます。「すべて」は1件の大会として登録し、全級のメンバーへDMを送ります。</div>
@@ -1220,7 +2322,7 @@ function adminHtml(page: AdminPage): string {
       </div>
       <div class="list-controls">
         <label>並び順<select id="tournament-sort"><option value="deadline_asc">締切日が近い順</option><option value="event_asc">開催日が近い順</option><option value="created_desc">登録日が新しい順</option><option value="created_asc">登録日が古い順</option></select></label>
-        <label>ステータス<select id="tournament-status-filter"><option value="all">すべて</option><option value="active">回答受付中</option><option value="applied">申込完了</option><option value="no_participants">参加者なし終了</option><option value="closed">締切済み</option><option value="canceled">中止</option><option value="draft">下書き</option></select></label>
+        <label>ステータス<select id="tournament-status-filter"><option value="default" selected>通常表示（中止・参加者なしを除く）</option><option value="all">すべて</option><option value="active">回答受付中</option><option value="applied">申込完了</option><option value="no_participants">参加者なし終了</option><option value="closed">締切済み</option><option value="canceled">中止</option><option value="draft">下書き</option></select></label>
       </div>
       <div id="list-status" role="status" aria-live="polite">読み込み中…</div>
       <div id="tournament-list"></div>
@@ -1283,6 +2385,10 @@ function adminHtml(page: AdminPage): string {
     const pendingRequestBadge = document.querySelector('#pending-request-badge');
     const gradeDateSettings = document.querySelector('#grade-date-settings');
     const gradeDateGrid = document.querySelector('#grade-date-grid');
+    const applicationRosterFields = document.querySelector('#application-roster-fields');
+    const applicationFormUrlField = document.querySelector('#application-form-url-field');
+    const applicationEmailField = document.querySelector('#application-email-field');
+    const applicationRosterCustomName = document.querySelector('#application-roster-custom-name');
     const statusLabels = {
       draft: '下書き',
       active: '回答受付中',
@@ -1294,11 +2400,11 @@ function adminHtml(page: AdminPage): string {
     const entryStatusLabels = {
       submitted: '申込済み（結果待ち）',
       selected: '出場確定',
-      not_selected: '抽選落選',
+      not_selected: 'キャンセル待ち',
       withdrawn: '辞退',
     };
     const responseLabels = {
-      yes: '参加',
+      yes: '参加希望',
       maybe: '未定',
       no: '不参加',
       pending: '未回答',
@@ -1395,6 +2501,18 @@ function adminHtml(page: AdminPage): string {
       return body.url;
     }
 
+    async function uploadRegistrationRoster(file, title, grades, customFileName) {
+      const upload = new FormData();
+      upload.append('file', file);
+      upload.append('title', title);
+      upload.append('grades', JSON.stringify(grades));
+      if (customFileName) upload.append('customFileName', customFileName);
+      const response = await fetch('/api/application-roster', { method: 'POST', body: upload });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || '申込名簿をアップロードできませんでした。');
+      return body.document;
+    }
+
     function rankLabel(rank) {
       return ['無段', '初段', '二段', '三段', '四段', '五段', '六段', '七段', '八段', '九段', '十段'][Number(rank)] || '段位不明';
     }
@@ -1414,6 +2532,17 @@ function adminHtml(page: AdminPage): string {
       }).formatToParts(new Date(value));
       const get = (type) => parts.find((part) => part.type === type).value;
       return get('year') + '-' + get('month') + '-' + get('day') + 'T' + get('hour') + ':' + get('minute');
+    }
+
+    function defaultPaymentDeadlineInput(organizerDeadline) {
+      const organizer = new Date(organizerDeadline);
+      const jst = new Date(organizer.getTime() + 9 * 60 * 60 * 1000);
+      const candidate = new Date(Date.UTC(jst.getUTCFullYear(), jst.getUTCMonth(), jst.getUTCDate() - 2));
+      while (candidate.getUTCDay() === 0 || candidate.getUTCDay() === 6) {
+        candidate.setUTCDate(candidate.getUTCDate() - 1);
+      }
+      const pad = (value) => String(value).padStart(2, '0');
+      return candidate.getUTCFullYear() + '-' + pad(candidate.getUTCMonth() + 1) + '-' + pad(candidate.getUTCDate()) + 'T23:59';
     }
 
     const gradeOrder = new Map(['A', 'B', 'C', 'D', 'E', 'F', 'beginner'].map((grade, index) => [grade, index]));
@@ -1495,9 +2624,16 @@ function adminHtml(page: AdminPage): string {
       people.forEach((person) => {
         const row = element('div', 'response-person');
         const currentGrade = gradeLabel(person.grade);
+        const entryResult = response === 'yes' && person.entry_status
+          ? ' ／ ' + (entryStatusLabels[person.entry_status] || person.entry_status)
+            + (person.entry_status === 'not_selected' && person.waitlist_number ? ' ' + person.waitlist_number + '番' : '')
+          : '';
+        const paymentResult = response === 'yes' && person.entry_status === 'selected'
+          ? ' ／ ' + (person.payment_status === 'paid' ? '支払済み' : '未納')
+          : '';
         row.append(
           element('span', 'response-grade', currentGrade === previousGrade ? '' : currentGrade),
-          element('span', '', person.display_name + ' (' + (person.display_name_kana || 'よみがな未登録') + ')' + (response === 'yes' && person.entry_status ? ' ／ ' + (entryStatusLabels[person.entry_status] || person.entry_status) : '')),
+          element('span', '', person.display_name + ' (' + (person.display_name_kana || 'よみがな未登録') + ')' + entryResult + paymentResult),
         );
         previousGrade = currentGrade;
         section.append(row);
@@ -1512,11 +2648,103 @@ function adminHtml(page: AdminPage): string {
         .filter((person) => person.response === 'yes')
         .map((person) => ({ ...person, tournament })));
       if (!entries.length) return null;
-      const section = element('section', 'entry-management');
-      section.append(element('h4', '', '申込・抽選結果'));
+      const section = document.createElement('details');
+      section.className = 'entry-management';
+      const summary = document.createElement('summary');
+      summary.textContent = '1. 申込確認名簿（抽選前・' + entries.length + '人）';
+      const body = element('div', 'entry-management-body');
+      section.append(summary, body);
+
+      const confirmation = tournaments[0].confirmation_roster;
+      const confirmationBox = element('section', 'stage-box');
+      confirmationBox.append(
+        element('h5', '', '申込確認名簿'),
+        element('p', 'archive-note', '申込者へ名簿をDMします。確認ボタンは設けず、誤りがある場合のみ大会担当者へDMしてもらいます。PDF・Word・Excel、20MBまで登録できます。'),
+      );
+      const confirmationFile = document.createElement('input');
+      confirmationFile.type = 'file';
+      confirmationFile.accept = 'application/pdf,.pdf,application/msword,.doc,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.docx,application/vnd.ms-excel,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,.xlsx';
+      const confirmationCurrent = element('div', 'guidance-current');
+      if (confirmation?.document_url) {
+        const link = element('a', '', confirmation.file_name || '登録済み確認名簿を開く');
+        link.href = confirmation.document_url;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        confirmationCurrent.append('登録済み：', link);
+      } else {
+        confirmationCurrent.textContent = '確認名簿は未登録です。';
+      }
+      const confirmationActions = element('div', 'stage-actions');
+      const saveConfirmation = element('button', 'secondary', confirmation ? '名簿を差し替える' : '名簿を保存');
+      saveConfirmation.type = 'button';
+      const sendConfirmation = element('button', 'success', '申込者へ確認名簿をDM');
+      sendConfirmation.type = 'button';
+      sendConfirmation.disabled = !confirmation;
+      const confirmationMessage = element('span', 'entry-result', '');
+      saveConfirmation.addEventListener('click', async () => {
+        const selected = confirmationFile.files?.[0];
+        if (!selected) { confirmationMessage.textContent = '名簿ファイルを選択してください。'; return; }
+        saveConfirmation.disabled = true;
+        confirmationMessage.textContent = '保存中…';
+        const form = new FormData();
+        form.append('file', selected);
+        form.append('tournamentIds', JSON.stringify(tournaments.map((item) => item.tournament_id)));
+        try {
+          const response = await fetch('/api/confirmation-roster', { method: 'POST', body: form });
+          const result = await response.json();
+          if (!response.ok) throw new Error(result.error || '確認名簿を保存できませんでした。');
+          await loadTournaments();
+        } catch (error) {
+          confirmationMessage.textContent = error instanceof Error ? error.message : '確認名簿を保存できませんでした。';
+          saveConfirmation.disabled = false;
+        }
+      });
+      sendConfirmation.addEventListener('click', async () => {
+        if (!confirm('申込者' + entries.length + '人へ、保存済みの申込確認名簿をDM送信しますか？')) return;
+        sendConfirmation.disabled = true;
+        confirmationMessage.textContent = '送信予約中…';
+        try {
+          const response = await fetch('/api/confirmation-roster/send', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tournamentIds: tournaments.map((item) => item.tournament_id) }),
+          });
+          const result = await response.json();
+          if (!response.ok) throw new Error(result.error || '確認名簿DMを予約できませんでした。');
+          confirmationMessage.textContent = result.queued + '件のDMを予約しました。' + (result.unavailable ? ' DM対象外 ' + result.unavailable + '件。' : '');
+        } catch (error) {
+          confirmationMessage.textContent = error instanceof Error ? error.message : '確認名簿DMを予約できませんでした。';
+          sendConfirmation.disabled = false;
+        }
+      });
+      confirmationActions.append(saveConfirmation, sendConfirmation, confirmationMessage);
+      confirmationBox.append(confirmationFile, confirmationCurrent, confirmationActions);
+      body.append(confirmationBox);
+
+      return section;
+    }
+
+    function renderLotteryManagement(tournaments) {
+      if (!tournaments.some((item) => item.status === 'applied' || item.status === 'closed')) return null;
+      const entries = tournaments.flatMap((tournament) => tournament.responses
+        .filter((person) => person.response === 'yes')
+        .map((person) => ({ ...person, tournament })));
+      if (!entries.length) return null;
+      const tracksPayment = tournaments[0].participant_guidance?.payment_collection_method !== 'onsite_cash';
+      const body = element('section', 'stage-box');
+      body.append(
+        element('h5', '', tracksPayment ? '選手ごとの当落・入金状態' : '選手ごとの当落'),
+        element('p', 'archive-note', tracksPayment
+          ? '抽選結果、キャンセル待ち番号、出場確定者の入金状態を入力し、全員分をまとめて保存します。'
+          : '抽選結果とキャンセル待ち番号を入力し、全員分をまとめて保存します。当日現金のため入金管理は行いません。'),
+      );
+
+      const entryControls = [];
       entries.forEach(({ tournament, ...person }) => {
         const row = element('div', 'entry-row');
-        const name = element('span', '', tournamentGradeLabel(tournament) + ' ' + person.display_name + ' (' + (person.display_name_kana || 'よみがな未登録') + ')');
+        const name = element('span', 'entry-name', tournamentGradeLabel(tournament) + ' ' + person.display_name + ' (' + (person.display_name_kana || 'よみがな未登録') + ')');
+        const statusField = element('div', 'entry-field entry-status-field');
+        statusField.append(element('span', 'entry-field-label', '抽選結果'));
         const select = document.createElement('select');
         Object.entries(entryStatusLabels).forEach(([value, label]) => {
           const option = document.createElement('option');
@@ -1525,116 +2753,530 @@ function adminHtml(page: AdminPage): string {
           option.selected = value === (person.entry_status || 'submitted');
           select.append(option);
         });
-        const save = element('button', 'secondary', '保存');
-        save.type = 'button';
-        const resultInput = document.createElement('input');
-        resultInput.value = person.result_text || '';
-        resultInput.maxLength = 200;
-        resultInput.placeholder = '例：3回戦敗退、優勝';
-        const saveResult = element('button', 'secondary', '成績を保存');
-        saveResult.type = 'button';
-        const message = element('span', 'entry-result', '');
-        const refreshResultState = () => {
-          const eligible = select.value === 'submitted' || select.value === 'selected';
-          resultInput.disabled = !eligible;
-          saveResult.disabled = !eligible;
+        const waitlistInput = document.createElement('input');
+        waitlistInput.type = 'number';
+        waitlistInput.min = '1';
+        waitlistInput.max = '9999';
+        waitlistInput.step = '1';
+        waitlistInput.inputMode = 'numeric';
+        waitlistInput.placeholder = '待ち番号';
+        waitlistInput.value = person.waitlist_number ? String(person.waitlist_number) : '';
+        waitlistInput.setAttribute('aria-label', person.display_name + 'のキャンセル待ち番号');
+        statusField.append(select);
+
+        const waitlistField = element('div', 'entry-field waitlist-field');
+        waitlistField.append(element('span', 'entry-field-label', '待ち番号'));
+        const waitlistControl = element('div', 'waitlist-control');
+        waitlistControl.append(waitlistInput, element('span', 'waitlist-suffix', '番'));
+        waitlistField.append(waitlistControl);
+
+        const paymentField = element('div', 'entry-field payment-field');
+        paymentField.append(element('span', 'entry-field-label', '入金状態'));
+        const paymentSelect = document.createElement('select');
+        [['unpaid', '未納'], ['paid', '支払済み']].forEach(([value, label]) => {
+          const option = document.createElement('option');
+          option.value = value;
+          option.textContent = label;
+          option.selected = value === (person.payment_status || 'unpaid');
+          paymentSelect.append(option);
+        });
+        paymentField.append(paymentSelect);
+
+        const refreshEntryState = () => {
+          const waitlisted = select.value === 'not_selected';
+          waitlistField.hidden = !waitlisted;
+          waitlistInput.disabled = !waitlisted;
+          waitlistInput.required = waitlisted;
+          paymentField.hidden = !tracksPayment || select.value !== 'selected';
         };
-        select.addEventListener('change', refreshResultState);
-        refreshResultState();
-        save.addEventListener('click', async () => {
-          save.disabled = true;
-          message.textContent = '保存中…';
-          try {
-            const response = await fetch('/api/tournaments/' + encodeURIComponent(tournament.tournament_id) + '/entries/' + encodeURIComponent(person.member_id), {
-              method: 'PATCH',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ status: select.value }),
-            });
-            const body = await response.json();
-            if (!response.ok) throw new Error(body.error || '結果を保存できませんでした。');
-            message.textContent = body.changed ? '保存しました。' : '変更はありません。';
-            await loadTournaments();
-          } catch (error) {
-            message.textContent = error instanceof Error ? error.message : '結果を保存できませんでした。';
-          } finally {
-            save.disabled = false;
-          }
+        select.addEventListener('change', refreshEntryState);
+        refreshEntryState();
+        entryControls.push({
+          tournamentId: tournament.tournament_id,
+          memberId: person.member_id,
+          displayName: person.display_name,
+          select,
+          waitlistInput,
+          paymentSelect,
         });
-        saveResult.addEventListener('click', async () => {
-          saveResult.disabled = true;
-          message.textContent = '成績を保存中…';
-          try {
-            const response = await fetch('/api/tournaments/' + encodeURIComponent(tournament.tournament_id) + '/entries/' + encodeURIComponent(person.member_id) + '/result', {
-              method: 'PATCH',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ resultText: resultInput.value }),
-            });
-            const body = await response.json();
-            if (!response.ok) throw new Error(body.error || '個人成績を保存できませんでした。');
-            message.textContent = body.changed ? '成績を保存しました。' : '成績の変更はありません。';
-          } catch (error) {
-            message.textContent = error instanceof Error ? error.message : '個人成績を保存できませんでした。';
-          } finally {
-            refreshResultState();
-          }
-        });
-        row.append(name, select, save, resultInput, saveResult, message);
-        section.append(row);
+        row.append(name, statusField, waitlistField, paymentField);
+        body.append(row);
       });
+
+      const bulkActions = element('div', 'entry-bulk-actions');
+      const bulkMessage = element('span', 'entry-result', '');
+      const saveAll = element('button', 'secondary', '全員分の変更を保存');
+      saveAll.type = 'button';
+      saveAll.addEventListener('click', async () => {
+        const changes = [];
+        for (const control of entryControls) {
+          const waitlistNumber = control.select.value === 'not_selected'
+            ? Number(control.waitlistInput.value)
+            : null;
+          if (
+            control.select.value === 'not_selected' &&
+            (!Number.isInteger(waitlistNumber) || waitlistNumber < 1 || waitlistNumber > 9999)
+          ) {
+            bulkMessage.textContent = control.displayName + 'のキャンセル待ち番号を1〜9999の整数で入力してください。';
+            control.waitlistInput.focus();
+            return;
+          }
+          changes.push({
+            tournamentId: control.tournamentId,
+            memberId: control.memberId,
+            status: control.select.value,
+            waitlistNumber,
+            paymentStatus: control.select.value === 'selected' ? control.paymentSelect.value : null,
+          });
+        }
+        saveAll.disabled = true;
+        bulkMessage.textContent = '全員分を保存中…';
+        try {
+          const response = await fetch('/api/tournament-entries/batch', {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ entries: changes }),
+          });
+          const result = await response.json();
+          if (!response.ok) throw new Error(result.error || '全員分の変更を保存できませんでした。');
+          bulkMessage.textContent = result.changedCount
+            ? result.changedCount + '人分の変更を保存しました。'
+            : '変更はありません。';
+          await loadTournaments();
+        } catch (error) {
+          bulkMessage.textContent = error instanceof Error ? error.message : '全員分の変更を保存できませんでした。';
+          saveAll.disabled = false;
+        }
+      });
+      bulkActions.append(bulkMessage, saveAll);
+      body.append(bulkActions);
+      return body;
+    }
+
+    function renderArchiveDocumentUpload(tournaments, type, label, allowExcel) {
+      const documents = tournaments[0].archive_documents || [];
+      const box = element('div', 'archive-document');
+      box.append(element('strong', '', label));
+      const current = documents.find((item) => item.document_type === type);
+      if (current) {
+        const link = element('a', '', current.file_name || (label + 'を開く'));
+        link.href = current.document_url;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        box.append(link);
+      } else {
+        box.append(element('span', 'response-empty', '未登録'));
+      }
+      const file = document.createElement('input');
+      file.type = 'file';
+      file.accept = allowExcel
+        ? 'application/pdf,.pdf,application/vnd.ms-excel,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,.xlsx'
+        : 'application/pdf,.pdf';
+      const upload = element('button', 'secondary', current ? '差し替える' : 'アップロード');
+      upload.type = 'button';
+      const message = element('span', 'entry-result', '');
+      upload.addEventListener('click', async () => {
+        const selected = file.files?.[0];
+        if (!selected) {
+          message.textContent = allowExcel ? 'PDFまたはExcelを選択してください。' : 'PDFを選択してください。';
+          return;
+        }
+        upload.disabled = true;
+        message.textContent = 'アップロード中…';
+        const form = new FormData();
+        form.append('file', selected);
+        form.append('documentType', type);
+        form.append('tournamentIds', JSON.stringify(tournaments.map((item) => item.tournament_id)));
+        try {
+          const response = await fetch('/api/archive-documents', { method: 'POST', body: form });
+          const responseBody = await response.json();
+          if (!response.ok) throw new Error(responseBody.error || 'アップロードできませんでした。');
+          await loadTournaments();
+        } catch (error) {
+          message.textContent = error instanceof Error ? error.message : 'アップロードできませんでした。';
+          upload.disabled = false;
+        }
+      });
+      box.append(file, upload, message);
+      return box;
+    }
+
+    function renderPostLotteryManagement(tournaments) {
+      if (!tournaments.some((item) => item.status === 'applied' || item.status === 'closed')) return null;
+      const section = document.createElement('details');
+      section.className = 'archive-management';
+      const summary = document.createElement('summary');
+      summary.textContent = '2. 抽選結果・確定名簿・参加費・当日案内';
+      const body = element('div', 'archive-management-body');
+      section.append(summary, body);
+      body.append(
+        element('p', 'archive-note', '抽選結果と確定名簿は大会お知らせチャンネルへ送信し、参加費と当日案内は出場確定者だけへDMします。キャンセル待ちの選手にはDMしません。'),
+      );
+      body.append(renderArchiveDocumentUpload(tournaments, 'roster', '確定名簿（PDF・Excel）', true));
+      const lotteryManagement = renderLotteryManagement(tournaments);
+      if (lotteryManagement) body.append(lotteryManagement);
+      const guidance = tournaments[0].participant_guidance;
+      const guidanceBox = element('section', 'guidance-management');
+      guidanceBox.append(
+        element('h5', '', '参加費・当日案内'),
+        element('p', 'archive-note', '参加者には級別参加費と支払い方法だけを案内します。主催者の振込先情報は大会担当者だけが参照できます。'),
+      );
+
+      const feeGrades = [...new Set(tournaments.flatMap((tournament) => tournament.responses
+        .filter((person) => person.response === 'yes')
+        .map((person) => tournament.all_grades === 1 ? person.grade : tournament.grade)))]
+        .sort((left, right) => (gradeOrder.get(left) ?? 99) - (gradeOrder.get(right) ?? 99));
+      const existingFees = new Map((tournaments[0].participation_fees || [])
+        .map((fee) => [fee.grade, fee.amount_yen]));
+      const feeGrid = element('div', 'fee-grid');
+      feeGrid.append(element('h6', '', '級別参加費（参加者DMに表示）'));
+      const feeInputs = new Map();
+      feeGrades.forEach((grade) => {
+        const label = element('label', '', grade === 'beginner' ? '初心者級' : grade + '級');
+        const select = document.createElement('select');
+        const placeholder = document.createElement('option');
+        placeholder.value = '';
+        placeholder.textContent = '選択してください';
+        select.append(placeholder);
+        [500, 1000, 1500, 2000, 2500, 3000].forEach((amount) => {
+          const option = document.createElement('option');
+          option.value = String(amount);
+          option.textContent = amount.toLocaleString('ja-JP') + '円';
+          option.selected = existingFees.get(grade) === amount;
+          select.append(option);
+        });
+        label.append(select);
+        feeInputs.set(grade, select);
+        feeGrid.append(label);
+      });
+
+      const paymentMethodLabel = element('label', '', '参加費の支払い方法');
+      const paymentMethod = document.createElement('select');
+      [
+        ['advance_manager', '事前集金（参加者 → 大会担当者 → 主催者）'],
+        ['onsite_cash', '当日現金（参加者 → 主催者）'],
+      ].forEach(([value, label]) => {
+        const option = document.createElement('option');
+        option.value = value;
+        option.textContent = label;
+        option.selected = value === (guidance?.payment_collection_method || 'advance_manager');
+        paymentMethod.append(option);
+      });
+      paymentMethodLabel.append(paymentMethod);
+
+      const guidanceText = document.createElement('textarea');
+      guidanceText.maxLength = 3500;
+      guidanceText.placeholder = '参加者への案内本文（任意）';
+      guidanceText.value = guidance?.body_text || '';
+
+      const organizerBox = element('div', 'organizer-payment-box');
+      organizerBox.append(
+        element('h6', '', '主催者への振込情報（大会担当者のみ）'),
+        element('p', 'organizer-payment-note', '参加者DMには表示されません。主催者への一括振込に必要な口座・名義などを保存します。'),
+      );
+      const organizerSourceLabel = element('label', 'organizer-payment-selector', '振込情報の登録方法');
+      const organizerSource = document.createElement('select');
+      [
+        ['text', 'メール本文を転記'],
+        ['file', '独立したPDF・Wordファイル'],
+        ['guidance', '当日案内ファイル・本文に記載'],
+      ].forEach(([value, label]) => {
+        const option = document.createElement('option');
+        option.value = value;
+        option.textContent = label;
+        option.selected = value === (guidance?.organizer_payment_source || 'text');
+        organizerSource.append(option);
+      });
+      organizerSourceLabel.append(organizerSource);
+      const organizerDetailsLabel = element('label', '', '主催者への振込先・振込方法');
+      const organizerDetails = document.createElement('textarea');
+      organizerDetails.maxLength = 3500;
+      organizerDetails.placeholder = 'メール本文にある口座情報、振込名義、注意事項など';
+      organizerDetails.value = guidance?.payment_details || '';
+      organizerDetailsLabel.append(organizerDetails);
+      const organizerFileLabel = element('label', '', '主催者振込情報ファイル');
+      const organizerFile = document.createElement('input');
+      organizerFile.type = 'file';
+      organizerFile.accept = 'application/pdf,.pdf,application/msword,.doc,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.docx';
+      organizerFileLabel.append(organizerFile);
+      const organizerCurrent = element('div', 'guidance-current');
+      if (guidance?.organizer_payment_document_url) {
+        const link = element('a', '', guidance.organizer_payment_file_name || '登録済み振込情報を開く');
+        link.href = guidance.organizer_payment_document_url;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        organizerCurrent.append('登録済みファイル：', link);
+      } else {
+        organizerCurrent.textContent = '振込情報ファイルは未登録です。';
+      }
+
+      const organizerPaymentDeadlineLabel = element('label', '', '主催者への振込期限');
+      const organizerPaymentDeadline = document.createElement('input');
+      organizerPaymentDeadline.type = 'date';
+      const organizerPaymentTime = document.createElement('input');
+      organizerPaymentTime.type = 'time';
+      organizerPaymentTime.step = '60';
+      const organizerExistingValue = guidance?.organizer_payment_deadline
+        ? dateTimeInputValue(guidance.organizer_payment_deadline)
+        : '';
+      organizerPaymentDeadline.value = organizerExistingValue ? organizerExistingValue.slice(0, 10) : '';
+      organizerPaymentTime.value = organizerExistingValue ? organizerExistingValue.slice(11, 16) : '23:59';
+      const organizerDeadlineControl = element('div', 'deadline-control');
+      organizerDeadlineControl.append(organizerPaymentDeadline, organizerPaymentTime);
+      organizerPaymentDeadlineLabel.append(organizerDeadlineControl);
+      const paymentDeadlineLabel = element('label', '', 'サークル内支払期限');
+      const paymentDeadline = document.createElement('input');
+      paymentDeadline.type = 'date';
+      const paymentTime = document.createElement('input');
+      paymentTime.type = 'time';
+      paymentTime.step = '60';
+      const paymentExistingValue = guidance?.payment_deadline
+        ? dateTimeInputValue(guidance.payment_deadline)
+        : '';
+      paymentDeadline.value = paymentExistingValue ? paymentExistingValue.slice(0, 10) : '';
+      paymentTime.value = paymentExistingValue ? paymentExistingValue.slice(11, 16) : '23:59';
+      const paymentDeadlineControl = element('div', 'deadline-control');
+      paymentDeadlineControl.append(paymentDeadline, paymentTime);
+      paymentDeadlineLabel.append(paymentDeadlineControl);
+      organizerPaymentDeadline.addEventListener('change', () => {
+        if (!organizerPaymentDeadline.value) return;
+        const defaultValue = defaultPaymentDeadlineInput(
+          organizerPaymentDeadline.value + 'T' + organizerPaymentTime.value + ':00+09:00',
+        );
+        paymentDeadline.value = defaultValue.slice(0, 10);
+        paymentTime.value = defaultValue.slice(11, 16);
+      });
+      const organizerFileBox = element('div', 'guidance-file-box');
+      organizerFileBox.append(organizerFileLabel, organizerCurrent);
+      const organizerGuidanceNote = element('p', 'organizer-payment-note', '上部で登録した当日案内本文または案内ファイルを、主催者への振込情報として参照します。追加の入力は不要です。');
+      const organizerBranch = element('div', 'organizer-payment-branch');
+      organizerBranch.append(organizerDetailsLabel, organizerFileBox, organizerGuidanceNote);
+      const organizerDeadlineFields = element('div', 'guidance-fields');
+      organizerDeadlineFields.append(organizerPaymentDeadlineLabel, paymentDeadlineLabel);
+      organizerBox.append(organizerSourceLabel, organizerBranch, organizerDeadlineFields);
+      const onsiteNote = element('p', 'organizer-payment-note', '参加者には「大会当日に現金で主催者へ直接支払い」と案内します。事前の入金管理や未納リマインダーは行いません。');
+
+      const refreshPaymentFields = () => {
+        const advance = paymentMethod.value === 'advance_manager';
+        organizerBox.hidden = !advance;
+        onsiteNote.hidden = advance;
+        organizerDetailsLabel.hidden = organizerSource.value !== 'text';
+        organizerFileBox.hidden = organizerSource.value !== 'file';
+        organizerGuidanceNote.hidden = organizerSource.value !== 'guidance';
+      };
+      paymentMethod.addEventListener('change', refreshPaymentFields);
+      organizerSource.addEventListener('change', refreshPaymentFields);
+      refreshPaymentFields();
+
+      const guidanceFile = document.createElement('input');
+      guidanceFile.type = 'file';
+      guidanceFile.accept = 'application/pdf,.pdf,application/msword,.doc,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.docx';
+      const currentGuidance = element('div', 'guidance-current');
+      if (guidance?.document_url) {
+        const link = element('a', '', guidance.file_name || '登録済み案内ファイルを開く');
+        link.href = guidance.document_url;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        currentGuidance.append('登録済みファイル：', link);
+      } else {
+        currentGuidance.textContent = '案内ファイルは未登録です。';
+      }
+      const guidanceActions = element('div', 'guidance-actions');
+      const saveGuidance = element('button', 'secondary', guidance ? '参加費・案内を更新' : '参加費・案内を保存');
+      saveGuidance.type = 'button';
+      const sendGuidance = element('button', 'success', '抽選結果・確定名簿・当日案内を送信');
+      sendGuidance.type = 'button';
+      sendGuidance.disabled = !guidance || !tournaments[0].participation_fees?.length;
+      const guidanceMessage = element('span', 'entry-result', guidance
+        ? '現在版: ' + guidance.sent_count + '件送信済み、' + guidance.pending_count + '件送信待ち' + (guidance.failed_count ? '、' + guidance.failed_count + '件失敗' : '')
+        : '案内を保存すると送信できます。');
+      saveGuidance.addEventListener('click', async () => {
+        const selected = guidanceFile.files?.[0];
+        if (!guidanceText.value.trim() && !selected && !guidance?.document_url) {
+          guidanceMessage.textContent = '本文または案内ファイルを入力してください。';
+          return;
+        }
+        const feesByGrade = {};
+        for (const [grade, input] of feeInputs) {
+          const amount = Number(input.value);
+          if (!input.value || !Number.isInteger(amount) || amount < 500 || amount > 3000 || amount % 500 !== 0) {
+            guidanceMessage.textContent = (grade === 'beginner' ? '初心者級' : grade + '級') + 'の参加費を500〜3,000円の500円刻みで選択してください。';
+            input.focus();
+            return;
+          }
+          feesByGrade[grade] = amount;
+        }
+        const advance = paymentMethod.value === 'advance_manager';
+        if (advance && organizerSource.value === 'text' && !organizerDetails.value.trim()) {
+          guidanceMessage.textContent = '主催者への振込先・振込方法を入力してください。';
+          return;
+        }
+        if (advance && organizerSource.value === 'file' && !organizerFile.files?.[0] && !guidance?.organizer_payment_document_url) {
+          guidanceMessage.textContent = '主催者振込情報のPDFまたはWordを選択してください。';
+          return;
+        }
+        if (advance && (!organizerPaymentDeadline.value || !organizerPaymentTime.value || !paymentDeadline.value || !paymentTime.value)) {
+          guidanceMessage.textContent = '主催者への振込期限とサークル内支払期限を入力してください。';
+          return;
+        }
+        saveGuidance.disabled = true;
+        guidanceMessage.textContent = '保存中…';
+        const form = new FormData();
+        form.append('bodyText', guidanceText.value);
+        form.append('feesByGrade', JSON.stringify(feesByGrade));
+        form.append('paymentCollectionMethod', paymentMethod.value);
+        form.append('organizerPaymentSource', organizerSource.value);
+        form.append('organizerPaymentDetails', organizerDetails.value);
+        if (advance) {
+          form.append('organizerPaymentDeadline', localJstToIso(organizerPaymentDeadline.value + 'T' + organizerPaymentTime.value));
+          form.append('paymentDeadline', localJstToIso(paymentDeadline.value + 'T' + paymentTime.value));
+        }
+        form.append('tournamentIds', JSON.stringify(tournaments.map((item) => item.tournament_id)));
+        if (selected) form.append('file', selected);
+        if (organizerFile.files?.[0]) form.append('organizerPaymentFile', organizerFile.files[0]);
+        try {
+          const response = await fetch('/api/participant-guidance', { method: 'POST', body: form });
+          const result = await response.json();
+          if (!response.ok) throw new Error(result.error || '案内を保存できませんでした。');
+          await loadTournaments();
+        } catch (error) {
+          guidanceMessage.textContent = error instanceof Error ? error.message : '案内を保存できませんでした。';
+          saveGuidance.disabled = false;
+        }
+      });
+      sendGuidance.addEventListener('click', async () => {
+        const selectedCount = new Set(tournaments.flatMap((tournament) => tournament.responses.filter((person) => person.entry_status === 'selected').map((person) => person.member_id))).size;
+        const paymentDescription = paymentMethod.value === 'onsite_cash' ? '当日現金の案内' : '級別参加費と事前支払い案内';
+        if (!confirm('抽選結果と確定名簿を大会お知らせチャンネルへ送り、出場確定者' + selectedCount + '人へ当日案内・' + paymentDescription + 'をDM送信しますか？')) return;
+        sendGuidance.disabled = true;
+        guidanceMessage.textContent = '送信予約中…';
+        try {
+          const response = await fetch('/api/lottery-results/send', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tournamentIds: tournaments.map((item) => item.tournament_id) }),
+          });
+          const result = await response.json();
+          if (!response.ok) throw new Error(result.error || '抽選結果と確定者案内を予約できませんでした。');
+          guidanceMessage.textContent = 'チャンネル告知 ' + result.channelQueued + '件、確定者DM ' + result.dmQueued + '件を予約しました。' + (result.dmUnavailable ? ' DM対象外 ' + result.dmUnavailable + '件。' : '');
+        } catch (error) {
+          guidanceMessage.textContent = error instanceof Error ? error.message : '抽選結果と確定者案内を予約できませんでした。';
+          sendGuidance.disabled = false;
+        }
+      });
+      guidanceActions.append(saveGuidance, sendGuidance, guidanceMessage);
+
+      const guidanceSection = element('section', 'guidance-subsection');
+      guidanceSection.append(element('h6', '', '当日案内'));
+      const guidanceGuideGrid = element('div', 'guidance-guide-grid');
+      const guidanceTextLabel = element('label', '', '当日案内本文');
+      guidanceTextLabel.append(guidanceText);
+      const guidanceFileBox = element('div', 'guidance-file-box');
+      const guidanceFileLabel = element('label', '', '当日案内ファイル（PDF・Word）');
+      guidanceFileLabel.append(guidanceFile);
+      guidanceFileBox.append(guidanceFileLabel, currentGuidance);
+      guidanceGuideGrid.append(guidanceTextLabel, guidanceFileBox);
+      guidanceSection.append(guidanceGuideGrid);
+
+      const paymentSection = element('section', 'guidance-subsection');
+      paymentSection.append(element('h6', '', '参加費・支払い方法'));
+      const paymentSetupGrid = element('div', 'payment-setup-grid');
+      paymentSetupGrid.append(paymentMethodLabel, feeGrid);
+      paymentSection.append(paymentSetupGrid, onsiteNote);
+
+      guidanceBox.append(guidanceSection, paymentSection, organizerBox, guidanceActions);
+      body.append(guidanceBox);
       return section;
     }
 
     function renderArchiveManagement(tournaments) {
       if (!tournaments.some((item) => item.status === 'applied' || item.status === 'closed')) return null;
-      const section = element('section', 'archive-management');
-      section.append(
-        element('h4', '', '大会記録'),
-        element('p', 'archive-note', '要項・選手名簿・結果ファイル・全出場者の個人成績が揃うと、メンバーポータルの「過去の大会結果」へ公開できます。名簿と結果ファイルはPDF形式・20MBまでです。'),
+      const section = document.createElement('details');
+      section.className = 'archive-management';
+      const summary = document.createElement('summary');
+      summary.textContent = '3. 大会結果';
+      const body = element('div', 'archive-management-body result-archive-body');
+      section.append(summary, body);
+      const resultDocumentUpload = renderArchiveDocumentUpload(
+        tournaments,
+        'results',
+        '大会結果ファイル（PDF・Excel）',
+        true,
       );
-      const documents = tournaments[0].archive_documents || [];
-      const documentGrid = element('div', 'archive-documents');
-      [['roster', '選手名簿'], ['results', '結果ファイル']].forEach(([type, label]) => {
-        const box = element('div', 'archive-document');
-        box.append(element('strong', '', label));
-        const current = documents.find((item) => item.document_type === type);
-        if (current) {
-          const link = element('a', '', current.file_name || (label + 'を開く'));
-          link.href = current.document_url;
-          link.target = '_blank';
-          link.rel = 'noopener noreferrer';
-          box.append(link);
-        } else {
-          box.append(element('span', 'response-empty', '未登録'));
+      resultDocumentUpload.classList.add('result-document-upload');
+      body.append(
+        element('p', 'archive-note', '結果ファイルと全出場者の個人成績が揃うと、メンバーポータルの「過去の大会結果」へ公開できます。'),
+        resultDocumentUpload,
+      );
+
+      const resultBox = element('section', 'stage-box result-stage');
+      resultBox.append(
+        element('h5', '', '選手ごとの個人成績'),
+        element('p', 'archive-note', '大会終了後に、出場者ごとの成績を登録します。'),
+      );
+      const resultEntries = tournaments.flatMap((tournament) => tournament.responses
+        .filter((person) => person.response === 'yes' && (person.entry_status === 'selected' || person.entry_status === 'submitted'))
+        .map((person) => ({ ...person, tournament })));
+      const resultList = element('div', 'result-list');
+      if (!resultEntries.length) {
+        resultList.append(element('div', 'response-empty', '成績を登録できる出場者はいません。'));
+      }
+      resultEntries.forEach(({ tournament, ...person }) => {
+        const row = element('div', 'result-row');
+        const name = element('span', 'entry-name', tournamentGradeLabel(tournament) + ' ' + person.display_name + ' (' + (person.display_name_kana || 'よみがな未登録') + ')');
+        const input = document.createElement('select');
+        const resultOptions = ['1回戦敗退', '2回戦敗退', '3回戦敗退', '4回戦敗退', '4位入賞', '3位入賞', '準優勝', '優勝'];
+        const placeholder = document.createElement('option');
+        placeholder.value = '';
+        placeholder.textContent = '成績を選択';
+        input.append(placeholder);
+        if (person.result_text && !resultOptions.includes(person.result_text)) {
+          const legacy = document.createElement('option');
+          legacy.value = person.result_text;
+          legacy.textContent = person.result_text + '（旧データ）';
+          legacy.selected = true;
+          legacy.disabled = true;
+          input.append(legacy);
         }
-        const file = document.createElement('input');
-        file.type = 'file';
-        file.accept = 'application/pdf,.pdf';
-        const upload = element('button', 'secondary', current ? '差し替える' : 'アップロード');
-        upload.type = 'button';
-        const message = element('span', 'entry-result', '');
-        upload.addEventListener('click', async () => {
-          const selected = file.files?.[0];
-          if (!selected) { message.textContent = 'PDFを選択してください。'; return; }
-          upload.disabled = true;
-          message.textContent = 'アップロード中…';
-          const form = new FormData();
-          form.append('file', selected);
-          form.append('documentType', type);
-          form.append('tournamentIds', JSON.stringify(tournaments.map((item) => item.tournament_id)));
+        resultOptions.forEach((value) => {
+          const option = document.createElement('option');
+          option.value = value;
+          option.textContent = value;
+          option.selected = value === person.result_text;
+          input.append(option);
+        });
+        const save = element('button', 'secondary', '成績を保存');
+        save.type = 'button';
+        const result = element('span', 'entry-result', '');
+        save.addEventListener('click', async () => {
+          if (!input.value || !resultOptions.includes(input.value)) {
+            result.textContent = '個人成績を選択してください。';
+            input.focus();
+            return;
+          }
+          save.disabled = true;
+          result.textContent = '保存中…';
           try {
-            const response = await fetch('/api/archive-documents', { method: 'POST', body: form });
-            const body = await response.json();
-            if (!response.ok) throw new Error(body.error || 'アップロードできませんでした。');
-            await loadTournaments();
+            const response = await fetch('/api/tournaments/' + encodeURIComponent(tournament.tournament_id) + '/entries/' + encodeURIComponent(person.member_id) + '/result', {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ resultText: input.value }),
+            });
+            const responseBody = await response.json();
+            if (!response.ok) throw new Error(responseBody.error || '個人成績を保存できませんでした。');
+            result.textContent = responseBody.changed ? '成績を保存しました。' : '変更はありません。';
           } catch (error) {
-            message.textContent = error instanceof Error ? error.message : 'アップロードできませんでした。';
-            upload.disabled = false;
+            result.textContent = error instanceof Error ? error.message : '個人成績を保存できませんでした。';
+          } finally {
+            save.disabled = false;
           }
         });
-        box.append(file, upload, message);
-        documentGrid.append(box);
+        row.append(name, input, save, result);
+        resultList.append(row);
       });
-      section.append(documentGrid);
+      resultBox.append(resultList);
+      body.append(resultBox);
+
       const published = tournaments.every((item) => Boolean(item.archive_published_at));
       const actions = element('div', 'archive-actions');
       const publish = element('button', published ? 'danger' : 'success', published ? '公開を取り下げる' : '過去大会として公開');
@@ -1660,54 +3302,17 @@ function adminHtml(page: AdminPage): string {
         }
       });
       actions.append(publish, message);
-      section.append(actions);
+      body.append(actions);
       return section;
-    }
-
-    function renderTournamentStatusControl(tournament) {
-      const statusRow = element('div', 'status-row');
-      const labelText = tournament.all_grades === 1 ? 'すべて' : gradeLabel(tournament.grade);
-      const statusLabel = element('label', '', labelText + ' ステータス');
-      const select = document.createElement('select');
-      Object.entries(statusLabels).filter(([value]) => value !== 'no_participants').forEach(([value, label]) => {
-        const option = document.createElement('option');
-        option.value = value;
-        option.textContent = label;
-        option.selected = value === tournament.status;
-        select.append(option);
-      });
-      statusLabel.append(select);
-      const updateButton = element('button', 'secondary', '変更を保存');
-      updateButton.type = 'button';
-      const statusMessage = element('span', 'status-message', '');
-      updateButton.addEventListener('click', async () => {
-        updateButton.disabled = true;
-        statusMessage.className = 'status-message';
-        statusMessage.textContent = '変更中…';
-        try {
-          const response = await fetch('/api/tournaments/' + encodeURIComponent(tournament.tournament_id) + '/status', {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ status: select.value }),
-          });
-          const body = await response.json();
-          if (!response.ok) throw new Error(body.error || '変更に失敗しました。');
-          statusMessage.textContent = body.changed ? '変更しました。' : '変更はありません。';
-          await loadTournaments();
-        } catch (error) {
-          statusMessage.className = 'status-message error';
-          statusMessage.textContent = error instanceof Error ? error.message : '変更に失敗しました。';
-        } finally {
-          updateButton.disabled = false;
-        }
-      });
-      statusRow.append(statusLabel, updateButton, statusMessage);
-      return statusRow;
     }
 
     function renderTournament(tournaments) {
       const tournament = tournaments[0];
       const card = element('article', 'tournament-card');
+      card.dataset.tournamentGroup = tournaments
+        .map((item) => item.tournament_id)
+        .sort()
+        .join(',');
       const heading = element('div', 'card-heading');
       const statuses = [...new Set(tournaments.map(tournamentDisplayStatus))];
       heading.append(
@@ -1732,55 +3337,129 @@ function adminHtml(page: AdminPage): string {
         meta.append(document.createTextNode(' ／ '), link);
       }
 
+      if (tournament.application_method) {
+        const applicationLabels = {
+          excel_email: 'Excel名簿をメール送信',
+          excel_form: 'Excel名簿をフォーム送信',
+          direct_form: 'フォームへ直接入力',
+        };
+        const applicationSummary = element('div', 'application-summary');
+        applicationSummary.append(
+          element('strong', '', '申込方法'),
+          element('span', '', applicationLabels[tournament.application_method] || tournament.application_method),
+        );
+        if (tournament.application_roster_url) {
+          const rosterLink = element('a', '', tournament.application_roster_file_name || '申込名簿を開く');
+          rosterLink.href = tournament.application_roster_url;
+          rosterLink.target = '_blank';
+          rosterLink.rel = 'noopener noreferrer';
+          applicationSummary.append(rosterLink);
+        }
+        if (tournament.application_form_url) {
+          const formLink = element('a', '', '申込フォームを開く');
+          formLink.href = tournament.application_form_url;
+          formLink.target = '_blank';
+          formLink.rel = 'noopener noreferrer';
+          applicationSummary.append(formLink);
+        }
+        if (tournament.application_email) {
+          const emailLink = element('a', '', tournament.application_email);
+          emailLink.href = 'mailto:' + tournament.application_email;
+          applicationSummary.append(emailLink);
+        }
+        card.append(applicationSummary);
+      }
+
       const cardActions = element('div', 'card-actions');
       const editButton = element('button', 'secondary', '大会情報を編集');
       editButton.type = 'button';
       editButton.addEventListener('click', () => openTournamentEditor(tournaments));
-      const completeButton = element('button', 'success', tournaments.every((item) => item.status === 'applied') ? '申込完了済み' : '申込完了にする');
-      completeButton.type = 'button';
-      completeButton.disabled = tournaments.every((item) => item.status === 'applied');
-      completeButton.addEventListener('click', async () => {
+      const rawStatuses = [...new Set(tournaments.map((item) => item.status))];
+      const applicationBlocked = tournaments.some((item) => item.status === 'canceled' || tournamentDisplayStatus(item) === 'no_participants');
+      const statusSelect = document.createElement('select');
+      statusSelect.className = 'card-status-select';
+      if (rawStatuses.length > 1) {
+        const mixed = document.createElement('option');
+        mixed.value = '';
+        mixed.textContent = '複数ステータス';
+        mixed.selected = true;
+        statusSelect.append(mixed);
+      }
+      Object.entries(statusLabels).filter(([value]) => value !== 'no_participants').forEach(([value, label]) => {
+        const option = document.createElement('option');
+        option.value = value;
+        option.textContent = label;
+        option.selected = rawStatuses.length === 1 && value === rawStatuses[0];
+        option.disabled = value === 'applied' && applicationBlocked;
+        statusSelect.append(option);
+      });
+      if (applicationBlocked) statusSelect.title = '申込完了へ戻す場合は、一度ほかのステータスへ変更してください。';
+      const statusButton = element('button', 'secondary', 'ステータスを変更');
+      statusButton.type = 'button';
+      const statusMessage = element('span', 'status-message', '');
+      statusButton.addEventListener('click', async () => {
+        if (!statusSelect.value) {
+          statusMessage.textContent = '変更先のステータスを選択してください。';
+          return;
+        }
+        if (rawStatuses.length === 1 && rawStatuses[0] === statusSelect.value) {
+          statusMessage.textContent = '変更はありません。';
+          return;
+        }
         const grades = tournaments.map(tournamentGradeLabel).join('・');
-        if (!confirm(tournament.title + '（' + grades + '）を申込完了にして、告知チャンネルへ通知しますか？')) return;
-        completeButton.disabled = true;
-        completeButton.textContent = '変更中…';
+        const nextLabel = statusLabels[statusSelect.value] || statusSelect.value;
+        const confirmMessage = statusSelect.value === 'applied'
+          ? tournament.title + '（' + grades + '）を「申込完了」へ変更し、告知チャンネルへ通知しますか？'
+          : tournament.title + '（' + grades + '）を「' + nextLabel + '」へ変更しますか？';
+        if (!confirm(confirmMessage)) return;
+        statusButton.disabled = true;
+        statusSelect.disabled = true;
+        statusMessage.className = 'status-message';
+        statusMessage.textContent = '変更中…';
         try {
           const response = await fetch('/api/tournaments/status', {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               tournamentIds: tournaments.map((item) => item.tournament_id),
-              status: 'applied',
+              status: statusSelect.value,
             }),
           });
           const body = await response.json();
-          if (!response.ok) throw new Error(body.error || '申込完了に変更できませんでした。');
+          if (!response.ok) throw new Error(body.error || 'ステータスを変更できませんでした。');
           await loadTournaments();
         } catch (error) {
-          alert(error instanceof Error ? error.message : '申込完了に変更できませんでした。');
-          completeButton.disabled = false;
-          completeButton.textContent = '申込完了にする';
+          statusMessage.className = 'status-message error';
+          statusMessage.textContent = error instanceof Error ? error.message : 'ステータスを変更できませんでした。';
+          statusButton.disabled = false;
+          statusSelect.disabled = false;
         }
       });
-      cardActions.append(editButton, completeButton);
+      cardActions.append(editButton, statusSelect, statusButton, statusMessage);
       card.append(cardActions);
 
       const responseSections = element('div', 'response-sections');
-      responseSections.append(
-        responseSection(tournaments, 'yes'),
-        responseSection(tournaments, 'maybe'),
-        responseSection(tournaments, 'no'),
-        responseSection(tournaments, 'pending'),
+      const applicationCompleted = tournaments.every((item) =>
+        item.status === 'applied' || item.status === 'closed'
       );
+      responseSections.append(responseSection(tournaments, 'yes'));
+      if (!applicationCompleted) {
+        responseSections.append(
+          responseSection(tournaments, 'maybe'),
+          responseSection(tournaments, 'no'),
+          responseSection(tournaments, 'pending'),
+        );
+      }
       card.append(responseSections);
 
       const entryManagement = renderEntryManagement(tournaments);
       if (entryManagement) card.append(entryManagement);
 
+      const postLotteryManagement = renderPostLotteryManagement(tournaments);
+      if (postLotteryManagement) card.append(postLotteryManagement);
+
       const archiveManagement = renderArchiveManagement(tournaments);
       if (archiveManagement) card.append(archiveManagement);
-
-      tournaments.forEach((item) => card.append(renderTournamentStatusControl(item)));
 
       const notificationParts = [
         '告知 ' + tournaments.reduce((sum, item) => sum + Number(item.announcements_sent), 0) + '件',
@@ -1795,8 +3474,41 @@ function adminHtml(page: AdminPage): string {
       return card;
     }
 
+    function renderMemberTableHeader() {
+      const header = element('div', 'member-table-header');
+      header.setAttribute('aria-hidden', 'true');
+      ['氏名', 'よみがな', '出場級', '段位', '状態', 'DM', '操作'].forEach((label) => {
+        header.append(element('span', '', label));
+      });
+      return header;
+    }
+
     function renderMember(member) {
       const card = element('article', 'member-card');
+      const summary = element('div', 'member-summary-grid');
+      const summaryItem = (label, value) => {
+        const item = element('div', 'member-summary-item', value);
+        item.dataset.label = label;
+        return item;
+      };
+      const edit = element('button', 'secondary', '編集');
+      edit.type = 'button';
+      const linkState = element('span', 'member-link', member.discordLinked ? 'Discord連携済み' : 'Discord未連携');
+      const rowActions = element('div', 'member-row-actions');
+      rowActions.append(edit, linkState);
+      summary.append(
+        summaryItem('氏名', member.displayName),
+        summaryItem('よみがな', member.displayNameKana || '未登録'),
+        summaryItem('出場級', gradeLabel(member.grade)),
+        summaryItem('段位', rankLabel(member.rank)),
+        summaryItem('状態', memberStatusLabels[member.status] || member.status),
+        summaryItem('DM', member.dmEnabled ? '送信する' : '送信しない'),
+        rowActions,
+      );
+      card.append(summary);
+
+      const editor = element('div', 'member-editor');
+      editor.hidden = true;
       const grid = element('div', 'member-grid');
       const nameLabel = element('label', '', '氏名');
       const nameInput = document.createElement('input');
@@ -1850,13 +3562,35 @@ function adminHtml(page: AdminPage): string {
       dmCheckbox.checked = member.dmEnabled;
       dmLabel.append(dmCheckbox, document.createTextNode('DMを送る'));
       grid.append(nameLabel, nameKanaLabel, gradeLabelNode, rankLabelNode, statusLabel, dmLabel);
-      card.append(grid);
+      editor.append(grid);
 
       const actions = element('div', 'member-actions');
-      const save = element('button', 'secondary', '変更を保存');
+      const cancel = element('button', 'secondary', 'キャンセル');
+      cancel.type = 'button';
+      const save = element('button', '', '変更を保存');
       save.type = 'button';
       const message = element('span', 'status-message', '');
-      const linkState = element('span', 'member-link', member.discordLinked ? 'Discord連携済み' : 'Discord未連携');
+      const resetEditor = () => {
+        nameInput.value = member.displayName;
+        nameKanaInput.value = member.displayNameKana || '';
+        gradeSelect.value = member.grade;
+        rankSelect.value = String(member.rank);
+        statusSelect.value = member.status;
+        dmCheckbox.checked = member.dmEnabled;
+        message.className = 'status-message';
+        message.textContent = '';
+      };
+      edit.addEventListener('click', () => {
+        resetEditor();
+        summary.hidden = true;
+        editor.hidden = false;
+        nameInput.focus();
+      });
+      cancel.addEventListener('click', () => {
+        resetEditor();
+        editor.hidden = true;
+        summary.hidden = false;
+      });
       save.addEventListener('click', async () => {
         save.disabled = true;
         message.className = 'status-message';
@@ -1885,8 +3619,9 @@ function adminHtml(page: AdminPage): string {
           save.disabled = false;
         }
       });
-      actions.append(save, message, linkState);
-      card.append(actions);
+      actions.append(cancel, save, message);
+      editor.append(actions);
+      card.append(editor);
       return card;
     }
 
@@ -1970,9 +3705,15 @@ function adminHtml(page: AdminPage): string {
     function renderTournamentList() {
       const status = tournamentStatusFilter.value;
       const allGroups = groupTournaments(loadedTournaments);
-      const groups = status === 'all'
-        ? allGroups
-        : allGroups.filter((group) => group.some((tournament) => tournamentDisplayStatus(tournament) === status));
+      let groups = allGroups;
+      if (status === 'default') {
+        groups = allGroups.filter((group) => group.some((tournament) => {
+          const displayStatus = tournamentDisplayStatus(tournament);
+          return displayStatus !== 'canceled' && displayStatus !== 'no_participants';
+        }));
+      } else if (status !== 'all') {
+        groups = allGroups.filter((group) => group.some((tournament) => tournamentDisplayStatus(tournament) === status));
+      }
       const visibleTournamentCount = groups.reduce((total, group) => total + group.length, 0);
       const sort = tournamentSort.value;
       groups.sort((left, right) => {
@@ -1993,6 +3734,15 @@ function adminHtml(page: AdminPage): string {
     }
 
     async function loadTournaments() {
+      const openDetailsByGroup = new Map(
+        [...tournamentList.querySelectorAll('.tournament-card[data-tournament-group]')]
+          .map((card) => [
+            card.dataset.tournamentGroup,
+            [...card.querySelectorAll(':scope > details')]
+              .map((details, index) => details.open ? index : -1)
+              .filter((index) => index >= 0),
+          ]),
+      );
       refreshList.disabled = true;
       listStatus.textContent = '読み込み中…';
       try {
@@ -2001,6 +3751,14 @@ function adminHtml(page: AdminPage): string {
         if (!response.ok) throw new Error(body.error || '大会一覧を取得できませんでした。');
         loadedTournaments = body.tournaments;
         renderTournamentList();
+        [...tournamentList.querySelectorAll('.tournament-card[data-tournament-group]')]
+          .forEach((card) => {
+            const openIndexes = openDetailsByGroup.get(card.dataset.tournamentGroup) || [];
+            const detailsNodes = [...card.querySelectorAll(':scope > details')];
+            openIndexes.forEach((index) => {
+              if (detailsNodes[index]) detailsNodes[index].open = true;
+            });
+          });
       } catch (error) {
         listStatus.textContent = error instanceof Error ? error.message : '大会一覧を取得できませんでした。';
       } finally {
@@ -2032,9 +3790,11 @@ function adminHtml(page: AdminPage): string {
         requestStatus.textContent = '未処理 ' + requestBody.requests.length + '件';
         setPendingRequestBadge(requestBody.requests.length);
         memberList.replaceChildren();
+        memberList.classList.toggle('has-members', body.members.length > 0);
         if (!body.members.length) {
           memberList.append(element('div', 'empty', '登録されたメンバーはいません。'));
         } else {
+          memberList.append(renderMemberTableHeader());
           body.members.forEach((member) => memberList.append(renderMember(member)));
         }
         const active = body.members.filter((member) => member.status === 'active').length;
@@ -2073,6 +3833,24 @@ function adminHtml(page: AdminPage): string {
     form.elements.trueDeadline.value = dateValue(new Date(now + 10 * 86400000)) + 'T23:59';
     setInternalDeadlineFromOrganizer();
     form.elements.trueDeadline.addEventListener('input', setInternalDeadlineFromOrganizer);
+    function refreshApplicationMethodFields() {
+      const method = form.elements.applicationMethod.value;
+      const usesRoster = method === 'excel_email' || method === 'excel_form';
+      const usesForm = method === 'excel_form' || method === 'direct_form';
+      const usesEmail = method === 'excel_email';
+      const usesCustomName = usesRoster && form.elements.applicationRosterFilenameMode.value === 'custom';
+      applicationRosterFields.hidden = !usesRoster;
+      applicationFormUrlField.hidden = !usesForm;
+      applicationEmailField.hidden = !usesEmail;
+      applicationRosterCustomName.hidden = !usesCustomName;
+      form.elements.applicationRosterFile.required = usesRoster;
+      form.elements.applicationFormUrl.required = usesForm;
+      form.elements.applicationEmail.required = usesEmail;
+      form.elements.applicationRosterCustomFileName.required = usesCustomName;
+    }
+    form.elements.applicationMethod.addEventListener('change', refreshApplicationMethodFields);
+    form.elements.applicationRosterFilenameMode.addEventListener('change', refreshApplicationMethodFields);
+    refreshApplicationMethodFields();
     const gradeCheckboxes = Array.from(form.querySelectorAll('input[name="grades"]'));
     const allGradesCheckbox = gradeCheckboxes.find((checkbox) => checkbox.value === 'all');
     const individualGradeCheckboxes = gradeCheckboxes.filter((checkbox) => checkbox.value !== 'all');
@@ -2101,6 +3879,7 @@ function adminHtml(page: AdminPage): string {
       gradeDateGrid.replaceChildren();
       gradeDateSettings.hidden = true;
       previousCommonEventDate = '';
+      refreshApplicationMethodFields();
     }
 
     fetch('/api/session').then((response) => response.json()).then((data) => {
@@ -2124,6 +3903,9 @@ function adminHtml(page: AdminPage): string {
       try {
         const payload = Object.fromEntries(data.entries());
         delete payload.documentFile;
+        delete payload.applicationRosterFile;
+        delete payload.applicationRosterFilenameMode;
+        delete payload.applicationRosterCustomFileName;
         payload.grades = selectedRegistrationGrades();
         if (!payload.grades.length) throw new Error('対象級を1つ以上選択してください。');
         payload.eventDatesByGrade = registrationEventDatesByGrade(payload.grades);
@@ -2132,6 +3914,30 @@ function adminHtml(page: AdminPage): string {
         delete payload.eventDate;
         payload.internalDeadline = localJstToIso(payload.internalDeadline);
         payload.trueDeadline = localJstToIso(payload.trueDeadline);
+        const applicationMethod = payload.applicationMethod;
+        if (!applicationMethod) throw new Error('申込方法を選択してください。');
+        const usesRoster = applicationMethod === 'excel_email' || applicationMethod === 'excel_form';
+        const usesForm = applicationMethod === 'excel_form' || applicationMethod === 'direct_form';
+        if (usesRoster) {
+          const rosterFile = form.elements.applicationRosterFile.files?.[0];
+          if (!rosterFile) throw new Error('申込名簿のExcelファイルを選択してください。');
+          result.textContent = '申込名簿をアップロード中…';
+          const customFileName = form.elements.applicationRosterFilenameMode.value === 'custom'
+            ? form.elements.applicationRosterCustomFileName.value.trim()
+            : '';
+          const roster = await uploadRegistrationRoster(rosterFile, payload.title, payload.grades, customFileName);
+          payload.applicationRosterUrl = roster.url;
+          payload.applicationRosterFileName = roster.fileName;
+          payload.applicationRosterFileSize = roster.size;
+          payload.applicationRosterContentType = roster.contentType;
+        } else {
+          payload.applicationRosterUrl = '';
+          payload.applicationRosterFileName = '';
+          payload.applicationRosterFileSize = 0;
+          payload.applicationRosterContentType = '';
+        }
+        if (!usesForm) payload.applicationFormUrl = '';
+        if (applicationMethod !== 'excel_email') payload.applicationEmail = '';
         const documentFile = form.elements.documentFile.files?.[0];
         if (documentFile) {
           result.textContent = 'PDFをアップロード中…';
@@ -2325,6 +4131,26 @@ export async function handleAdminRequest(
     }
   }
 
+  if (request.method === "POST" && url.pathname === "/api/application-roster") {
+    if (!isSameOrigin(request)) {
+      return json({ error: "不正な送信元です。" }, 403);
+    }
+    if (!request.headers.get("Content-Type")?.toLowerCase().startsWith("multipart/form-data")) {
+      return json({ error: "申込名簿をフォーム形式で送信してください。" }, 415);
+    }
+    try {
+      return json({
+        document: await uploadApplicationRoster(request, env, actor),
+      }, 201);
+    } catch (error: unknown) {
+      if (error instanceof DocumentUploadError) {
+        return json({ error: error.message }, 400);
+      }
+      console.error("申込名簿Excelの保存エラー", error);
+      return json({ error: "申込名簿を保存できませんでした。" }, 500);
+    }
+  }
+
   if (request.method === "POST" && url.pathname === "/api/archive-documents") {
     if (!isSameOrigin(request)) {
       return json({ error: "不正な送信元です。" }, 403);
@@ -2342,6 +4168,47 @@ export async function handleAdminRequest(
       }
       console.error("大会記録PDFの保存エラー", error);
       return json({ error: "大会記録PDFを保存できませんでした。" }, 500);
+    }
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/confirmation-roster") {
+    if (!isSameOrigin(request)) {
+      return json({ error: "不正な送信元です。" }, 403);
+    }
+    if (!request.headers.get("Content-Type")?.toLowerCase().startsWith("multipart/form-data")) {
+      return json({ error: "確認名簿をフォーム形式で送信してください。" }, 415);
+    }
+    try {
+      return json({ roster: await saveConfirmationRoster(env, request, actor) }, 201);
+    } catch (error: unknown) {
+      if (error instanceof DocumentUploadError || error instanceof AdminRequestError) {
+        return json({ error: error.message }, 400);
+      }
+      console.error("申込確認名簿の保存エラー", error);
+      return json({ error: "申込確認名簿を保存できませんでした。" }, 500);
+    }
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/confirmation-roster/send") {
+    if (!isSameOrigin(request)) {
+      return json({ error: "不正な送信元です。" }, 403);
+    }
+    if (!request.headers.get("Content-Type")?.toLowerCase().startsWith("application/json")) {
+      return json({ error: "JSON形式で送信してください。" }, 415);
+    }
+    try {
+      const body = (await request.json()) as { tournamentIds?: unknown };
+      if (!Array.isArray(body.tournamentIds)) {
+        throw new AdminRequestError("大会IDを指定してください。", 400);
+      }
+      return json(await queueConfirmationRoster(env, body.tournamentIds.map(String)));
+    } catch (error: unknown) {
+      if (error instanceof AdminRequestError) {
+        return json({ error: error.message }, error.status);
+      }
+      const message = error instanceof Error ? error.message : "確認名簿DMを予約できませんでした。";
+      console.error("申込確認名簿DMの予約エラー", error);
+      return json({ error: message }, 409);
     }
   }
 
@@ -2460,6 +4327,9 @@ export async function handleAdminRequest(
         eventDatesByGrade?: unknown;
       };
       const grades = normalizeTournamentGrades(body.grades ?? body.grade);
+      if (!body.applicationMethod) {
+        throw new Error("申込方法を選択してください。");
+      }
       if (
         body.eventDatesByGrade !== undefined &&
         (typeof body.eventDatesByGrade !== "object" ||
@@ -2544,6 +4414,82 @@ export async function handleAdminRequest(
     }
   }
 
+  if (request.method === "POST" && url.pathname === "/api/participant-guidance") {
+    if (!isSameOrigin(request)) {
+      return json({ error: "不正な送信元です。" }, 403);
+    }
+    if (!request.headers.get("Content-Type")?.toLowerCase().startsWith("multipart/form-data")) {
+      return json({ error: "案内をフォーム形式で送信してください。" }, 415);
+    }
+    try {
+      return json({
+        guidance: await saveParticipantGuidance(env, request, actor),
+      }, 201);
+    } catch (error: unknown) {
+      if (error instanceof DocumentUploadError || error instanceof AdminRequestError) {
+        return json({ error: error.message }, 400);
+      }
+      console.error("参加者向け案内の保存エラー", error);
+      return json({ error: "参加者向け案内を保存できませんでした。" }, 500);
+    }
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/participant-guidance/send") {
+    if (!isSameOrigin(request)) {
+      return json({ error: "不正な送信元です。" }, 403);
+    }
+    if (!request.headers.get("Content-Type")?.toLowerCase().startsWith("application/json")) {
+      return json({ error: "JSON形式で送信してください。" }, 415);
+    }
+    try {
+      const body = (await request.json()) as { tournamentIds?: unknown };
+      if (!Array.isArray(body.tournamentIds)) {
+        throw new AdminRequestError("大会IDを指定してください。", 400);
+      }
+      const result = await queueParticipantGuidance(
+        env,
+        body.tournamentIds.map(String),
+      );
+      return json(result);
+    } catch (error: unknown) {
+      if (error instanceof AdminRequestError) {
+        return json({ error: error.message }, error.status);
+      }
+      const message = error instanceof Error ? error.message : "DM送信を予約できませんでした。";
+      console.error("参加者向け案内DMの予約エラー", error);
+      return json({ error: message }, 409);
+    }
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/lottery-results/send") {
+    if (!isSameOrigin(request)) {
+      return json({ error: "不正な送信元です。" }, 403);
+    }
+    if (!request.headers.get("Content-Type")?.toLowerCase().startsWith("application/json")) {
+      return json({ error: "JSON形式で送信してください。" }, 415);
+    }
+    try {
+      const body = (await request.json()) as { tournamentIds?: unknown };
+      if (!Array.isArray(body.tournamentIds)) {
+        throw new AdminRequestError("大会IDを指定してください。", 400);
+      }
+      return json(await queueLotteryResultsAndGuidance(
+        env,
+        body.tournamentIds.map(String),
+        actor,
+      ));
+    } catch (error: unknown) {
+      if (error instanceof AdminRequestError) {
+        return json({ error: error.message }, error.status);
+      }
+      const message = error instanceof Error
+        ? error.message
+        : "抽選結果と確定者案内を予約できませんでした。";
+      console.error("抽選結果・確定者案内の予約エラー", error);
+      return json({ error: message }, 409);
+    }
+  }
+
   if (request.method === "PATCH" && url.pathname === "/api/tournaments/status") {
     if (!isSameOrigin(request)) {
       return json({ error: "不正な送信元です。" }, 403);
@@ -2612,6 +4558,71 @@ export async function handleAdminRequest(
     }
   }
 
+  if (request.method === "PATCH" && url.pathname === "/api/tournament-entries/batch") {
+    if (!isSameOrigin(request)) {
+      return json({ error: "不正な送信元です。" }, 403);
+    }
+    if (!request.headers.get("Content-Type")?.toLowerCase().startsWith("application/json")) {
+      return json({ error: "JSON形式で送信してください。" }, 415);
+    }
+    try {
+      const body = (await request.json()) as { entries?: unknown };
+      if (!Array.isArray(body.entries)) {
+        throw new AdminRequestError("保存対象を指定してください。", 400);
+      }
+      const entries: TournamentEntryBatchInput[] = body.entries.map((value) => {
+        const entry = value && typeof value === "object"
+          ? value as Record<string, unknown>
+          : {};
+        return {
+          tournamentId: typeof entry.tournamentId === "string" ? entry.tournamentId : "",
+          memberId: typeof entry.memberId === "string" ? entry.memberId : "",
+          status: typeof entry.status === "string" ? entry.status : "",
+          waitlistNumber: typeof entry.waitlistNumber === "number" ? entry.waitlistNumber : null,
+          paymentStatus: entry.paymentStatus === "unpaid" || entry.paymentStatus === "paid"
+            ? entry.paymentStatus
+            : null,
+        };
+      });
+      return json(await updateTournamentEntriesBatch(env, entries, actor));
+    } catch (error: unknown) {
+      if (error instanceof AdminRequestError) {
+        return json({ error: error.message }, error.status);
+      }
+      console.error("申込・抽選結果の一括変更エラー", error);
+      return json({ error: "全員分の変更を保存できませんでした。" }, 500);
+    }
+  }
+
+  const entryPaymentPath = url.pathname.match(
+    /^\/api\/tournaments\/(T-[0-9a-f-]{36})\/entries\/(M-[0-9a-f-]{36})\/payment$/,
+  );
+  if (request.method === "PATCH" && entryPaymentPath) {
+    if (!isSameOrigin(request)) {
+      return json({ error: "不正な送信元です。" }, 403);
+    }
+    if (!request.headers.get("Content-Type")?.toLowerCase().startsWith("application/json")) {
+      return json({ error: "JSON形式で送信してください。" }, 415);
+    }
+    try {
+      const body = (await request.json()) as { status?: unknown };
+      const status = typeof body.status === "string" ? body.status : "";
+      return json(await updateTournamentEntryPayment(
+        env,
+        entryPaymentPath[1],
+        entryPaymentPath[2],
+        status,
+        actor,
+      ));
+    } catch (error: unknown) {
+      if (error instanceof AdminRequestError) {
+        return json({ error: error.message }, error.status);
+      }
+      console.error("入金状態の変更エラー", error);
+      return json({ error: "入金状態を変更できませんでした。" }, 500);
+    }
+  }
+
   const entryResultPath = url.pathname.match(
     /^\/api\/tournaments\/(T-[0-9a-f-]{36})\/entries\/(M-[0-9a-f-]{36})\/result$/,
   );
@@ -2657,15 +4668,29 @@ export async function handleAdminRequest(
       return json({ error: "JSON形式で送信してください。" }, 415);
     }
     let status = "";
+    let waitlistNumber: number | null = null;
     try {
-      const body = (await request.json()) as { status?: unknown };
+      const body = (await request.json()) as {
+        status?: unknown;
+        waitlistNumber?: unknown;
+      };
       status = typeof body.status === "string" ? body.status : "";
+      waitlistNumber = typeof body.waitlistNumber === "number"
+        ? body.waitlistNumber
+        : null;
     } catch {
       return json({ error: "入力内容を確認してください。" }, 400);
     }
     try {
       return json(
-        await entryStatusUpdater(env, entryPath[1], entryPath[2], status, actor),
+        await entryStatusUpdater(
+          env,
+          entryPath[1],
+          entryPath[2],
+          status,
+          waitlistNumber,
+          actor,
+        ),
       );
     } catch (error: unknown) {
       if (error instanceof AdminRequestError) {

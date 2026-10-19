@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   buildAnnouncementMessage,
+  buildApplicationEmailTemplate,
   buildApplicationCompletedMessage,
+  buildEntryResultsAnnouncementMessage,
   buildAttendanceMessage,
   buildDeadlineReminderMessage,
   buildDeadlineReminderTargets,
@@ -269,6 +271,87 @@ describe("tournament input", () => {
     });
     expect(statements).toHaveLength(3);
   });
+
+  it("stores one shared application method for a multi-grade tournament", async () => {
+    const statements: Array<{ sql: string; values: unknown[] }> = [];
+    const prepare = vi.fn((sql: string) => ({
+      bind: vi.fn((...values: unknown[]) => ({ sql, values })),
+    }));
+    const batch = vi.fn(async (items: Array<{ sql: string; values: unknown[] }>) => {
+      statements.push(...items);
+      return items.map(() => ({ success: true }));
+    });
+    const common = {
+      title: "申込方法テスト大会",
+      tournamentType: "official",
+      eventStartDate: "2026-11-01",
+      eventEndDate: "2026-11-01",
+      internalDeadline: "2026-10-25T23:59:00+09:00",
+      trueDeadline: "2026-10-28T23:59:00+09:00",
+      applicationMethod: "excel_form" as const,
+      applicationRosterUrl: "https://bot.example.com/documents/roster.xlsx",
+      applicationRosterFileName: "申込方法テスト大会_B級・C級_申込名簿_埼玉大学かるた会.xlsx",
+      applicationRosterFileSize: 1024,
+      applicationRosterContentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      applicationFormUrl: "https://example.com/apply",
+      createdByEmail: "admin@example.com",
+    };
+
+    const created = await createTournaments(
+      { DB: { prepare, batch } as unknown as D1Database },
+      [{ ...common, grade: "B" }, { ...common, grade: "C" }],
+    );
+
+    expect(statements).toHaveLength(3);
+    const applicationStatement = statements.find((item) =>
+      item.sql.includes("INSERT INTO tournament_application_methods")
+    );
+    expect(applicationStatement?.values).toEqual(expect.arrayContaining([
+      created[0].registration_group_id,
+      "excel_form",
+      "https://example.com/apply",
+    ]));
+  });
+
+  it("requires the Excel roster for an Excel-based application method", () => {
+    expect(() => normalizeTournamentInput({
+      title: "申込方法テスト大会",
+      grade: "C",
+      tournamentType: "official",
+      eventStartDate: "2026-11-01",
+      eventEndDate: "2026-11-01",
+      internalDeadline: "2026-10-25T23:59:00+09:00",
+      trueDeadline: "2026-10-28T23:59:00+09:00",
+      applicationMethod: "excel_email",
+    })).toThrow("申込名簿");
+  });
+
+  it("メール申込では有効な送信先アドレスを要求する", () => {
+    const input = {
+      title: "メール申込テスト大会",
+      grade: "C",
+      tournamentType: "official",
+      eventStartDate: "2026-11-01",
+      eventEndDate: "2026-11-01",
+      internalDeadline: "2026-10-25T23:59:00+09:00",
+      trueDeadline: "2026-10-28T23:59:00+09:00",
+      applicationMethod: "excel_email" as const,
+      applicationRosterUrl: "https://bot.example.com/documents/roster.xlsx",
+      applicationRosterFileName: "roster.xlsx",
+      applicationRosterFileSize: 1024,
+      applicationRosterContentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    };
+
+    expect(() => normalizeTournamentInput(input)).toThrow("申込先メールアドレス");
+    expect(() => normalizeTournamentInput({
+      ...input,
+      applicationEmail: "not-an-email",
+    })).toThrow("形式が不正");
+    expect(normalizeTournamentInput({
+      ...input,
+      applicationEmail: "entry@example.com",
+    }).applicationEmail).toBe("entry@example.com");
+  });
 });
 
 describe("notification queue", () => {
@@ -338,14 +421,55 @@ describe("notification queue", () => {
     );
   });
 
-  it("サークル内締切の翌日0時に集計リマインダーをキューに入れる", () => {
+  it("builds an unsent entry-result announcement with confirmed and waitlisted members", () => {
+    const message = buildEntryResultsAnnouncementMessage(
+      "抽選テスト大会",
+      [
+        { displayName: "山田太郎", displayNameKana: "やまだたろう", grade: "C", entryStatus: "selected" },
+        { displayName: "石田洋音", displayNameKana: "いしだひろね", grade: "C", entryStatus: "selected" },
+        { displayName: "山口武", displayNameKana: "やまぐちたけし", grade: "C", entryStatus: "not_selected", waitlistNumber: 45 },
+        { displayName: "吉村かなで", displayNameKana: "よしむらかなで", grade: "D", entryStatus: "not_selected", waitlistNumber: 12 },
+      ],
+      "https://example.com/roster.pdf",
+    );
+
+    expect(message.content).toContain("出場者・キャンセル待ち確定");
+    expect(message.embeds?.[0]?.fields?.[0]?.value).toBe(
+      "C級 石田洋音\n　　山田太郎",
+    );
+    expect(message.embeds?.[0]?.fields?.[1]?.value).toBe(
+      "C級 45番 山口武\nD級 12番 吉村かなで",
+    );
+    expect(message.embeds?.[0]?.fields?.[2]?.value).toContain(
+      "https://example.com/roster.pdf",
+    );
+  });
+
+  it("requires a waitlist number before building the entry-result announcement", () => {
+    expect(() => buildEntryResultsAnnouncementMessage(
+      "抽選テスト大会",
+      [{ displayName: "山口武", grade: "C", entryStatus: "not_selected" }],
+      "https://example.com/roster.pdf",
+    )).toThrow("待ち番号");
+  });
+
+  it("サークル内締切の1分後に集計リマインダーをキューに入れる", () => {
+    const beforeSchedule = buildDeadlineReminderTargets(
+      tournament,
+      "admin-channel-1",
+      1,
+      new Date("2026-10-25T12:00:59.999Z"),
+    );
     const targets = buildDeadlineReminderTargets(
       tournament,
       "admin-channel-1",
       1,
-      new Date("2026-10-25T15:00:00.000Z"),
+      new Date("2026-10-25T12:01:00.000Z"),
     );
 
+    expect(beforeSchedule.some((target) =>
+      target.reminderKind === "internal_deadline"
+    )).toBe(false);
     expect(targets).toEqual([
       expect.objectContaining({
         notificationType: "deadline_reminder",
@@ -383,10 +507,10 @@ describe("notification queue", () => {
     ).toBe(false);
   });
 
-  it("JSTの日付境界から両方の送信時刻を求める", () => {
+  it("サークル内締切1分後と主催締切日0時の送信時刻を求める", () => {
     expect(
       getDeadlineReminderSchedule(tournament, "internal_deadline").toISOString(),
-    ).toBe("2026-10-25T15:00:00.000Z");
+    ).toBe("2026-10-25T12:01:00.000Z");
     expect(
       getDeadlineReminderSchedule(tournament, "organizer_deadline").toISOString(),
     ).toBe("2026-10-27T15:00:00.000Z");
@@ -506,6 +630,7 @@ describe("notification queue", () => {
         {
           displayName: "石田洋音",
           displayNameKana: "いしだ ようおん",
+          grade: "C",
         },
       ],
       false,
@@ -516,11 +641,96 @@ describe("notification queue", () => {
     expect(message.embeds?.[0]?.fields?.at(-1)?.value).toContain(
       "https://admin.example.com/tournaments",
     );
-    expect(message.embeds?.[0]?.fields?.at(-2)?.value).toContain(
+    expect(message.embeds?.[0]?.fields?.find((field) =>
+      field.name.includes("参加希望者")
+    )?.value).toContain(
       "石田洋音（いしだ ようおん）",
     );
     expect(message.components).toBeUndefined();
     expect(message.allowed_mentions).toEqual({ parse: [] });
+  });
+
+  it("サークル内締切後の通知に級別名簿・主催締切・申込方法と必要なリンクを表示する", () => {
+    const message = buildDeadlineReminderMessage(
+      {
+        ...tournament,
+        all_grades: 1,
+        application_method: "excel_form",
+        application_roster_url: "https://files.example.com/roster.xlsx",
+        application_roster_file_name: "申込名簿_埼玉大学かるた会.xlsx",
+        application_form_url: "https://forms.example.com/apply",
+      },
+      "internal_deadline",
+      [
+        { displayName: "石田洋音", displayNameKana: "いしだひろね", grade: "C" },
+        { displayName: "髙田脩矢", displayNameKana: "たかだしゅうや", grade: "D" },
+      ],
+      false,
+      "https://admin.example.com/tournaments",
+    );
+
+    const fields = message.embeds?.[0]?.fields ?? [];
+    expect(message.content).toContain("サークル内締切を過ぎました");
+    expect(fields.find((field) => field.name === "主催締切日")?.value).toContain("2026");
+    expect(fields.find((field) => field.name === "C級 参加希望者（1人）")?.value).toContain("石田洋音");
+    expect(fields.find((field) => field.name === "D級 参加希望者（1人）")?.value).toContain("髙田脩矢");
+    const method = fields.find((field) => field.name === "申込方法")?.value ?? "";
+    expect(method).toContain("Excelファイルの名簿");
+    expect(method).toContain("https://files.example.com/roster.xlsx");
+    expect(method).toContain("https://forms.example.com/apply");
+    expect(fields.find((field) => field.name === "大会管理画面")?.value).toContain(
+      "https://admin.example.com/tournaments",
+    );
+    expect(message.components).toBeUndefined();
+  });
+
+  it("メール申込の担当者通知に宛先とメール作成リンクを表示する", () => {
+    const message = buildDeadlineReminderMessage(
+      {
+        ...tournament,
+        application_method: "excel_email",
+        application_roster_url: "https://files.example.com/roster.xlsx",
+        application_roster_file_name: "roster.xlsx",
+        application_email: "entry@example.com",
+      },
+      "internal_deadline",
+      [{ displayName: "石田洋音", displayNameKana: "いしだひろね", grade: "C" }],
+    );
+
+    const fields = message.embeds?.[0]?.fields ?? [];
+    expect(fields.find((field) =>
+      field.name === "申込先メールアドレス"
+    )?.value).toBe("entry@example.com");
+    const email = fields.find((field) =>
+      field.name === "申込メール作成"
+    )?.value ?? "";
+    expect(email).toContain("https://files.example.com/application-email/T-test");
+    expect(email).toContain("申込名簿はメーラーで添付");
+  });
+
+  it("参加希望者がいる級だけを人数付きで申込メールに入れる", () => {
+    const template = buildApplicationEmailTemplate(
+      {
+        ...tournament,
+        title: "関東地区大会",
+        application_email: "entry@example.com",
+      },
+      [
+        { displayName: "石田洋音", displayNameKana: "いしだひろね", grade: "C" },
+        { displayName: "山田花子", displayNameKana: "やまだはなこ", grade: "C" },
+        { displayName: "佐藤太郎", displayNameKana: "さとうたろう", grade: "E" },
+      ],
+    );
+
+    expect(template.subject).toBe("関東地区大会 C級・E級 申し込み(埼玉大学かるた会)");
+    expect(template.body).toContain("関東地区大会 担当者 様");
+    expect(template.body).toContain("埼玉大学かるた会の石田洋音と申します。");
+    expect(template.body).toContain("申し込みはC級2名、E級1名の計3名になります。");
+    expect(template.body).not.toContain("A級");
+    expect(template.body).not.toContain("B級");
+    expect(template.body).not.toContain("D級");
+    expect(template.body).toContain("E-mail: saitama.iroha@gmail.com");
+    expect(decodeURIComponent(template.mailto)).toContain(template.body);
   });
 
   it("labels a test reminder without claiming the deadline is near", () => {

@@ -35,9 +35,21 @@ export interface TournamentInput {
   trueDeadline: string;
   internalDeadline: string;
   documentUrl?: string;
+  applicationMethod?: TournamentApplicationMethod | "";
+  applicationRosterUrl?: string;
+  applicationRosterFileName?: string;
+  applicationRosterFileSize?: number;
+  applicationRosterContentType?: string;
+  applicationFormUrl?: string;
+  applicationEmail?: string;
   createdByDiscordUserId?: string;
   createdByEmail?: string;
 }
+
+export type TournamentApplicationMethod =
+  | "excel_email"
+  | "excel_form"
+  | "direct_form";
 
 export interface TournamentRow {
   tournament_id: string;
@@ -53,6 +65,11 @@ export interface TournamentRow {
   venue?: string | null;
   document_url?: string | null;
   closure_reason?: "no_participants" | null;
+  application_method?: TournamentApplicationMethod | null;
+  application_roster_url?: string | null;
+  application_roster_file_name?: string | null;
+  application_form_url?: string | null;
+  application_email?: string | null;
 }
 
 interface TargetMemberRow {
@@ -103,18 +120,35 @@ interface ReminderTournamentRow extends TournamentRow {
   response_yes: number;
 }
 
+export interface ApplicationEmailTemplate {
+  to: string;
+  subject: string;
+  body: string;
+  mailto: string;
+}
+
 export interface ReminderParticipant {
   displayName: string;
   displayNameKana: string;
+  grade: string;
 }
 
 export interface ApplicationCompletedParticipant extends ReminderParticipant {
   grade: string;
 }
 
+export interface EntryResultAnnouncementParticipant {
+  displayName: string;
+  displayNameKana?: string;
+  grade: string;
+  entryStatus: "selected" | "not_selected";
+  waitlistNumber?: number | null;
+}
+
 interface ReminderParticipantRow {
   display_name: string;
   display_name_kana: string;
+  grade: string;
 }
 
 interface AttendanceTargetRow extends TournamentRow {
@@ -214,8 +248,8 @@ function normalizeDateTime(value: unknown, label: string): string {
   return parsed.toISOString();
 }
 
-function normalizeDocumentUrl(value: unknown): string {
-  const normalized = normalizeOptionalText(value, "要項URL", 500);
+function normalizeHttpUrl(value: unknown, label: string): string {
+  const normalized = normalizeOptionalText(value, label, 500);
   if (!normalized) {
     return "";
   }
@@ -223,12 +257,16 @@ function normalizeDocumentUrl(value: unknown): string {
   try {
     url = new URL(normalized);
   } catch {
-    throw new Error("要項URLの形式が不正です。");
+    throw new Error(`${label}の形式が不正です。`);
   }
   if (url.protocol !== "https:" && url.protocol !== "http:") {
-    throw new Error("要項URLはhttpまたはhttpsで入力してください。");
+    throw new Error(`${label}はhttpまたはhttpsで入力してください。`);
   }
   return url.toString();
+}
+
+function normalizeDocumentUrl(value: unknown): string {
+  return normalizeHttpUrl(value, "要項URL");
 }
 
 export function normalizeTournamentInput(raw: TournamentInput): TournamentInput {
@@ -255,6 +293,58 @@ export function normalizeTournamentInput(raw: TournamentInput): TournamentInput 
     throw new Error("サークル内締切は主催者締切以前にしてください。");
   }
 
+  const applicationMethod = normalizeOptionalText(raw.applicationMethod, "申込方法", 30);
+  if (
+    applicationMethod &&
+    applicationMethod !== "excel_email" &&
+    applicationMethod !== "excel_form" &&
+    applicationMethod !== "direct_form"
+  ) {
+    throw new Error("申込方法が不正です。");
+  }
+  const usesRoster = applicationMethod === "excel_email" || applicationMethod === "excel_form";
+  const usesForm = applicationMethod === "excel_form" || applicationMethod === "direct_form";
+  const applicationRosterUrl = usesRoster
+    ? normalizeHttpUrl(raw.applicationRosterUrl, "申込名簿URL")
+    : "";
+  const applicationRosterFileName = usesRoster
+    ? normalizeOptionalText(raw.applicationRosterFileName, "申込名簿ファイル名", 255)
+    : "";
+  const applicationRosterContentType = usesRoster
+    ? normalizeOptionalText(raw.applicationRosterContentType, "申込名簿形式", 150)
+    : "";
+  const applicationRosterFileSize = usesRoster
+    ? Number(raw.applicationRosterFileSize)
+    : 0;
+  const applicationFormUrl = usesForm
+    ? normalizeHttpUrl(raw.applicationFormUrl, "申込フォームURL")
+    : "";
+  const applicationEmail = applicationMethod === "excel_email"
+    ? normalizeOptionalText(raw.applicationEmail, "申込先メールアドレス", 320)
+    : "";
+  if (usesRoster) {
+    if (!applicationRosterUrl || !applicationRosterFileName) {
+      throw new Error("申込名簿のExcelファイルを登録してください。");
+    }
+    if (!/\.xlsx?$/i.test(applicationRosterFileName)) {
+      throw new Error("申込名簿はExcel（.xls・.xlsx）形式にしてください。");
+    }
+    if (!Number.isInteger(applicationRosterFileSize) || applicationRosterFileSize < 1) {
+      throw new Error("申込名簿のファイル情報が不正です。");
+    }
+  }
+  if (usesForm && !applicationFormUrl) {
+    throw new Error("申込フォームURLを入力してください。");
+  }
+  if (applicationMethod === "excel_email") {
+    if (!applicationEmail) {
+      throw new Error("申込先メールアドレスを入力してください。");
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(applicationEmail)) {
+      throw new Error("申込先メールアドレスの形式が不正です。");
+    }
+  }
+
   return {
     title,
     grade,
@@ -265,6 +355,13 @@ export function normalizeTournamentInput(raw: TournamentInput): TournamentInput 
     trueDeadline,
     venue: normalizeOptionalText(raw.venue, "会場", 200),
     documentUrl: normalizeDocumentUrl(raw.documentUrl),
+    applicationMethod: applicationMethod as TournamentApplicationMethod | "",
+    applicationRosterUrl,
+    applicationRosterFileName,
+    applicationRosterFileSize,
+    applicationRosterContentType,
+    applicationFormUrl,
+    applicationEmail,
     createdByDiscordUserId: normalizeOptionalText(
       raw.createdByDiscordUserId,
       "DiscordユーザーID",
@@ -569,6 +666,96 @@ export function buildApplicationCompletedMessage(
   };
 }
 
+/**
+ * 抽選結果確定後の告知メッセージを組み立てる。
+ * 現時点では通知キューへ接続せず、送信機能を追加する際に利用する。
+ */
+export function buildEntryResultsAnnouncementMessage(
+  tournamentTitle: string,
+  participants: EntryResultAnnouncementParticipant[],
+  rosterUrl: string,
+): DiscordMessagePayload {
+  const parsedRosterUrl = new URL(rosterUrl);
+  if (parsedRosterUrl.protocol !== "https:" && parsedRosterUrl.protocol !== "http:") {
+    throw new Error("名簿URLはhttpまたはhttpsで指定してください。");
+  }
+  const gradeOrder = new Map(
+    ["A", "B", "C", "D", "E", "F", "beginner"].map((grade, index) => [grade, index]),
+  );
+  const byGradeAndName = (
+    left: EntryResultAnnouncementParticipant,
+    right: EntryResultAnnouncementParticipant,
+  ) => {
+    const gradeDifference =
+      (gradeOrder.get(left.grade) ?? 99) - (gradeOrder.get(right.grade) ?? 99);
+    if (gradeDifference !== 0) return gradeDifference;
+    return (left.displayNameKana || left.displayName).localeCompare(
+      right.displayNameKana || right.displayName,
+      "ja",
+    );
+  };
+  const confirmed = participants
+    .filter((participant) => participant.entryStatus === "selected")
+    .sort(byGradeAndName);
+  const waitlisted = participants
+    .filter((participant) => participant.entryStatus === "not_selected")
+    .sort((left, right) => {
+      const gradeDifference =
+        (gradeOrder.get(left.grade) ?? 99) - (gradeOrder.get(right.grade) ?? 99);
+      if (gradeDifference !== 0) return gradeDifference;
+      const numberDifference =
+        Number(left.waitlistNumber ?? Number.MAX_SAFE_INTEGER) -
+        Number(right.waitlistNumber ?? Number.MAX_SAFE_INTEGER);
+      return numberDifference || byGradeAndName(left, right);
+    });
+  if (waitlisted.some((participant) => !Number.isInteger(participant.waitlistNumber) || Number(participant.waitlistNumber) < 1)) {
+    throw new Error("キャンセル待ちの全員に待ち番号が必要です。");
+  }
+
+  const lines = (
+    entries: EntryResultAnnouncementParticipant[],
+    includeWaitlistNumber: boolean,
+  ): string => {
+    if (entries.length === 0) return "なし";
+    let previousGrade = "";
+    return entries.map((participant) => {
+      const grade = formatGrade(participant.grade);
+      const prefix = grade === previousGrade ? "　　" : `${grade} `;
+      previousGrade = grade;
+      const number = includeWaitlistNumber ? `${participant.waitlistNumber}番 ` : "";
+      return `${prefix}${number}${participant.displayName}`;
+    }).join("\n");
+  };
+
+  return {
+    content: "【出場者・キャンセル待ち確定】抽選結果をお知らせします。",
+    embeds: [
+      {
+        title: tournamentTitle,
+        color: 0x5865f2,
+        fields: [
+          {
+            name: "出場確定者",
+            value: lines(confirmed, false),
+            inline: false,
+          },
+          {
+            name: "キャンセル待ち",
+            value: lines(waitlisted, true),
+            inline: false,
+          },
+          {
+            name: "出場者・キャンセル待ち名簿",
+            value: `[名簿PDFを開く](${parsedRosterUrl.toString()})`,
+            inline: false,
+          },
+        ],
+      },
+    ],
+    allowed_mentions: { parse: [] },
+  };
+}
+
 export function buildDeadlineReminderMessage(
   tournament: TournamentRow,
   reminderKind: ReminderKind,
@@ -578,9 +765,6 @@ export function buildDeadlineReminderMessage(
 ): DiscordMessagePayload {
   const isInternal = reminderKind === "internal_deadline";
   const deadlineLabel = isInternal ? "サークル内締切" : "主催者締切";
-  const deadline = isInternal
-    ? tournament.internal_deadline
-    : tournament.true_deadline;
   const adminUrl = buildTournamentAdminUrl(tournamentAdminUrl);
 
   return {
@@ -600,15 +784,16 @@ export function buildDeadlineReminderMessage(
             inline: true,
           },
           {
-            name: deadlineLabel,
-            value: formatJstDateTime(deadline),
+            name: "主催締切日",
+            value: formatJstDateTime(tournament.true_deadline),
             inline: true,
           },
           ...buildParticipantFields(participants),
+          ...buildApplicationMethodFields(tournament),
           ...(adminUrl
             ? [{
               name: "大会管理画面",
-              value: `[大会一覧・申込状況を開く](${adminUrl})`,
+              value: `[大会管理画面を開く](${adminUrl})\n申込完了後は、画面上で大会ステータスを「申込完了」に変更してください。`,
               inline: false,
             }]
             : []),
@@ -624,30 +809,135 @@ function buildParticipantFields(participants: ReminderParticipant[]) {
     return [{ name: "参加希望者（0人）", value: "なし", inline: false }];
   }
 
-  const chunks: string[] = [];
-  let current = "";
+  const byGrade = new Map<string, ReminderParticipant[]>();
   for (const participant of participants) {
-    const reading = participant.displayNameKana || "よみがな未登録";
-    const line = `・${participant.displayName}（${reading}）`;
-    if (current && current.length + line.length + 1 > 950) {
-      chunks.push(current);
-      current = line;
-    } else {
-      current += `${current ? "\n" : ""}${line}`;
-    }
-  }
-  if (current) {
-    chunks.push(current);
+    const current = byGrade.get(participant.grade) ?? [];
+    current.push(participant);
+    byGrade.set(participant.grade, current);
   }
 
-  return chunks.map((value, index) => ({
-    name:
-      index === 0
-        ? `参加希望者（${participants.length}人）`
-        : `参加希望者（続き${index + 1}）`,
-    value,
-    inline: false,
-  }));
+  return [...byGrade.entries()]
+    .sort(([left], [right]) => gradeSortOrder(left) - gradeSortOrder(right))
+    .flatMap(([grade, gradeParticipants]) => {
+      const chunks: string[] = [];
+      let current = "";
+      for (const participant of gradeParticipants) {
+        const reading = participant.displayNameKana || "よみがな未登録";
+        const line = `・${participant.displayName}（${reading}）`;
+        if (current && current.length + line.length + 1 > 950) {
+          chunks.push(current);
+          current = line;
+        } else {
+          current += `${current ? "\n" : ""}${line}`;
+        }
+      }
+      if (current) chunks.push(current);
+      return chunks.map((value, index) => ({
+        name: index === 0
+          ? `${formatGrade(grade)} 参加希望者（${gradeParticipants.length}人）`
+          : `${formatGrade(grade)} 参加希望者（続き${index + 1}）`,
+        value,
+        inline: false,
+      }));
+    });
+}
+
+function gradeSortOrder(grade: string): number {
+  const order = ["A", "B", "C", "D", "E"];
+  const index = order.indexOf(grade);
+  return index === -1 ? order.length : index;
+}
+
+function reminderLink(url: string | null | undefined, label: string): string | null {
+  if (!url) return null;
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return null;
+    return `[${label}](${parsed.toString()})`;
+  } catch {
+    return null;
+  }
+}
+
+function buildApplicationMethodFields(tournament: TournamentRow) {
+  const methodLabels: Record<TournamentApplicationMethod, string> = {
+    excel_email: "Excelファイルの名簿に選手名を記入してメール送信",
+    excel_form: "Excelファイルの名簿に選手名を記入してフォーム送信",
+    direct_form: "フォームに直接選手名を記入して送信",
+  };
+  if (!tournament.application_method) {
+    return [{ name: "申込方法", value: "未登録", inline: false }];
+  }
+  const lines = [methodLabels[tournament.application_method]];
+  const rosterLink = reminderLink(
+    tournament.application_roster_url,
+    tournament.application_roster_file_name || "申込名簿を開く",
+  );
+  const formLink = reminderLink(tournament.application_form_url, "申込フォームを開く");
+  if (rosterLink) lines.push(rosterLink);
+  if (formLink) lines.push(formLink);
+  const fields = [{ name: "申込方法", value: lines.join("\n"), inline: false }];
+  if (tournament.application_method === "excel_email" && tournament.application_email) {
+    fields.push({
+      name: "申込先メールアドレス",
+      value: tournament.application_email,
+      inline: false,
+    });
+    const composerUrl = applicationEmailComposerUrl(tournament);
+    if (composerUrl) {
+      fields.push({
+        name: "申込メール作成",
+        value: `[宛先・件名・本文入力済みのメールを作成](${composerUrl})\n※申込名簿はメーラーで添付してください。`,
+        inline: false,
+      });
+    }
+  }
+  return fields;
+}
+
+function applicationEmailComposerUrl(tournament: TournamentRow): string | null {
+  if (!tournament.application_roster_url) return null;
+  try {
+    const url = new URL(tournament.application_roster_url);
+    if (url.protocol !== "https:" && url.protocol !== "http:") return null;
+    url.pathname = `/application-email/${encodeURIComponent(tournament.tournament_id)}`;
+    url.search = "";
+    url.hash = "";
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+export function buildApplicationEmailTemplate(
+  tournament: TournamentRow,
+  participants: ReminderParticipant[],
+): ApplicationEmailTemplate {
+  if (!tournament.application_email) {
+    throw new Error("申込先メールアドレスが未登録です。");
+  }
+  if (participants.length === 0) {
+    throw new Error("参加希望者がいないため申込メールを作成できません。");
+  }
+  const counts = new Map<string, number>();
+  for (const participant of participants) {
+    counts.set(participant.grade, (counts.get(participant.grade) ?? 0) + 1);
+  }
+  const gradeCounts = [...counts.entries()]
+    .sort(([left], [right]) => gradeSortOrder(left) - gradeSortOrder(right));
+  const grades = gradeCounts.map(([grade]) => formatGrade(grade)).join("・");
+  const countSummary = gradeCounts
+    .map(([grade, count]) => `${formatGrade(grade)}${count}名`)
+    .join("、");
+  const total = gradeCounts.reduce((sum, [, count]) => sum + count, 0);
+  const subject = `${tournament.title} ${grades} 申し込み(埼玉大学かるた会)`;
+  const body = `${tournament.title} 担当者 様\n\nお世話になっております。埼玉大学かるた会の石田洋音と申します。\n${tournament.title}へ申し込みをさせていただきます。\n申し込みは${countSummary}の計${total}名になります。\nよろしくお願いいたします。\n\n==============================\n埼玉大学かるた会\n石田 洋音\nE-mail: saitama.iroha@gmail.com\n==============================`;
+  return {
+    to: tournament.application_email,
+    subject,
+    body,
+    mailto: `mailto:${tournament.application_email}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`,
+  };
 }
 
 function startOfJstDay(value: string): Date {
@@ -664,8 +954,7 @@ export function getDeadlineReminderSchedule(
 ): Date {
   if (reminderKind === "internal_deadline") {
     return new Date(
-      startOfJstDay(tournament.internal_deadline).getTime() +
-        24 * 60 * 60 * 1000,
+      new Date(tournament.internal_deadline).getTime() + 60 * 1000,
     );
   }
   return startOfJstDay(tournament.true_deadline);
@@ -881,6 +1170,10 @@ async function listReminderParticipants(
   const participants = await db.prepare(
     `SELECT
       members.display_name,
+      CASE WHEN participant_tournaments.all_grades = 1
+        THEN members.grade
+        ELSE participant_tournaments.grade
+      END AS grade,
       COALESCE(
         NULLIF(members.display_name_kana, ''),
         NULLIF(trim(members.last_name_kana || ' ' || members.first_name_kana), ''),
@@ -888,10 +1181,20 @@ async function listReminderParticipants(
       ) AS display_name_kana
     FROM responses
     INNER JOIN members ON members.member_id = responses.member_id
-    WHERE responses.tournament_id = ?
+    INNER JOIN tournaments AS participant_tournaments
+      ON participant_tournaments.tournament_id = responses.tournament_id
+    WHERE COALESCE(
+        participant_tournaments.registration_group_id,
+        participant_tournaments.tournament_id
+      ) = (
+        SELECT COALESCE(target.registration_group_id, target.tournament_id)
+        FROM tournaments AS target
+        WHERE target.tournament_id = ?
+      )
       AND responses.response = 'yes'
       AND responses.is_valid = 1
     ORDER BY
+      grade,
       CASE WHEN display_name_kana = '' THEN 1 ELSE 0 END,
       display_name_kana,
       members.display_name`,
@@ -902,7 +1205,48 @@ async function listReminderParticipants(
   return participants.results.map((participant) => ({
     displayName: participant.display_name,
     displayNameKana: participant.display_name_kana,
+    grade: participant.grade,
   }));
+}
+
+export async function loadApplicationEmailTemplate(
+  db: D1Database,
+  tournamentId: string,
+): Promise<ApplicationEmailTemplate> {
+  if (!/^T-[0-9a-f-]{36}$/.test(tournamentId)) {
+    throw new Error("大会IDが不正です。");
+  }
+  const tournament = await db.prepare(
+    `SELECT
+      tournaments.tournament_id,
+      tournaments.registration_group_id,
+      tournaments.title,
+      tournaments.event_start_date,
+      tournaments.event_end_date,
+      tournaments.grade,
+      tournaments.all_grades,
+      tournaments.internal_deadline,
+      tournaments.true_deadline,
+      tournament_application_methods.application_method,
+      tournament_application_methods.roster_document_url AS application_roster_url,
+      tournament_application_methods.roster_file_name AS application_roster_file_name,
+      tournament_application_methods.application_email
+     FROM tournaments
+     INNER JOIN tournament_application_methods
+       ON tournament_application_methods.group_key = COALESCE(
+         tournaments.registration_group_id,
+         tournaments.tournament_id
+       )
+     WHERE tournaments.tournament_id = ?
+       AND tournament_application_methods.application_method = 'excel_email'
+       AND tournament_application_methods.application_email IS NOT NULL
+     LIMIT 1`,
+  ).bind(tournamentId).first<TournamentRow>();
+  if (!tournament) {
+    throw new Error("メール申込の大会情報を確認できません。");
+  }
+  const participants = await listReminderParticipants(db, tournamentId);
+  return buildApplicationEmailTemplate(tournament, participants);
 }
 
 export async function sendTestDeadlineReminder(
@@ -928,6 +1272,7 @@ export async function sendTestDeadlineReminder(
   const tournament = await env.DB.prepare(
     `SELECT
       tournament_id,
+      registration_group_id,
       title,
       event_start_date,
       event_end_date,
@@ -937,8 +1282,18 @@ export async function sendTestDeadlineReminder(
       venue,
       true_deadline,
       internal_deadline,
-      document_url
+      document_url,
+      tournament_application_methods.application_method,
+      tournament_application_methods.roster_document_url AS application_roster_url,
+      tournament_application_methods.roster_file_name AS application_roster_file_name,
+      tournament_application_methods.form_url AS application_form_url,
+      tournament_application_methods.application_email
     FROM tournaments
+    LEFT JOIN tournament_application_methods
+      ON tournament_application_methods.group_key = COALESCE(
+        tournaments.registration_group_id,
+        tournaments.tournament_id
+      )
     WHERE status = 'active'
       AND (internal_deadline > ? OR true_deadline > ?)
     ORDER BY
@@ -1057,8 +1412,7 @@ export async function createTournaments(
     document_url: input.documentUrl || null,
   }));
 
-  await env.DB.batch(
-    tournaments.map((tournament, index) => {
+  const statements = tournaments.map((tournament, index) => {
       const input = inputs[index];
       return env.DB.prepare(
         `INSERT INTO tournaments (
@@ -1100,8 +1454,61 @@ export async function createTournaments(
         now.toISOString(),
         now.toISOString(),
       );
-    }),
-  );
+    });
+
+  const application = inputs[0];
+  const applicationFingerprint = JSON.stringify({
+    method: application.applicationMethod || "",
+    rosterUrl: application.applicationRosterUrl || "",
+    rosterFileName: application.applicationRosterFileName || "",
+    rosterFileSize: application.applicationRosterFileSize || 0,
+    rosterContentType: application.applicationRosterContentType || "",
+    formUrl: application.applicationFormUrl || "",
+    email: application.applicationEmail || "",
+  });
+  if (inputs.some((input) => JSON.stringify({
+    method: input.applicationMethod || "",
+    rosterUrl: input.applicationRosterUrl || "",
+    rosterFileName: input.applicationRosterFileName || "",
+    rosterFileSize: input.applicationRosterFileSize || 0,
+    rosterContentType: input.applicationRosterContentType || "",
+    formUrl: input.applicationFormUrl || "",
+    email: input.applicationEmail || "",
+  }) !== applicationFingerprint)) {
+    throw new Error("同一大会の申込方法はすべての級で共通にしてください。");
+  }
+  if (application.applicationMethod) {
+    const groupKey = registrationGroupId ?? tournaments[0].tournament_id;
+    statements.push(env.DB.prepare(
+      `INSERT INTO tournament_application_methods (
+        group_key,
+        application_method,
+        roster_document_url,
+        roster_file_name,
+        roster_file_size,
+        roster_content_type,
+        form_url,
+        application_email,
+        created_by_email,
+        created_at,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(
+      groupKey,
+      application.applicationMethod,
+      application.applicationRosterUrl || null,
+      application.applicationRosterFileName || null,
+      application.applicationRosterFileSize || null,
+      application.applicationRosterContentType || null,
+      application.applicationFormUrl || null,
+      application.applicationEmail || null,
+      application.createdByEmail || null,
+      now.toISOString(),
+      now.toISOString(),
+    ));
+  }
+
+  await env.DB.batch(statements);
 
   return tournaments;
 }
@@ -1245,11 +1652,25 @@ export async function enqueueDeadlineReminders(
       document_url,
       (SELECT COUNT(*)
        FROM responses
-       WHERE responses.tournament_id = tournaments.tournament_id
+       INNER JOIN tournaments AS response_tournaments
+         ON response_tournaments.tournament_id = responses.tournament_id
+       WHERE COALESCE(
+           response_tournaments.registration_group_id,
+           response_tournaments.tournament_id
+         ) = COALESCE(tournaments.registration_group_id, tournaments.tournament_id)
          AND responses.response = 'yes'
          AND responses.is_valid = 1) AS response_yes
     FROM tournaments
     WHERE status = 'active'
+      AND tournaments.tournament_id = (
+        SELECT MIN(group_tournaments.tournament_id)
+        FROM tournaments AS group_tournaments
+        WHERE COALESCE(
+            group_tournaments.registration_group_id,
+            group_tournaments.tournament_id
+          ) = COALESCE(tournaments.registration_group_id, tournaments.tournament_id)
+          AND group_tournaments.status = 'active'
+      )
     ORDER BY internal_deadline, true_deadline
     LIMIT 100`,
   )
@@ -1503,10 +1924,20 @@ export async function processNotificationQueue(
       tournaments.true_deadline,
       tournaments.internal_deadline,
       tournaments.document_url,
+      tournament_application_methods.application_method,
+      tournament_application_methods.roster_document_url AS application_roster_url,
+      tournament_application_methods.roster_file_name AS application_roster_file_name,
+      tournament_application_methods.form_url AS application_form_url,
+      tournament_application_methods.application_email,
       tournaments.status AS tournament_status
     FROM notification_deliveries
     INNER JOIN tournaments
       ON tournaments.tournament_id = notification_deliveries.tournament_id
+    LEFT JOIN tournament_application_methods
+      ON tournament_application_methods.group_key = COALESCE(
+        tournaments.registration_group_id,
+        tournaments.tournament_id
+      )
     WHERE notification_deliveries.status IN ('pending', 'failed')
       AND notification_deliveries.attempt_count < ?
       AND (
