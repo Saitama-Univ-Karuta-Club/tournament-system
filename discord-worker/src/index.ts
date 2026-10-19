@@ -272,7 +272,7 @@ export async function handleRequest(
 ): Promise<Response> {
   const url = new URL(request.url);
 
-  const documentResponse = await serveTournamentDocument(request, env.DOCUMENTS);
+  const documentResponse = await serveTournamentDocument(request, env.DOCUMENTS, env.DB);
   if (documentResponse) return documentResponse;
 
   const emailMatch = request.method === "GET"

@@ -32,5 +32,12 @@
       "binding": "DOCUMENTS",
       "bucket_name": "sukc-tournament-documents"
     }
+  ],
+  "services": [
+    {
+      "binding": "DOCUMENT_CONVERTER",
+      "service": "sukc-tournament-backup",
+      "entrypoint": "DocumentConverter"
+    }
   ]
 }

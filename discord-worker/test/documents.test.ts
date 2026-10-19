@@ -87,6 +87,7 @@ describe("tournament PDF documents", () => {
 
   it("uploads an Excel application roster using a custom filename", async () => {
     const put = vi.fn().mockResolvedValue(undefined);
+    const convertR2DocumentToPdf = vi.fn();
     const form = new FormData();
     form.append("file", new File(
       [new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0, 0, 0, 0])],
@@ -102,6 +103,8 @@ describe("tournament PDF documents", () => {
       {
         DOCUMENTS: { put } as unknown as R2Bucket,
         DOCUMENT_PUBLIC_BASE_URL: "https://bot.example.com",
+        DB: { prepare: vi.fn() } as unknown as D1Database,
+        DOCUMENT_CONVERTER: { convertR2DocumentToPdf },
       },
       "admin@example.com",
     );
@@ -109,6 +112,7 @@ describe("tournament PDF documents", () => {
     expect(result.fileName).toBe("指定申込書.xlsx");
     expect(result.contentType).toContain("spreadsheetml");
     expect(String(put.mock.calls[0][0])).toContain("指定申込書.xlsx");
+    expect(convertR2DocumentToPdf).not.toHaveBeenCalled();
   });
 
   it("stores a valid PDF in a private R2 bucket and returns its Worker URL", async () => {
@@ -228,6 +232,83 @@ describe("tournament PDF documents", () => {
     expect(put.mock.calls[0][2].httpMetadata.contentDisposition).toContain("attachment");
   });
 
+  it("keeps a Word original and exposes its generated PDF through a stable URL", async () => {
+    const put = vi.fn().mockResolvedValue(undefined);
+    const run = vi.fn().mockResolvedValue({ success: true });
+    const prepare = vi.fn().mockImplementation(() => ({
+      bind: vi.fn().mockReturnValue({ run }),
+    }));
+    const convertR2DocumentToPdf = vi.fn().mockResolvedValue({
+      targetKey: "documents/id/preview/guide.pdf",
+      size: 1234,
+    });
+    const result = await storeParticipantGuidanceDocument(
+      new File(
+        [new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0, 0, 0, 0])],
+        "guide.docx",
+      ),
+      {
+        DOCUMENTS: { put } as unknown as R2Bucket,
+        DOCUMENT_PUBLIC_BASE_URL: "https://bot.example.com",
+        DB: { prepare } as unknown as D1Database,
+        DOCUMENT_CONVERTER: { convertR2DocumentToPdf },
+      },
+      "admin@example.com",
+      "2026年11月_埼玉大会_C級_参加者向け案内.docx",
+    );
+
+    expect(result.url).toMatch(/^https:\/\/bot\.example\.com\/document-files\/[0-9a-f-]{36}$/);
+    expect(result.sourceUrl).toBe(`${result.url}/source`);
+    expect(result.fileName).toMatch(/\.pdf$/);
+    expect(result.sourceFileName).toMatch(/\.docx$/);
+    expect(result.conversionStatus).toBe("ready");
+    expect(convertR2DocumentToPdf).toHaveBeenCalledWith(expect.objectContaining({
+      sourceContentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      targetFileName: expect.stringMatching(/\.pdf$/),
+    }));
+    expect(prepare).toHaveBeenCalledTimes(2);
+  });
+
+  it("serves a generated PDF and its Word original from stable document URLs", async () => {
+    const row = {
+      source_key: "documents/id/source/guide.docx",
+      source_file_name: "guide.docx",
+      source_content_type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      preferred_key: "documents/id/preview/guide.pdf",
+      preferred_file_name: "guide.pdf",
+      preferred_content_type: "application/pdf",
+    };
+    const first = vi.fn().mockResolvedValue(row);
+    const db = {
+      prepare: vi.fn().mockReturnValue({ bind: vi.fn().mockReturnValue({ first }) }),
+    } as unknown as D1Database;
+    const get = vi.fn().mockImplementation((key: string) => Promise.resolve({
+      body: new Blob([key.endsWith(".pdf") ? "%PDF-preview" : "word"]),
+      httpEtag: '"etag"',
+      httpMetadata: key.endsWith(".pdf")
+        ? { contentType: "application/pdf" }
+        : { contentType: row.source_content_type },
+    }));
+    const bucket = { get } as unknown as R2Bucket;
+    const id = "11111111-1111-4111-8111-111111111111";
+
+    const preview = await serveTournamentDocument(
+      new Request(`https://bot.example.com/document-files/${id}`),
+      bucket,
+      db,
+    );
+    expect(preview?.headers.get("Content-Type")).toBe("application/pdf");
+    expect(get).toHaveBeenLastCalledWith(row.preferred_key);
+
+    const source = await serveTournamentDocument(
+      new Request(`https://bot.example.com/document-files/${id}/source`),
+      bucket,
+      db,
+    );
+    expect(source?.headers.get("Content-Type")).toContain("wordprocessingml");
+    expect(get).toHaveBeenLastCalledWith(row.source_key);
+  });
+
   it("stores an Excel confirmation-roster file with the spreadsheet MIME type", async () => {
     const put = vi.fn().mockResolvedValue(undefined);
     const file = new File(
@@ -248,5 +329,41 @@ describe("tournament PDF documents", () => {
     expect(result.contentType).toContain("spreadsheetml");
     expect(result.url).toContain(".xlsx");
     expect(put.mock.calls[0][2].httpMetadata.contentDisposition).toContain("attachment");
+  });
+
+  it("keeps an Excel roster original and exposes a generated searchable PDF", async () => {
+    const put = vi.fn().mockResolvedValue(undefined);
+    const run = vi.fn().mockResolvedValue({ success: true });
+    const prepare = vi.fn().mockImplementation(() => ({
+      bind: vi.fn().mockReturnValue({ run }),
+    }));
+    const convertR2DocumentToPdf = vi.fn().mockResolvedValue({
+      targetKey: "documents/id/preview/roster.pdf",
+      size: 4321,
+    });
+    const result = await storeParticipantGuidanceDocument(
+      new File(
+        [new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0, 0, 0, 0])],
+        "roster.xlsx",
+      ),
+      {
+        DOCUMENTS: { put } as unknown as R2Bucket,
+        DOCUMENT_PUBLIC_BASE_URL: "https://bot.example.com",
+        DB: { prepare } as unknown as D1Database,
+        DOCUMENT_CONVERTER: { convertR2DocumentToPdf },
+      },
+      "admin@example.com",
+      "2026年11月_埼玉大会_C級_確定名簿.xlsx",
+    );
+
+    expect(result.fileName).toBe("2026年11月_埼玉大会_C級_確定名簿.pdf");
+    expect(result.sourceFileName).toBe("2026年11月_埼玉大会_C級_確定名簿.xlsx");
+    expect(result.contentType).toBe("application/pdf");
+    expect(result.conversionStatus).toBe("ready");
+    expect(convertR2DocumentToPdf).toHaveBeenCalledWith(expect.objectContaining({
+      sourceContentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      sourceFileName: expect.stringMatching(/\.xlsx$/),
+      targetFileName: expect.stringMatching(/\.pdf$/),
+    }));
   });
 });

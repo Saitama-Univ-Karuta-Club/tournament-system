@@ -322,7 +322,7 @@ describe("Admin Worker", () => {
     expect(html).toContain("結果を保存して公開");
     expect(html).toContain("/api/tournament-results/batch");
     expect(html).toContain("選手ごとの当落・入金状態");
-    expect(html).toContain("確定名簿（PDF・Excel）");
+    expect(html).toContain("確定名簿（PDF・Excel／Excelは検索可能なPDFへ自動変換）");
     expect(html).toContain("参加費・当日案内");
     expect(html).toContain("キャンセル待ち");
     expect(html).toContain("waitlistNumber");
@@ -474,15 +474,23 @@ describe("Admin Worker", () => {
         DB: { prepare } as unknown as D1Database,
         DOCUMENTS: { put } as unknown as R2Bucket,
         DOCUMENT_PUBLIC_BASE_URL: "https://bot.example.com",
+        DOCUMENT_CONVERTER: {
+          convertR2DocumentToPdf: vi.fn().mockResolvedValue({
+            targetKey: "documents/id/preview/converted.pdf",
+            size: 1234,
+          }),
+        },
       },
       new Request("https://admin.example.com/api/archive-documents", { method: "POST", body: form }),
       "admin@example.com",
     );
 
-    expect(result.file_name).toBe(`2026年11月_埼玉大会_C級_${fileLabel}.xlsx`);
+    expect(result.file_name).toBe(`2026年11月_埼玉大会_C級_${fileLabel}.pdf`);
+    expect(result.conversion_status).toBe("ready");
+    expect(result.source_file_name).toBe(`2026年11月_埼玉大会_C級_${fileLabel}.xlsx`);
     expect(put).toHaveBeenCalledOnce();
     expect(put.mock.calls[0][2].httpMetadata.contentType).toContain("spreadsheetml");
-    expect(run).toHaveBeenCalledOnce();
+    expect(run).toHaveBeenCalledTimes(3);
   });
 
   it.each([
@@ -813,7 +821,7 @@ describe("Admin Worker", () => {
     expect(html).toContain("return ['all']");
   });
 
-  it("offers direct PDF upload for registration and editing", async () => {
+  it("offers direct PDF or Word upload for registration and editing", async () => {
     const response = await handleAdminRequest(
       new Request("https://admin.example.com/register"),
       env,
@@ -822,7 +830,8 @@ describe("Admin Worker", () => {
 
     const html = await response.text();
     expect(html.match(/type="file" name="documentFile"/g)).toHaveLength(2);
-    expect(html).toContain("PDF形式、20MBまで");
+    expect(html).toContain("大会要項（PDF・Word）");
+    expect(html).toContain("Wordは原本を保存し、ブラウザ閲覧用PDFを自動生成します");
     expect(html).toContain("fetch('/api/documents'");
   });
 

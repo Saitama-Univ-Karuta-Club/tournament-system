@@ -1,4 +1,8 @@
 import { formatGrade } from "./members";
+import type {
+  OfficeConversionRequest,
+  OfficeConversionResult,
+} from "./office-conversion";
 
 export const MAX_PDF_BYTES = 20 * 1024 * 1024;
 export const MAX_GUIDANCE_BYTES = 20 * 1024 * 1024;
@@ -9,7 +13,14 @@ const VALID_GRADE = new Set(["A", "B", "C", "D", "E", "F", "beginner", "all"]);
 export interface DocumentEnv {
   DOCUMENTS?: R2Bucket;
   DOCUMENT_PUBLIC_BASE_URL?: string;
+  DOCUMENT_CONVERTER?: {
+    convertR2DocumentToPdf(
+      request: OfficeConversionRequest,
+    ): Promise<OfficeConversionResult>;
+  };
 }
+
+export type ManagedDocumentEnv = DocumentEnv & { DB?: D1Database };
 
 export type ArchiveDocumentType = "roster" | "results";
 
@@ -18,6 +29,15 @@ export interface StoredGuidanceDocument {
   fileName: string;
   size: number;
   contentType: string;
+  sourceUrl: string;
+  sourceFileName: string;
+  conversionStatus: "not_required" | "ready" | "failed";
+  conversionError: string | null;
+}
+
+export interface DocumentStorageOptions {
+  /** Set false for an Excel template that must remain editable after download. */
+  generatePdfPreview?: boolean;
 }
 
 export class DocumentUploadError extends Error {}
@@ -66,6 +86,15 @@ export function buildPdfFilename(
     .map((grade) => grade === "all" ? "全級" : formatGrade(grade))
     .join("・");
   return safeFilenamePart(`${months}_${safeTitle}_${gradeLabel}`, "大会要項") + ".pdf";
+}
+
+export function buildTournamentDocumentFilename(
+  title: string,
+  grades: string[],
+  eventDates: string[],
+  extension: "pdf" | "doc" | "docx",
+): string {
+  return buildPdfFilename(title, grades, eventDates).replace(/\.pdf$/i, `.${extension}`);
 }
 
 export function buildArchivePdfFilename(
@@ -146,17 +175,25 @@ function attachmentContentDisposition(filename: string): string {
 
 export async function uploadTournamentDocument(
   request: Request,
-  env: DocumentEnv,
+  env: ManagedDocumentEnv,
   uploadedBy: string,
-): Promise<{ url: string; fileName: string; size: number }> {
+): Promise<StoredGuidanceDocument> {
   if (!env.DOCUMENTS || !env.DOCUMENT_PUBLIC_BASE_URL) {
-    throw new DocumentUploadError("PDF保存先が設定されていません。");
+    throw new DocumentUploadError("大会要項の保存先が設定されていません。");
   }
   const form = await request.formData();
   const file = form.get("file");
-  if (!(file instanceof File)) throw new DocumentUploadError("PDFファイルを選択してください。");
-  if (file.size === 0) throw new DocumentUploadError("PDFファイルが空です。");
-  if (file.size > MAX_PDF_BYTES) throw new DocumentUploadError("PDFは20MB以下にしてください。");
+  if (!(file instanceof File)) throw new DocumentUploadError("大会要項を選択してください。");
+  if (file.size === 0) throw new DocumentUploadError("大会要項が空です。");
+  if (file.size > MAX_PDF_BYTES) throw new DocumentUploadError("大会要項は20MB以下にしてください。");
+  const extension = file.name.toLowerCase().match(/\.(pdf|doc|docx)$/)?.[1] as
+    | "pdf"
+    | "doc"
+    | "docx"
+    | undefined;
+  if (!extension) {
+    throw new DocumentUploadError("大会要項はPDF・Word（.doc/.docx）形式にしてください。");
+  }
 
   let grades: string[];
   let eventDates: string[];
@@ -164,19 +201,19 @@ export async function uploadTournamentDocument(
     grades = normalizeUploadGrades(JSON.parse(String(form.get("grades") ?? "")));
     eventDates = normalizeUploadDates(JSON.parse(String(form.get("eventDates") ?? "")));
   } catch (error) {
-    if (error instanceof SyntaxError) throw new DocumentUploadError("PDFの付随情報が不正です。");
+    if (error instanceof SyntaxError) throw new DocumentUploadError("大会要項の付随情報が不正です。");
     throw error;
   }
   const title = String(form.get("title") ?? "").trim();
   if (!title || title.length > 100) throw new DocumentUploadError("大会名を確認してください。");
 
-  const fileName = buildPdfFilename(title, grades, eventDates);
-  return storeTournamentPdf(file, env, uploadedBy, fileName);
+  const fileName = buildTournamentDocumentFilename(title, grades, eventDates, extension);
+  return storeParticipantGuidanceDocument(file, env, uploadedBy, fileName);
 }
 
 export async function uploadApplicationRoster(
   request: Request,
-  env: DocumentEnv,
+  env: ManagedDocumentEnv,
   uploadedBy: string,
 ): Promise<StoredGuidanceDocument> {
   const form = await request.formData();
@@ -214,12 +251,18 @@ export async function uploadApplicationRoster(
     extension,
     customFileName,
   );
-  return storeParticipantGuidanceDocument(file, env, uploadedBy, fileName);
+  return storeParticipantGuidanceDocument(
+    file,
+    env,
+    uploadedBy,
+    fileName,
+    { generatePdfPreview: false },
+  );
 }
 
 export async function storeTournamentPdf(
   file: File,
-  env: DocumentEnv,
+  env: ManagedDocumentEnv,
   uploadedBy: string,
   fileName: string,
 ): Promise<{ url: string; fileName: string; size: number }> {
@@ -252,9 +295,10 @@ export async function storeTournamentPdf(
 
 export async function storeParticipantGuidanceDocument(
   file: File,
-  env: DocumentEnv,
+  env: ManagedDocumentEnv,
   uploadedBy: string,
   fileName: string,
+  options: DocumentStorageOptions = {},
 ): Promise<StoredGuidanceDocument> {
   if (!env.DOCUMENTS || !env.DOCUMENT_PUBLIC_BASE_URL) {
     throw new DocumentUploadError("案内ファイルの保存先が設定されていません。");
@@ -298,38 +342,184 @@ export async function storeParticipantGuidanceDocument(
   }
 
   const id = crypto.randomUUID();
-  const key = `documents/${id}/${fileName}`;
-  await env.DOCUMENTS.put(key, bytes, {
+  const baseUrl = env.DOCUMENT_PUBLIC_BASE_URL.replace(/\/+$/, "");
+  const needsPdfPreview = options.generatePdfPreview !== false &&
+    (extension === "doc" || extension === "docx" || extension === "xls" || extension === "xlsx");
+
+  // PDFと、編集用として残す申込名簿Excelは従来URLのまま保存する。
+  if (!env.DB || !needsPdfPreview) {
+    const key = `documents/${id}/${fileName}`;
+    await env.DOCUMENTS.put(key, bytes, {
+      httpMetadata: {
+        contentType,
+        contentDisposition: extension === "pdf"
+          ? contentDisposition(fileName)
+          : attachmentContentDisposition(fileName),
+      },
+      customMetadata: {
+        uploadedBy: uploadedBy.slice(0, 320),
+        originalName: file.name.slice(0, 500),
+      },
+    });
+    const encodedKey = key.split("/").map(encodeURIComponent).join("/");
+    const url = `${baseUrl}/${encodedKey}`;
+    return {
+      url,
+      fileName,
+      size: file.size,
+      contentType,
+      sourceUrl: url,
+      sourceFileName: fileName,
+      conversionStatus: "not_required",
+      conversionError: null,
+    };
+  }
+
+  const sourceKey = `documents/${id}/source/${fileName}`;
+  const stableUrl = `${baseUrl}/document-files/${id}`;
+  const sourceUrl = `${stableUrl}/source`;
+  await env.DOCUMENTS.put(sourceKey, bytes, {
     httpMetadata: {
       contentType,
-      contentDisposition: extension === "pdf"
-        ? contentDisposition(fileName)
-        : attachmentContentDisposition(fileName),
+      contentDisposition: attachmentContentDisposition(fileName),
     },
     customMetadata: {
       uploadedBy: uploadedBy.slice(0, 320),
       originalName: file.name.slice(0, 500),
     },
   });
-  const baseUrl = env.DOCUMENT_PUBLIC_BASE_URL.replace(/\/+$/, "");
-  const encodedKey = key.split("/").map(encodeURIComponent).join("/");
+
+  await env.DB.prepare(
+    `INSERT INTO stored_documents (
+      document_id, source_key, source_file_name, source_content_type,
+      preferred_key, preferred_file_name, preferred_content_type,
+      conversion_status, uploaded_by_email
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).bind(
+    id,
+    sourceKey,
+    fileName,
+    contentType,
+    sourceKey,
+    fileName,
+    contentType,
+    "converting",
+    uploadedBy.slice(0, 320),
+  ).run();
+
+  if (needsPdfPreview) {
+    const previewFileName = fileName.replace(/\.(?:doc|docx|xls|xlsx)$/i, ".pdf");
+    const previewKey = `documents/${id}/preview/${previewFileName}`;
+    try {
+      if (!env.DOCUMENT_CONVERTER) {
+        throw new Error("PDF変換サービスが設定されていません。");
+      }
+      const converted = await env.DOCUMENT_CONVERTER.convertR2DocumentToPdf({
+        sourceKey,
+        targetKey: previewKey,
+        sourceContentType: contentType,
+        sourceFileName: fileName,
+        targetFileName: previewFileName,
+      });
+      await env.DB.prepare(
+        `UPDATE stored_documents
+         SET preferred_key = ?, preferred_file_name = ?,
+             preferred_content_type = 'application/pdf', preview_key = ?,
+             conversion_status = 'ready', conversion_error = NULL,
+             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         WHERE document_id = ?`,
+      ).bind(converted.targetKey, previewFileName, converted.targetKey, id).run();
+      return {
+        url: stableUrl,
+        fileName: previewFileName,
+        size: converted.size,
+        contentType: "application/pdf",
+        sourceUrl,
+        sourceFileName: fileName,
+        conversionStatus: "ready",
+        conversionError: null,
+      };
+    } catch (error: unknown) {
+      const message = (error instanceof Error ? error.message : String(error)).slice(0, 1000);
+      console.error("OfficeファイルのPDF変換に失敗しました", message);
+      await env.DB.prepare(
+        `UPDATE stored_documents
+         SET conversion_status = 'failed', conversion_error = ?,
+             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         WHERE document_id = ?`,
+      ).bind(message, id).run();
+      return {
+        url: stableUrl,
+        fileName,
+        size: file.size,
+        contentType,
+        sourceUrl,
+        sourceFileName: fileName,
+        conversionStatus: "failed",
+        conversionError: message,
+      };
+    }
+  }
+
   return {
-    url: `${baseUrl}/${encodedKey}`,
+    url: stableUrl,
     fileName,
     size: file.size,
     contentType,
+    sourceUrl,
+    sourceFileName: fileName,
+    conversionStatus: "not_required",
+    conversionError: null,
   };
+}
+
+interface StoredDocumentRouteRow {
+  source_key: string;
+  source_file_name: string;
+  source_content_type: string;
+  preferred_key: string;
+  preferred_file_name: string;
+  preferred_content_type: string;
 }
 
 export async function serveTournamentDocument(
   request: Request,
   bucket: R2Bucket | undefined,
+  db?: D1Database,
 ): Promise<Response | null> {
   const url = new URL(request.url);
-  if (
-    (request.method !== "GET" && request.method !== "HEAD") ||
-    !url.pathname.startsWith("/documents/")
-  ) return null;
+  if (request.method !== "GET" && request.method !== "HEAD") return null;
+  const stableMatch = url.pathname.match(/^\/document-files\/([0-9a-f-]{36})(\/source)?$/i);
+  if (stableMatch) {
+    if (!bucket || !db || !SAFE_ID.test(stableMatch[1])) {
+      return new Response("Not Found", { status: 404 });
+    }
+    const row = await db.prepare(
+      `SELECT source_key, source_file_name, source_content_type,
+        preferred_key, preferred_file_name, preferred_content_type
+       FROM stored_documents WHERE document_id = ?`,
+    ).bind(stableMatch[1]).first<StoredDocumentRouteRow>();
+    if (!row) return new Response("Not Found", { status: 404 });
+    const sourceRequested = Boolean(stableMatch[2]);
+    const key = sourceRequested ? row.source_key : row.preferred_key;
+    const fileName = sourceRequested ? row.source_file_name : row.preferred_file_name;
+    const contentType = sourceRequested ? row.source_content_type : row.preferred_content_type;
+    const object = await bucket.get(key);
+    if (!object) return new Response("Not Found", { status: 404 });
+    const headers = new Headers({
+      "Cache-Control": "private, max-age=3600",
+      "Content-Type": object.httpMetadata?.contentType || contentType,
+      "Content-Disposition": object.httpMetadata?.contentDisposition ||
+        (contentType === "application/pdf"
+          ? contentDisposition(fileName)
+          : attachmentContentDisposition(fileName)),
+      "X-Content-Type-Options": "nosniff",
+      ETag: object.httpEtag,
+    });
+    return new Response(request.method === "HEAD" ? null : object.body, { headers });
+  }
+
+  if (!url.pathname.startsWith("/documents/")) return null;
   if (!bucket) return new Response("Not Found", { status: 404 });
 
   let key: string;

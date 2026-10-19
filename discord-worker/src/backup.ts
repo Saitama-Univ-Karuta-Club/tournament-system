@@ -1,8 +1,14 @@
 import {
+  WorkerEntrypoint,
   WorkflowEntrypoint,
   type WorkflowEvent,
   type WorkflowStep,
 } from "cloudflare:workers";
+import {
+  convertStoredOfficeDocumentToPdf,
+  type OfficeConversionRequest,
+  type OfficeConversionResult,
+} from "./office-conversion";
 
 const DRIVE_API_BASE = "https://www.googleapis.com/drive/v3";
 const DRIVE_UPLOAD_BASE = "https://www.googleapis.com/upload/drive/v3";
@@ -100,6 +106,14 @@ interface D1ExportApiResponse {
 }
 
 export class BackupConfigurationError extends Error {}
+
+export class DocumentConverter extends WorkerEntrypoint<BackupEnv> {
+  convertR2DocumentToPdf(
+    request: OfficeConversionRequest,
+  ): Promise<OfficeConversionResult> {
+    return convertStoredOfficeDocumentToPdf(this.env, request);
+  }
+}
 
 function json(body: unknown, status = 200): Response {
   return Response.json(body, { status });

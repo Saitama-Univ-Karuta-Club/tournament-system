@@ -29,7 +29,6 @@ import {
   buildOrganizerPaymentFilename,
   DocumentUploadError,
   storeParticipantGuidanceDocument,
-  storeTournamentPdf,
   uploadApplicationRoster,
   uploadTournamentDocument,
   type ArchiveDocumentType,
@@ -158,6 +157,10 @@ interface AdminArchiveDocumentRow {
   file_name: string;
   file_size: number;
   uploaded_at: string;
+  source_url?: string;
+  source_file_name?: string;
+  conversion_status?: "not_required" | "ready" | "failed";
+  conversion_error?: string | null;
 }
 
 interface AdminParticipantGuidanceRow {
@@ -199,6 +202,10 @@ interface AdminConfirmationRosterRow {
   content_type: string;
   revision: number;
   uploaded_at: string;
+  source_url?: string;
+  source_file_name?: string;
+  conversion_status?: "not_required" | "ready" | "failed";
+  conversion_error?: string | null;
 }
 
 export interface AdminTournament extends AdminTournamentRow {
@@ -321,6 +328,7 @@ export interface ParticipantGuidanceSaveResult {
   paymentDeadline: string | null;
   revision: number;
   updatedAt: string;
+  conversionWarnings: string[];
 }
 
 export interface LotteryNotificationQueueResult {
@@ -1408,6 +1416,10 @@ export async function saveConfirmationRoster(
     content_type: stored.contentType,
     revision,
     uploaded_at: uploadedAt,
+    source_url: stored.sourceUrl,
+    source_file_name: stored.sourceFileName,
+    conversion_status: stored.conversionStatus,
+    conversion_error: stored.conversionError,
   };
 }
 
@@ -1477,9 +1489,7 @@ export async function uploadTournamentArchiveDocument(
   const fileName = extension === "pdf"
     ? pdfFileName
     : pdfFileName.replace(/\.pdf$/i, `.${extension}`);
-  const stored = extension === "pdf"
-    ? await storeTournamentPdf(file, env, uploadedBy, fileName)
-    : await storeParticipantGuidanceDocument(file, env, uploadedBy, fileName);
+  const stored = await storeParticipantGuidanceDocument(file, env, uploadedBy, fileName);
   const uploadedAt = new Date().toISOString();
   const groupKey = archiveGroupKey(tournaments);
   await env.DB.prepare(
@@ -1511,6 +1521,10 @@ export async function uploadTournamentArchiveDocument(
     file_name: stored.fileName,
     file_size: stored.size,
     uploaded_at: uploadedAt,
+    source_url: stored.sourceUrl,
+    source_file_name: stored.sourceFileName,
+    conversion_status: stored.conversionStatus,
+    conversion_error: stored.conversionError,
   };
 }
 
@@ -1613,6 +1627,7 @@ export async function saveParticipantGuidance(
   let fileName = existing?.file_name ?? null;
   let fileSize = existing?.file_size ?? null;
   let contentType = existing?.content_type ?? null;
+  const conversionWarnings: string[] = [];
   const file = form.get("file");
   if (file instanceof File && file.size > 0) {
     const extensionMatch = file.name.toLowerCase().match(/\.(pdf|doc|docx)$/);
@@ -1636,8 +1651,12 @@ export async function saveParticipantGuidance(
       fileName,
     );
     documentUrl = stored.url;
+    fileName = stored.fileName;
     fileSize = stored.size;
     contentType = stored.contentType;
+    if (stored.conversionStatus === "failed") {
+      conversionWarnings.push("当日案内の原本は保存しましたが、閲覧用PDFを生成できませんでした。原本のダウンロードリンクを使用します。");
+    }
   }
   if (!bodyText && !documentUrl) {
     throw new DocumentUploadError("案内本文または案内ファイルを登録してください。");
@@ -1669,8 +1688,12 @@ export async function saveParticipantGuidance(
       organizerPaymentFileName,
     );
     organizerPaymentDocumentUrl = stored.url;
+    organizerPaymentFileName = stored.fileName;
     organizerPaymentFileSize = stored.size;
     organizerPaymentContentType = stored.contentType;
+    if (stored.conversionStatus === "failed") {
+      conversionWarnings.push("主催者振込情報の原本は保存しましたが、閲覧用PDFを生成できませんでした。原本のダウンロードリンクを使用します。");
+    }
   }
   if (advancePayment && organizerPaymentSource === "text" && !organizerPaymentDetails) {
     throw new DocumentUploadError("主催者への振込先情報を入力してください。");
@@ -1760,6 +1783,7 @@ export async function saveParticipantGuidance(
     paymentDeadline: advancePayment ? parsedPaymentDeadline!.toISOString() : null,
     revision,
     updatedAt,
+    conversionWarnings,
   };
 }
 
@@ -2789,7 +2813,7 @@ function adminHtml(page: AdminPage): string {
             <label class="wide">申込先メールアドレス<input type="email" name="applicationEmail" maxlength="320" autocomplete="email" placeholder="entry@example.com"></label>
           </div>
         </fieldset>
-        <label class="wide">大会要項PDF <span class="file-note">任意・PDF形式、20MBまで。開催月・大会名・級に自動でリネームします</span><input type="file" name="documentFile" accept="application/pdf,.pdf"></label>
+        <label class="wide">大会要項（PDF・Word） <span class="file-note">任意・20MBまで。Wordは原本を保存し、ブラウザ閲覧用PDFを自動生成します</span><input type="file" name="documentFile" accept="application/pdf,.pdf,application/msword,.doc,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.docx"></label>
       </div>
       <div class="actions"><button id="submit" type="submit">登録して通知を開始</button><span id="result" role="status" aria-live="polite"></span></div>
       <div class="footnote">複数級を選ぶと、共通の申込フロー・締切を持つ同一大会として登録します。級ごとに開催日を変えることもできます。「すべて」は1件の大会として登録し、全級のメンバーへDMを送ります。</div>
@@ -2832,7 +2856,7 @@ function adminHtml(page: AdminPage): string {
         <label>主催締切日<input type="datetime-local" name="trueDeadline" required></label>
         <label>サークル内締切日<input type="datetime-local" name="internalDeadline" required></label>
         <label class="wide">会場 <span class="optional">任意</span><input name="venue" maxlength="200" autocomplete="off"></label>
-        <label class="wide">大会要項PDF <span class="file-note">新しいPDFを選ぶと現在の要項を差し替えます</span><input type="file" name="documentFile" accept="application/pdf,.pdf"></label>
+        <label class="wide">大会要項（PDF・Word） <span class="file-note">新しいファイルを選ぶと現在の要項を差し替えます。Wordは閲覧用PDFを自動生成します</span><input type="file" name="documentFile" accept="application/pdf,.pdf,application/msword,.doc,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.docx"></label>
         <label class="wide">大会要項URL <span class="optional">現在のリンク。空欄にすると要項なし</span><input type="url" name="documentUrl" maxlength="500" placeholder="https://..."></label>
       </div>
       <div class="dialog-actions"><span id="edit-tournament-result" class="status-message" role="status" aria-live="polite"></span><button id="cancel-tournament-edit" type="button" class="secondary">キャンセル</button><button id="save-tournament-edit" type="submit">変更を保存</button></div>
@@ -3095,7 +3119,7 @@ function adminHtml(page: AdminPage): string {
       }));
     }
 
-    async function uploadPdf(file, title, grades, eventDates) {
+    async function uploadTournamentGuideline(file, title, grades, eventDates) {
       if (!file || file.size === 0) return '';
       const upload = new FormData();
       upload.append('file', file);
@@ -3104,8 +3128,8 @@ function adminHtml(page: AdminPage): string {
       upload.append('eventDates', JSON.stringify(eventDates));
       const response = await fetch('/api/documents', { method: 'POST', body: upload });
       const body = await response.json();
-      if (!response.ok) throw new Error(body.error || 'PDFをアップロードできませんでした。');
-      return body.url;
+      if (!response.ok) throw new Error(body.error || '大会要項をアップロードできませんでした。');
+      return body;
     }
 
     async function uploadRegistrationRoster(file, title, grades, customFileName) {
@@ -3409,7 +3433,7 @@ function adminHtml(page: AdminPage): string {
       const confirmationBox = element('section', 'stage-box');
       confirmationBox.append(
         element('h5', '', '申込確認名簿'),
-        element('p', 'archive-note', '申込者へ名簿をDMします。確認ボタンは設けず、誤りがある場合のみ大会担当者へDMしてもらいます。PDF・Word・Excel、20MBまで登録できます。抽選なしで全員を受け入れる大会では、この項目を飛ばし、2番で確定名簿を登録して全員を「出場確定」にしてください。'),
+        element('p', 'archive-note', '申込者へ名簿をDMします。確認ボタンは設けず、誤りがある場合のみ大会担当者へDMしてもらいます。PDF・Word・Excel、20MBまで登録でき、Word・Excelは検索可能な閲覧用PDFへ自動変換します。抽選なしで全員を受け入れる大会では、この項目を飛ばし、2番で確定名簿を登録して全員を「出場確定」にしてください。'),
       );
       const confirmationFile = document.createElement('input');
       confirmationFile.type = 'file';
@@ -3443,6 +3467,9 @@ function adminHtml(page: AdminPage): string {
           const response = await fetch('/api/confirmation-roster', { method: 'POST', body: form });
           const result = await response.json();
           if (!response.ok) throw new Error(result.error || '確認名簿を保存できませんでした。');
+          if (result.roster?.conversion_status === 'failed') {
+            window.alert('確認名簿の原本は保存しましたが、閲覧用PDFを生成できませんでした。現在は原本のダウンロードリンクを使用します。');
+          }
           await loadTournaments();
         } catch (error) {
           confirmationMessage.textContent = error instanceof Error ? error.message : '確認名簿を保存できませんでした。';
@@ -3571,7 +3598,7 @@ function adminHtml(page: AdminPage): string {
       const documents = tournaments[0].archive_documents || [];
       const currentRosterDocument = documents.find((item) => item.document_type === 'roster');
       const rosterBox = element('div', 'archive-document');
-      rosterBox.append(element('strong', '', '確定名簿（PDF・Excel）'));
+      rosterBox.append(element('strong', '', '確定名簿（PDF・Excel／Excelは検索可能なPDFへ自動変換）'));
       if (currentRosterDocument) {
         const link = element('a', '', currentRosterDocument.file_name || '登録済み確定名簿を開く');
         link.href = currentRosterDocument.document_url;
@@ -3859,6 +3886,9 @@ function adminHtml(page: AdminPage): string {
           const response = await fetch('/api/participant-guidance', { method: 'POST', body: form });
           const result = await response.json();
           if (!response.ok) throw new Error(result.error || '案内を保存できませんでした。');
+          if (result.guidance?.conversionWarnings?.length) {
+            window.alert(result.guidance.conversionWarnings.join('\n'));
+          }
           await loadTournaments();
         } catch (error) {
           guidanceMessage.textContent = error instanceof Error ? error.message : '案内を保存できませんでした。';
@@ -3926,6 +3956,9 @@ function adminHtml(page: AdminPage): string {
             const rosterResponse = await fetch('/api/archive-documents', { method: 'POST', body: rosterForm });
             const rosterBody = await rosterResponse.json();
             if (!rosterResponse.ok) throw new Error(rosterBody.error || '確定名簿をアップロードできませんでした。');
+            if (rosterBody.document?.conversion_status === 'failed') {
+              window.alert('確定名簿の原本は保存しましたが、閲覧用PDFを生成できませんでした。現在は原本のダウンロードリンクを使用します。');
+            }
           }
           guidanceMessage.textContent = selectedRosterFile ? '2/3 抽選結果を保存中…' : '1/2 抽選結果を保存中…';
           const entriesResponse = await fetch('/api/tournament-entries/batch', {
@@ -3992,7 +4025,7 @@ function adminHtml(page: AdminPage): string {
       const documents = tournaments[0].archive_documents || [];
       const currentResultDocument = documents.find((item) => item.document_type === 'results');
       const resultDocumentUpload = element('div', 'archive-document result-document-upload');
-      resultDocumentUpload.append(element('strong', '', '大会結果ファイル（PDF・Excel）'));
+      resultDocumentUpload.append(element('strong', '', '大会結果ファイル（PDF・Excel／Excelは検索可能なPDFへ自動変換）'));
       if (currentResultDocument) {
         const link = element('a', '', currentResultDocument.file_name || '登録済み大会結果を開く');
         link.href = currentResultDocument.document_url;
@@ -4107,6 +4140,9 @@ function adminHtml(page: AdminPage): string {
             const uploadResponse = await fetch('/api/archive-documents', { method: 'POST', body: form });
             const uploadBody = await uploadResponse.json();
             if (!uploadResponse.ok) throw new Error(uploadBody.error || '大会結果ファイルをアップロードできませんでした。');
+            if (uploadBody.document?.conversion_status === 'failed') {
+              window.alert('大会結果の原本は保存しましたが、閲覧用PDFを生成できませんでした。現在は原本のダウンロードリンクを使用します。');
+            }
           }
           message.textContent = selectedFile ? '2/3 個人成績を保存中…' : '1/2 個人成績を保存中…';
           const resultsResponse = await fetch('/api/tournament-results/batch', {
@@ -4867,6 +4903,7 @@ function adminHtml(page: AdminPage): string {
       result.textContent = '保存中…';
       const data = new FormData(form);
       try {
+        let documentConversionWarning = false;
         const payload = Object.fromEntries(data.entries());
         delete payload.documentFile;
         delete payload.applicationRosterFile;
@@ -4906,13 +4943,15 @@ function adminHtml(page: AdminPage): string {
         if (applicationMethod !== 'excel_email') payload.applicationEmail = '';
         const documentFile = form.elements.documentFile.files?.[0];
         if (documentFile) {
-          result.textContent = 'PDFをアップロード中…';
-          payload.documentUrl = await uploadPdf(
+          result.textContent = '大会要項をアップロード・変換中…';
+          const uploadedDocument = await uploadTournamentGuideline(
             documentFile,
             payload.title,
             payload.grades,
             Object.values(payload.eventDatesByGrade),
           );
+          payload.documentUrl = uploadedDocument.url;
+          documentConversionWarning = uploadedDocument.conversionStatus === 'failed';
           result.textContent = '大会を保存中…';
         }
         const response = await fetch('/api/tournaments', {
@@ -4924,6 +4963,9 @@ function adminHtml(page: AdminPage): string {
         if (!response.ok) throw new Error(body.error || '登録に失敗しました。');
         result.className = 'ok';
         result.textContent = body.message || '登録しました。Discord通知を予約しました。';
+        if (documentConversionWarning) {
+          window.alert('大会要項の原本は保存しましたが、閲覧用PDFを生成できませんでした。現在は原本のダウンロードリンクを使用します。');
+        }
         resetTournamentForm();
       } catch (error) {
         result.className = 'error';
@@ -4944,6 +4986,7 @@ function adminHtml(page: AdminPage): string {
       editTournamentResult.className = 'status-message';
       editTournamentResult.textContent = '保存中…';
       try {
+        let documentConversionWarning = false;
         const payload = Object.fromEntries(new FormData(editTournamentForm).entries());
         delete payload.documentFile;
         payload.tournamentIds = editingTournaments.map((tournament) => tournament.tournament_id);
@@ -4955,14 +4998,16 @@ function adminHtml(page: AdminPage): string {
         payload.trueDeadline = localJstToIso(payload.trueDeadline);
         const documentFile = editTournamentForm.elements.documentFile.files?.[0];
         if (documentFile) {
-          editTournamentResult.textContent = 'PDFをアップロード中…';
+          editTournamentResult.textContent = '大会要項をアップロード・変換中…';
           const grades = editingTournaments.map((tournament) => tournament.all_grades === 1 ? 'all' : tournament.grade);
-          payload.documentUrl = await uploadPdf(
+          const uploadedDocument = await uploadTournamentGuideline(
             documentFile,
             payload.title,
             grades,
             Object.values(payload.eventDatesByTournament),
           );
+          payload.documentUrl = uploadedDocument.url;
+          documentConversionWarning = uploadedDocument.conversionStatus === 'failed';
           editTournamentResult.textContent = '大会情報を保存中…';
         }
         const response = await fetch('/api/tournaments', {
@@ -4974,6 +5019,9 @@ function adminHtml(page: AdminPage): string {
         if (!response.ok) throw new Error(body.error || '大会情報を変更できませんでした。');
         editTournamentResult.className = 'status-message';
         editTournamentResult.textContent = body.message || '変更しました。';
+        if (documentConversionWarning) {
+          window.alert('大会要項の原本は保存しましたが、閲覧用PDFを生成できませんでした。現在は原本のダウンロードリンクを使用します。');
+        }
         await loadTournaments();
         editTournamentDialog.close();
       } catch (error) {
@@ -5094,7 +5142,7 @@ export async function handleAdminRequest(
       return json({ error: "不正な送信元です。" }, 403);
     }
     if (!request.headers.get("Content-Type")?.toLowerCase().startsWith("multipart/form-data")) {
-      return json({ error: "PDFをフォーム形式で送信してください。" }, 415);
+      return json({ error: "大会要項をフォーム形式で送信してください。" }, 415);
     }
     try {
       return json(await uploadTournamentDocument(request, env, actor), 201);
@@ -5102,8 +5150,8 @@ export async function handleAdminRequest(
       if (error instanceof DocumentUploadError) {
         return json({ error: error.message }, 400);
       }
-      console.error("大会要項PDFの保存エラー", error);
-      return json({ error: "PDFを保存できませんでした。" }, 500);
+      console.error("大会要項の保存エラー", error);
+      return json({ error: "大会要項を保存できませんでした。" }, 500);
     }
   }
 
@@ -5132,7 +5180,7 @@ export async function handleAdminRequest(
       return json({ error: "不正な送信元です。" }, 403);
     }
     if (!request.headers.get("Content-Type")?.toLowerCase().startsWith("multipart/form-data")) {
-      return json({ error: "PDFをフォーム形式で送信してください。" }, 415);
+      return json({ error: "大会記録をフォーム形式で送信してください。" }, 415);
     }
     try {
       return json({
@@ -5142,8 +5190,8 @@ export async function handleAdminRequest(
       if (error instanceof DocumentUploadError) {
         return json({ error: error.message }, 400);
       }
-      console.error("大会記録PDFの保存エラー", error);
-      return json({ error: "大会記録PDFを保存できませんでした。" }, 500);
+      console.error("大会記録の保存エラー", error);
+      return json({ error: "大会記録を保存できませんでした。" }, 500);
     }
   }
 
