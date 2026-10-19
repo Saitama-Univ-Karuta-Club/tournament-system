@@ -6,11 +6,16 @@ import {
   buildDeadlineReminderMessage,
   buildDeadlineReminderTargets,
   buildNotificationTargets,
+  buildResponseDeadlineChannelReminderMessage,
+  buildResponseDeadlineDmReminderMessage,
+  buildResponseDeadlineReminderTargets,
   createTournaments,
   getDeadlineReminderSchedule,
+  getResponseDeadlineReminderSchedule,
   getRetryDelayMinutes,
   normalizeTournamentGrades,
   normalizeTournamentInput,
+  processNotificationQueue,
   recordAttendanceResponse,
 } from "../src/tournaments";
 
@@ -113,6 +118,26 @@ describe("attendance DM", () => {
         value: "[PDFを開く](https://bot.example.com/documents/test/guide.pdf)",
       }));
     }
+  });
+
+  it("builds channel and unanswered-member deadline reminders", () => {
+    const portalUrl = "https://portal.example.com";
+    const channelMessage = buildResponseDeadlineChannelReminderMessage(
+      tournament,
+      portalUrl,
+    );
+    const dmMessage = buildResponseDeadlineDmReminderMessage(
+      tournament,
+      portalUrl,
+    );
+
+    expect(channelMessage.content).toContain("サークル内締切の2日前");
+    expect(channelMessage.components).toBeUndefined();
+    expect(dmMessage.content).toContain("まだ回答が登録されていません");
+    expect(dmMessage.components?.[0]?.components).toHaveLength(3);
+    expect(dmMessage.embeds?.[0]?.fields).toContainEqual(
+      expect.objectContaining({ name: "Web版大会参加確認" }),
+    );
   });
 });
 
@@ -320,6 +345,112 @@ describe("notification queue", () => {
     expect(
       getDeadlineReminderSchedule(tournament, "organizer_deadline").toISOString(),
     ).toBe("2026-10-27T15:00:00.000Z");
+  });
+
+  it("サークル内締切日の2日前0時にチャンネルと未回答者DMをキューに入れる", () => {
+    const schedule = getResponseDeadlineReminderSchedule(tournament);
+    expect(schedule.toISOString()).toBe("2026-10-22T15:00:00.000Z");
+
+    const targets = buildResponseDeadlineReminderTargets(
+      tournament,
+      "announcement-channel",
+      [
+        { member_id: "M-1", discord_user_id: "D-1" },
+        { member_id: "M-2", discord_user_id: "D-2" },
+      ],
+      schedule,
+    );
+    expect(targets).toEqual([
+      expect.objectContaining({
+        notificationType: "announcement",
+        destinationId: "announcement-channel",
+        deliveryContext: "response_reminder",
+      }),
+      expect.objectContaining({
+        notificationType: "invitation_dm",
+        memberId: "M-1",
+        destinationId: "D-1",
+        deliveryContext: "response_reminder",
+      }),
+      expect.objectContaining({
+        notificationType: "invitation_dm",
+        memberId: "M-2",
+        destinationId: "D-2",
+        deliveryContext: "response_reminder",
+      }),
+    ]);
+
+    expect(buildResponseDeadlineReminderTargets(
+      tournament,
+      "announcement-channel",
+      [],
+      new Date(schedule.getTime() - 1),
+    )).toEqual([]);
+    expect(buildResponseDeadlineReminderTargets(
+      tournament,
+      "announcement-channel",
+      [],
+      new Date(tournament.internal_deadline),
+    )).toEqual([]);
+  });
+
+  it("キュー登録後に回答したメンバーへはリマインダーDMを送らない", async () => {
+    const skipped = vi.fn().mockResolvedValue({ meta: { changes: 1 } });
+    const prepare = vi.fn((sql: string) => {
+      if (
+        sql.includes("FROM notification_deliveries") &&
+        sql.includes("INNER JOIN tournaments")
+      ) {
+        return {
+          bind: vi.fn(() => ({
+            all: vi.fn().mockResolvedValue({
+              results: [{
+                ...tournament,
+                internal_deadline: "2099-10-25T12:00:00.000Z",
+                notification_id: 10,
+                member_id: "M-answered",
+                notification_type: "invitation_dm",
+                destination_id: "D-answered",
+                attempt_count: 0,
+                tournament_status: "active",
+                reminder_kind: null,
+                delivery_context: "response_reminder",
+                related_tournament_ids: null,
+              }],
+            }),
+          })),
+        };
+      }
+      if (sql.includes("SET lease_until = ?")) {
+        return {
+          bind: vi.fn(() => ({
+            run: vi.fn().mockResolvedValue({ meta: { changes: 1 } }),
+          })),
+        };
+      }
+      if (sql.includes("SELECT members.member_id")) {
+        return {
+          bind: vi.fn(() => ({ first: vi.fn().mockResolvedValue(null) })),
+        };
+      }
+      if (sql.includes("SET status = 'skipped'")) {
+        return { bind: vi.fn((reason: string) => ({ run: () => skipped(reason) })) };
+      }
+      throw new Error(`Unexpected SQL: ${sql}`);
+    });
+    const discordFetch = vi.spyOn(globalThis, "fetch");
+
+    const processed = await processNotificationQueue({
+      DB: { prepare } as unknown as D1Database,
+      DISCORD_BOT_TOKEN: "bot-token",
+    });
+
+    expect(processed).toBe(1);
+    expect(skipped).toHaveBeenCalledWith(
+      expect.stringContaining("回答済み"),
+    );
+    expect(discordFetch).not.toHaveBeenCalled();
+    discordFetch.mockRestore();
   });
 
   it("builds an administrator reminder without response buttons", () => {

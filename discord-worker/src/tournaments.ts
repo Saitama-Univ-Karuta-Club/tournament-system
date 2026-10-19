@@ -71,7 +71,7 @@ export interface NotificationTarget {
   destinationType: "channel" | "dm";
   destinationId: string;
   reminderKind?: ReminderKind;
-  deliveryContext?: "initial" | "update" | "completion";
+  deliveryContext?: "initial" | "update" | "completion" | "response_reminder";
   relatedTournamentIds?: string[];
 }
 
@@ -94,7 +94,7 @@ interface QueuedNotificationRow extends TournamentRow {
   attempt_count: number;
   tournament_status: string;
   reminder_kind: ReminderKind | null;
-  delivery_context: "initial" | "update" | "completion";
+  delivery_context: "initial" | "update" | "completion" | "response_reminder";
   related_tournament_ids: string | null;
 }
 
@@ -463,6 +463,37 @@ export function buildAnnouncementMessage(
   };
 }
 
+export function buildResponseDeadlineChannelReminderMessage(
+  tournament: TournamentRow,
+  memberPortalUrl?: string,
+): DiscordMessagePayload {
+  const message = buildAnnouncementMessage(tournament, false, memberPortalUrl);
+  return {
+    ...message,
+    content:
+      "【回答締切リマインダー】サークル内締切の2日前です。未回答の方は回答してください。",
+    embeds: message.embeds?.map((embed) => ({ ...embed, color: 0xfee75c })),
+  };
+}
+
+export function buildResponseDeadlineDmReminderMessage(
+  tournament: TournamentRow,
+  memberPortalUrl?: string,
+): DiscordMessagePayload {
+  const message = buildAttendanceMessage(
+    tournament,
+    undefined,
+    false,
+    memberPortalUrl,
+  );
+  return {
+    ...message,
+    content:
+      "【回答締切リマインダー】まだ回答が登録されていません。サークル内締切までに参加意思を選択してください。",
+    embeds: message.embeds?.map((embed) => ({ ...embed, color: 0xfee75c })),
+  };
+}
+
 export function buildApplicationCompletedMessage(
   tournaments: TournamentRow[],
   participants: ApplicationCompletedParticipant[],
@@ -639,6 +670,52 @@ export function getDeadlineReminderSchedule(
   return startOfJstDay(tournament.true_deadline);
 }
 
+export function getResponseDeadlineReminderSchedule(
+  tournament: TournamentRow,
+): Date {
+  return new Date(
+    startOfJstDay(tournament.internal_deadline).getTime() -
+      2 * 24 * 60 * 60 * 1000,
+  );
+}
+
+export function buildResponseDeadlineReminderTargets(
+  tournament: TournamentRow,
+  announcementChannelId: string,
+  unansweredMembers: TargetMemberRow[],
+  now = new Date(),
+): NotificationTarget[] {
+  const nowMs = now.getTime();
+  if (
+    nowMs < getResponseDeadlineReminderSchedule(tournament).getTime() ||
+    nowMs >= new Date(tournament.internal_deadline).getTime()
+  ) {
+    return [];
+  }
+
+  return [
+    {
+      idempotencyKey:
+        `response_reminder:channel:${tournament.tournament_id}:${announcementChannelId}`,
+      tournamentId: tournament.tournament_id,
+      notificationType: "announcement",
+      destinationType: "channel",
+      destinationId: announcementChannelId,
+      deliveryContext: "response_reminder",
+    },
+    ...unansweredMembers.map((member) => ({
+      idempotencyKey:
+        `response_reminder:dm:${tournament.tournament_id}:${member.member_id}`,
+      tournamentId: tournament.tournament_id,
+      memberId: member.member_id,
+      notificationType: "invitation_dm" as const,
+      destinationType: "dm" as const,
+      destinationId: member.discord_user_id,
+      deliveryContext: "response_reminder" as const,
+    })),
+  ];
+}
+
 export function buildNotificationTargets(
   tournament: TournamentRow,
   announcementChannelId: string,
@@ -745,6 +822,19 @@ async function markNotificationFailed(
      SET status = 'failed', error_message = ?, next_attempt_at = ?, lease_until = NULL
      WHERE notification_id = ?`,
   ).bind(message, nextAttemptAt, notificationId).run();
+}
+
+async function markNotificationSkipped(
+  db: D1Database,
+  notificationId: number,
+  reason: string,
+): Promise<void> {
+  await db.prepare(
+    `UPDATE notification_deliveries
+     SET status = 'skipped', error_message = ?, next_attempt_at = NULL,
+       lease_until = NULL
+     WHERE notification_id = ?`,
+  ).bind(reason, notificationId).run();
 }
 
 export async function upsertAnnouncementChannel(
@@ -1175,6 +1265,122 @@ export async function enqueueDeadlineReminders(
   return insertNotificationTargets(env, targets);
 }
 
+export async function enqueueResponseDeadlineReminders(
+  env: TournamentEnv,
+  now = new Date(),
+): Promise<number> {
+  if (!env.DISCORD_GUILD_ID) return 0;
+
+  const settings = await env.DB.prepare(
+    `SELECT announcement_channel_id
+     FROM discord_settings
+     WHERE guild_id = ?`,
+  )
+    .bind(env.DISCORD_GUILD_ID)
+    .first<{ announcement_channel_id: string | null }>();
+  if (!settings?.announcement_channel_id) return 0;
+
+  const tournaments = await env.DB.prepare(
+    `SELECT
+      tournament_id,
+      title,
+      event_start_date,
+      event_end_date,
+      grade,
+      all_grades,
+      tournament_type,
+      venue,
+      true_deadline,
+      internal_deadline,
+      document_url
+    FROM tournaments
+    WHERE status = 'active'
+      AND internal_deadline > ?
+      AND (
+        NOT EXISTS (
+          SELECT 1
+          FROM notification_deliveries
+          WHERE notification_deliveries.tournament_id = tournaments.tournament_id
+            AND notification_deliveries.delivery_context = 'response_reminder'
+            AND notification_deliveries.destination_type = 'channel'
+        )
+        OR EXISTS (
+          SELECT 1
+          FROM members
+          WHERE members.status = 'active'
+            AND members.dm_enabled = 1
+            AND (tournaments.all_grades = 1 OR members.grade = tournaments.grade)
+            AND members.discord_user_id IS NOT NULL
+            AND NOT EXISTS (
+              SELECT 1
+              FROM responses
+              WHERE responses.tournament_id = tournaments.tournament_id
+                AND responses.member_id = members.member_id
+                AND responses.is_valid = 1
+            )
+            AND NOT EXISTS (
+              SELECT 1
+              FROM notification_deliveries
+              WHERE notification_deliveries.tournament_id = tournaments.tournament_id
+                AND notification_deliveries.member_id = members.member_id
+                AND notification_deliveries.delivery_context = 'response_reminder'
+                AND notification_deliveries.destination_type = 'dm'
+            )
+        )
+      )
+    ORDER BY internal_deadline
+    LIMIT 100`,
+  ).bind(now.toISOString()).all<TournamentRow>();
+
+  let enqueued = 0;
+  for (const tournament of tournaments.results) {
+    if (now < getResponseDeadlineReminderSchedule(tournament)) continue;
+
+    const unansweredMembers = await env.DB.prepare(
+      `SELECT members.member_id, members.discord_user_id
+       FROM members
+       WHERE members.status = 'active'
+         AND members.dm_enabled = 1
+         AND (? = 1 OR members.grade = ?)
+         AND members.discord_user_id IS NOT NULL
+         AND NOT EXISTS (
+           SELECT 1
+           FROM responses
+           WHERE responses.tournament_id = ?
+             AND responses.member_id = members.member_id
+             AND responses.is_valid = 1
+         )
+         AND NOT EXISTS (
+           SELECT 1
+           FROM notification_deliveries
+           WHERE notification_deliveries.tournament_id = ?
+             AND notification_deliveries.member_id = members.member_id
+             AND notification_deliveries.delivery_context = 'response_reminder'
+             AND notification_deliveries.destination_type = 'dm'
+         )
+       ORDER BY members.member_id`,
+    )
+      .bind(
+        tournament.all_grades ?? 0,
+        tournament.grade,
+        tournament.tournament_id,
+        tournament.tournament_id,
+      )
+      .all<TargetMemberRow>();
+
+    enqueued += await insertNotificationTargets(
+      env,
+      buildResponseDeadlineReminderTargets(
+        tournament,
+        settings.announcement_channel_id,
+        unansweredMembers.results,
+        now,
+      ),
+    );
+  }
+  return enqueued;
+}
+
 function parseRelatedTournamentIds(
   raw: string | null,
   fallbackId: string,
@@ -1356,20 +1562,78 @@ export async function processNotificationQueue(
         ? notification.tournament_status === "applied"
         : notification.tournament_status === "active";
     if (!statusAllowsNotification) {
-      await env.DB.prepare(
-        `UPDATE notification_deliveries
-         SET status = 'skipped', error_message = ?, next_attempt_at = NULL,
-           lease_until = NULL
-         WHERE notification_id = ?`,
-      )
-        .bind("大会ステータスが通知条件を満たさないため送信を停止しました。", notification.notification_id)
-        .run();
+      await markNotificationSkipped(
+        env.DB,
+        notification.notification_id,
+        "大会ステータスが通知条件を満たさないため送信を停止しました。",
+      );
       continue;
     }
 
     try {
       let payload: DiscordMessagePayload;
-      if (notification.notification_type === "announcement") {
+      if (notification.delivery_context === "response_reminder") {
+        if (
+          attemptedAt.getTime() >=
+            new Date(notification.internal_deadline).getTime()
+        ) {
+          await markNotificationSkipped(
+            env.DB,
+            notification.notification_id,
+            "サークル内締切を過ぎたため回答リマインダーを送信しませんでした。",
+          );
+          continue;
+        }
+        if (notification.notification_type === "invitation_dm") {
+          if (!notification.member_id) {
+            throw new Error("回答リマインダーの送信先メンバーが未設定です。");
+          }
+          const unanswered = await env.DB.prepare(
+            `SELECT members.member_id
+             FROM members
+             WHERE members.member_id = ?
+               AND members.discord_user_id = ?
+               AND members.status = 'active'
+               AND members.dm_enabled = 1
+               AND (? = 1 OR members.grade = ?)
+               AND NOT EXISTS (
+                 SELECT 1
+                 FROM responses
+                 WHERE responses.tournament_id = ?
+                   AND responses.member_id = members.member_id
+                   AND responses.is_valid = 1
+               )
+             LIMIT 1`,
+          )
+            .bind(
+              notification.member_id,
+              notification.destination_id,
+              notification.all_grades ?? 0,
+              notification.grade,
+              notification.tournament_id,
+            )
+            .first<{ member_id: string }>();
+          if (!unanswered) {
+            await markNotificationSkipped(
+              env.DB,
+              notification.notification_id,
+              "回答済みまたは通知対象外になったためDMを送信しませんでした。",
+            );
+            continue;
+          }
+          payload = buildResponseDeadlineDmReminderMessage(
+            notification,
+            env.MEMBER_PORTAL_URL,
+          );
+        } else if (notification.notification_type === "announcement") {
+          payload = buildResponseDeadlineChannelReminderMessage(
+            notification,
+            env.MEMBER_PORTAL_URL,
+          );
+        } else {
+          throw new Error("回答リマインダーの通知種別が不正です。");
+        }
+      } else if (notification.notification_type === "announcement") {
         payload = buildAnnouncementMessage(
           notification,
           notification.delivery_context === "update",
@@ -1387,17 +1651,11 @@ export async function processNotificationQueue(
           notification.reminder_kind === "organizer_deadline" &&
           participants.length === 0
         ) {
-          await env.DB.prepare(
-            `UPDATE notification_deliveries
-             SET status = 'skipped', error_message = ?, next_attempt_at = NULL,
-               lease_until = NULL
-             WHERE notification_id = ?`,
-          )
-            .bind(
-              "参加希望者がいないため主催者締切リマインダーを送信しませんでした。",
-              notification.notification_id,
-            )
-            .run();
+          await markNotificationSkipped(
+            env.DB,
+            notification.notification_id,
+            "参加希望者がいないため主催者締切リマインダーを送信しませんでした。",
+          );
           continue;
         }
         payload = buildDeadlineReminderMessage(
@@ -1482,6 +1740,7 @@ export async function notifyPendingTournaments(
           FROM notification_deliveries
           WHERE notification_deliveries.tournament_id = tournaments.tournament_id
             AND notification_deliveries.notification_type = 'announcement'
+            AND notification_deliveries.delivery_context = 'initial'
         )
         OR EXISTS (
           SELECT 1
@@ -1496,6 +1755,7 @@ export async function notifyPendingTournaments(
               WHERE notification_deliveries.tournament_id = tournaments.tournament_id
                 AND notification_deliveries.member_id = members.member_id
                 AND notification_deliveries.notification_type = 'invitation_dm'
+                AND notification_deliveries.delivery_context = 'initial'
             )
         )
       )
@@ -1513,6 +1773,7 @@ export async function notifyPendingTournaments(
       );
     }
   }
+  await enqueueResponseDeadlineReminders(env);
   await enqueueDeadlineReminders(env);
   await processNotificationQueue(env);
 }

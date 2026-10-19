@@ -248,10 +248,12 @@ export async function listAdminTournaments(
       (SELECT COUNT(*) FROM notification_deliveries
         WHERE notification_deliveries.tournament_id = tournaments.tournament_id
           AND notification_deliveries.notification_type = 'announcement'
+          AND notification_deliveries.delivery_context <> 'response_reminder'
           AND notification_deliveries.status = 'sent') AS announcements_sent,
       (SELECT COUNT(*) FROM notification_deliveries
         WHERE notification_deliveries.tournament_id = tournaments.tournament_id
           AND notification_deliveries.notification_type = 'invitation_dm'
+          AND notification_deliveries.delivery_context <> 'response_reminder'
           AND notification_deliveries.status = 'sent') AS invitation_dms_sent,
       (SELECT COUNT(*) FROM notification_deliveries
         WHERE notification_deliveries.tournament_id = tournaments.tournament_id
