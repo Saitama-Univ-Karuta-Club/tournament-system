@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { defaultPaymentDeadline } from "../src/admin";
+import {
+  defaultOrganizerPaymentDeadline,
+  defaultPaymentDeadline,
+} from "../src/admin";
 import {
   buildConfirmationRosterMessage,
+  buildOrganizerPaymentMessage,
   buildPaymentReminderChannelMessage,
   buildPaymentReminderDmMessage,
 } from "../src/post-deadline";
@@ -58,10 +62,66 @@ describe("post-deadline workflow", () => {
     });
   });
 
-  it("defaults to the closest weekday at least two days before the organizer deadline", () => {
-    expect(defaultPaymentDeadline("2026-11-09T14:59:00.000Z"))
-      .toBe("2026-11-06T14:59:00.000Z");
-    expect(defaultPaymentDeadline("2026-11-11T14:59:00.000Z"))
-      .toBe("2026-11-09T14:59:00.000Z");
+  it("defaults the manager payment date to two days before the organizer deadline", () => {
+    const managerDeadline = defaultOrganizerPaymentDeadline("2026-11-09T14:59:00.000Z");
+    expect(managerDeadline).toBe("2026-11-07T14:59:00.000Z");
+    expect(defaultPaymentDeadline(managerDeadline)).toBe("2026-11-06T14:59:00.000Z");
+  });
+
+  it("builds manager-only bank-transfer information with totals and deadlines", () => {
+    const message = buildOrganizerPaymentMessage(
+      {
+        title: "埼玉大会",
+        trueDeadline: "2026-11-09T14:59:00.000Z",
+        paymentDetails: "埼玉銀行 かるた支店 普通 1234567",
+        organizerPaymentSource: "text",
+        organizerPaymentDocumentUrl: null,
+        organizerPaymentFileName: null,
+        guidanceBodyText: null,
+        guidanceDocumentUrl: null,
+        guidanceFileName: null,
+        organizerPaymentDeadline: "2026-11-07T14:59:00.000Z",
+        paymentDeadline: "2026-11-06T14:59:00.000Z",
+        organizerPaymentStatus: "unpaid",
+      },
+      [
+        { display_name: "石田洋音", grade: "C", participation_fee_yen: 2000, payment_status: "paid" },
+        { display_name: "山田花子", grade: "C", participation_fee_yen: 2000, payment_status: "unpaid" },
+      ],
+      "https://admin.example.com",
+    );
+
+    expect(message.content).toContain("担当者向け・参加費振込情報");
+    expect(JSON.stringify(message)).toContain("4,000円");
+    expect(JSON.stringify(message)).toContain("埼玉銀行");
+    expect(JSON.stringify(message)).toContain("担当者の支払日");
+    expect(JSON.stringify(message)).toContain("振込済み");
+    expect(JSON.stringify(message)).toContain("https://admin.example.com/tournaments");
+  });
+
+  it("strongly highlights an unpaid organizer transfer on the organizer deadline day", () => {
+    const message = buildOrganizerPaymentMessage(
+      {
+        title: "埼玉大会",
+        trueDeadline: "2026-11-09T14:59:00.000Z",
+        paymentDetails: "振込先",
+        organizerPaymentSource: "text",
+        organizerPaymentDocumentUrl: null,
+        organizerPaymentFileName: null,
+        guidanceBodyText: null,
+        guidanceDocumentUrl: null,
+        guidanceFileName: null,
+        organizerPaymentDeadline: "2026-11-07T14:59:00.000Z",
+        paymentDeadline: "2026-11-06T14:59:00.000Z",
+        organizerPaymentStatus: "unpaid",
+      },
+      [],
+      undefined,
+      true,
+    );
+
+    expect(message.content).toContain("【至急・主催者への振込未完了】");
+    expect(message.content).toContain("本日が主催締切日");
+    expect(message.embeds?.[0]?.color).toBe(0xed4245);
   });
 });

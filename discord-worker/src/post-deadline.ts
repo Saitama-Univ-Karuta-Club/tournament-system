@@ -2,6 +2,7 @@ import { sendChannelMessage, sendDirectMessage, type DiscordMessagePayload } fro
 import { formatGrade } from "./members";
 import {
   buildEntryResultsAnnouncementMessage,
+  getDeadlineReminderSchedule,
   type EntryResultAnnouncementParticipant,
   type TournamentRow,
 } from "./tournaments";
@@ -9,13 +10,16 @@ import {
 export interface PostDeadlineEnv {
   DB: D1Database;
   DISCORD_BOT_TOKEN?: string;
+  TOURNAMENT_ADMIN_URL?: string;
 }
 
 type DeliveryKind =
   | "confirmation_roster_dm"
   | "lottery_result_channel"
+  | "organizer_payment_info_channel"
   | "payment_reminder_dm"
-  | "payment_reminder_channel";
+  | "payment_reminder_channel"
+  | "organizer_payment_overdue_channel";
 
 interface DeliveryTarget {
   idempotencyKey: string;
@@ -61,6 +65,21 @@ export interface PaymentReminderParticipant {
   grade: string;
   participation_fee_yen: number;
   payment_status: "paid" | "unpaid";
+}
+
+export interface OrganizerPaymentGuidance {
+  title: string;
+  trueDeadline: string;
+  paymentDetails: string | null;
+  organizerPaymentSource: "text" | "file" | "guidance";
+  organizerPaymentDocumentUrl: string | null;
+  organizerPaymentFileName: string | null;
+  guidanceBodyText: string | null;
+  guidanceDocumentUrl: string | null;
+  guidanceFileName: string | null;
+  organizerPaymentDeadline: string;
+  paymentDeadline: string;
+  organizerPaymentStatus: "unpaid" | "paid";
 }
 
 const MAX_ATTEMPTS = 5;
@@ -200,6 +219,107 @@ export function buildPaymentReminderChannelMessage(
   };
 }
 
+function truncateDiscordField(value: string, maxLength = 1000): string {
+  return value.length <= maxLength ? value : `${value.slice(0, maxLength - 1)}…`;
+}
+
+function adminTournamentLink(adminUrl?: string): string | null {
+  if (!adminUrl) return null;
+  try {
+    return new URL("/tournaments", adminUrl).toString();
+  } catch {
+    return null;
+  }
+}
+
+export function buildOrganizerPaymentMessage(
+  guidance: OrganizerPaymentGuidance,
+  participants: PaymentReminderParticipant[],
+  adminUrl?: string,
+  overdue = false,
+): DiscordMessagePayload {
+  const amount = (value: number) => new Intl.NumberFormat("ja-JP").format(value);
+  const gradeTotals = new Map<string, { count: number; total: number }>();
+  for (const participant of participants) {
+    const current = gradeTotals.get(participant.grade) ?? { count: 0, total: 0 };
+    current.count += 1;
+    current.total += Number(participant.participation_fee_yen);
+    gradeTotals.set(participant.grade, current);
+  }
+  const breakdown = [...gradeTotals.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([grade, value]) => `${formatGrade(grade)} ${value.count}人・${amount(value.total)}円`)
+    .join("\n") || "出場確定者なし";
+  const total = participants.reduce(
+    (sum, participant) => sum + Number(participant.participation_fee_yen),
+    0,
+  );
+  let paymentInstructions = "当日案内を参照してください。";
+  if (guidance.organizerPaymentSource === "text") {
+    paymentInstructions = guidance.paymentDetails || "振込先情報未登録";
+  } else if (guidance.organizerPaymentSource === "file") {
+    paymentInstructions = guidance.organizerPaymentDocumentUrl
+      ? `[${guidance.organizerPaymentFileName || "主催者振込情報を開く"}](${guidance.organizerPaymentDocumentUrl})`
+      : "振込情報ファイル未登録";
+  } else {
+    const parts = [guidance.guidanceBodyText || "当日案内に記載"];
+    if (guidance.guidanceDocumentUrl) {
+      parts.push(
+        `[${guidance.guidanceFileName || "当日案内ファイルを開く"}](${guidance.guidanceDocumentUrl})`,
+      );
+    }
+    paymentInstructions = parts.join("\n");
+  }
+  const fields: NonNullable<
+    NonNullable<DiscordMessagePayload["embeds"]>[number]["fields"]
+  > = [
+    {
+      name: `主催者への振込合計（${participants.length}人）`,
+      value: `${amount(total)}円\n${breakdown}`,
+      inline: false,
+    },
+    {
+      name: "振込先・振込方法",
+      value: truncateDiscordField(paymentInstructions),
+      inline: false,
+    },
+    {
+      name: "担当者の支払日",
+      value: formatJstDateTime(guidance.organizerPaymentDeadline),
+      inline: true,
+    },
+    {
+      name: "サークル内支払期限",
+      value: formatJstDateTime(guidance.paymentDeadline),
+      inline: true,
+    },
+    {
+      name: "主催者への振込状況",
+      value: guidance.organizerPaymentStatus === "paid" ? "振込済み" : "未振込",
+      inline: false,
+    },
+  ];
+  const adminLink = adminTournamentLink(adminUrl);
+  if (adminLink) {
+    fields.push({
+      name: "大会管理画面",
+      value: `[振込後に「振込済み」へ変更する](${adminLink})`,
+      inline: false,
+    });
+  }
+  return {
+    content: overdue
+      ? "**【至急・主催者への振込未完了】本日が主催締切日です。主催者への参加費振込が未完了です。すぐに振込を行い、管理画面で「振込済み」に変更してください。**"
+      : "【担当者向け・参加費振込情報】抽選結果と出場確定者が登録されました。主催者への振込内容を確認してください。",
+    embeds: [{
+      title: guidance.title,
+      color: overdue ? 0xed4245 : 0x5865f2,
+      fields,
+    }],
+    allowed_mentions: { parse: [] },
+  };
+}
+
 export async function enqueueConfirmationRosterDms(
   env: PostDeadlineEnv,
   groupKey: string,
@@ -255,6 +375,31 @@ export async function enqueueLotteryResultAnnouncement(
     kind: "lottery_result_channel",
     destinationType: "channel",
     destinationId: settings.announcement_channel_id,
+    revision,
+  }]);
+}
+
+export async function enqueueOrganizerPaymentInfo(
+  env: PostDeadlineEnv,
+  groupKey: string,
+  representativeTournamentId: string,
+  revision: number,
+): Promise<number> {
+  const settings = await env.DB.prepare(
+    `SELECT admin_reminder_channel_id FROM discord_settings
+     WHERE admin_reminder_channel_id IS NOT NULL
+     ORDER BY updated_at DESC LIMIT 1`,
+  ).first<{ admin_reminder_channel_id: string }>();
+  if (!settings?.admin_reminder_channel_id) {
+    throw new Error("大会担当者チャンネルが未設定です。");
+  }
+  return insertTargets(env, [{
+    idempotencyKey: `organizer_payment_info:${groupKey}:r${revision}`,
+    groupKey,
+    tournamentId: representativeTournamentId,
+    kind: "organizer_payment_info_channel",
+    destinationType: "channel",
+    destinationId: settings.admin_reminder_channel_id,
     revision,
   }]);
 }
@@ -341,6 +486,66 @@ export async function enqueueDuePaymentReminders(
       });
     }
     queued += await insertTargets(env, targets);
+  }
+  return queued;
+}
+
+export async function enqueueDueOrganizerPaymentReminders(
+  env: PostDeadlineEnv,
+  now = new Date(),
+): Promise<number> {
+  const due = await env.DB.prepare(
+    `SELECT tournament_participant_guidance.group_key,
+      tournament_participant_guidance.representative_tournament_id,
+      tournament_participant_guidance.revision,
+      tournaments.true_deadline
+     FROM tournament_participant_guidance
+     INNER JOIN tournaments
+       ON tournaments.tournament_id = tournament_participant_guidance.representative_tournament_id
+     WHERE tournament_participant_guidance.payment_collection_method = 'advance_manager'
+       AND tournament_participant_guidance.organizer_payment_status = 'unpaid'
+       AND EXISTS (
+         SELECT 1 FROM post_deadline_deliveries
+         WHERE post_deadline_deliveries.group_key = tournament_participant_guidance.group_key
+           AND post_deadline_deliveries.delivery_kind = 'organizer_payment_info_channel'
+       )`,
+  ).all<{
+    group_key: string;
+    representative_tournament_id: string;
+    revision: number;
+    true_deadline: string;
+  }>();
+  const settings = await env.DB.prepare(
+    `SELECT admin_reminder_channel_id FROM discord_settings
+     WHERE admin_reminder_channel_id IS NOT NULL
+     ORDER BY updated_at DESC LIMIT 1`,
+  ).first<{ admin_reminder_channel_id: string }>();
+  if (!settings?.admin_reminder_channel_id) return 0;
+  let queued = 0;
+  for (const guidance of due.results) {
+    const schedule = getDeadlineReminderSchedule(
+      {
+        tournament_id: guidance.representative_tournament_id,
+        title: "",
+        event_start_date: "",
+        event_end_date: "",
+        grade: "C",
+        internal_deadline: guidance.true_deadline,
+        true_deadline: guidance.true_deadline,
+      },
+      "organizer_deadline",
+    );
+    if (now < schedule) continue;
+    const deadlineKey = guidance.true_deadline.replace(/[^0-9]/g, "");
+    queued += await insertTargets(env, [{
+      idempotencyKey: `organizer_payment_overdue:${guidance.group_key}:${deadlineKey}`,
+      groupKey: guidance.group_key,
+      tournamentId: guidance.representative_tournament_id,
+      kind: "organizer_payment_overdue_channel",
+      destinationType: "channel",
+      destinationId: settings.admin_reminder_channel_id,
+      revision: guidance.revision,
+    }]);
   }
   return queued;
 }
@@ -439,6 +644,60 @@ async function paymentGuidance(db: D1Database, groupKey: string): Promise<{
   return { ...row, payment_deadline: row.payment_deadline };
 }
 
+async function organizerPaymentGuidance(
+  db: D1Database,
+  groupKey: string,
+): Promise<OrganizerPaymentGuidance> {
+  const row = await db.prepare(
+    `SELECT tournaments.title, tournaments.true_deadline,
+      tournament_participant_guidance.payment_details,
+      tournament_participant_guidance.organizer_payment_source,
+      tournament_participant_guidance.organizer_payment_document_url,
+      tournament_participant_guidance.organizer_payment_file_name,
+      tournament_participant_guidance.body_text,
+      tournament_participant_guidance.document_url,
+      tournament_participant_guidance.file_name,
+      tournament_participant_guidance.organizer_payment_deadline,
+      tournament_participant_guidance.payment_deadline,
+      tournament_participant_guidance.organizer_payment_status
+     FROM tournament_participant_guidance
+     INNER JOIN tournaments
+       ON tournaments.tournament_id = tournament_participant_guidance.representative_tournament_id
+     WHERE tournament_participant_guidance.group_key = ?
+       AND tournament_participant_guidance.payment_collection_method = 'advance_manager'`,
+  ).bind(groupKey).first<{
+    title: string;
+    true_deadline: string;
+    payment_details: string | null;
+    organizer_payment_source: "text" | "file" | "guidance";
+    organizer_payment_document_url: string | null;
+    organizer_payment_file_name: string | null;
+    body_text: string | null;
+    document_url: string | null;
+    file_name: string | null;
+    organizer_payment_deadline: string | null;
+    payment_deadline: string | null;
+    organizer_payment_status: "unpaid" | "paid";
+  }>();
+  if (!row?.organizer_payment_deadline || !row.payment_deadline) {
+    throw new Error("担当者向けの振込情報または支払期限が登録されていません。");
+  }
+  return {
+    title: row.title,
+    trueDeadline: row.true_deadline,
+    paymentDetails: row.payment_details,
+    organizerPaymentSource: row.organizer_payment_source,
+    organizerPaymentDocumentUrl: row.organizer_payment_document_url,
+    organizerPaymentFileName: row.organizer_payment_file_name,
+    guidanceBodyText: row.body_text,
+    guidanceDocumentUrl: row.document_url,
+    guidanceFileName: row.file_name,
+    organizerPaymentDeadline: row.organizer_payment_deadline,
+    paymentDeadline: row.payment_deadline,
+    organizerPaymentStatus: row.organizer_payment_status,
+  };
+}
+
 export async function processPostDeadlineQueue(
   env: PostDeadlineEnv,
   batchSize = 20,
@@ -489,6 +748,25 @@ export async function processPostDeadlineQueue(
         payload = await confirmationPayload(env.DB, delivery);
       } else if (delivery.delivery_kind === "lottery_result_channel") {
         payload = await lotteryPayload(env.DB, delivery.group_key);
+      } else if (
+        delivery.delivery_kind === "organizer_payment_info_channel" ||
+        delivery.delivery_kind === "organizer_payment_overdue_channel"
+      ) {
+        const guidance = await organizerPaymentGuidance(env.DB, delivery.group_key);
+        if (
+          delivery.delivery_kind === "organizer_payment_overdue_channel" &&
+          guidance.organizerPaymentStatus === "paid"
+        ) {
+          await markSkipped(env.DB, delivery.delivery_id, "主催者への振込済みのため送信しませんでした。");
+          continue;
+        }
+        const payments = await paymentParticipants(env.DB, delivery.group_key);
+        payload = buildOrganizerPaymentMessage(
+          guidance,
+          payments,
+          env.TOURNAMENT_ADMIN_URL,
+          delivery.delivery_kind === "organizer_payment_overdue_channel",
+        );
       } else {
         const guidance = await paymentGuidance(env.DB, delivery.group_key);
         const payments = await paymentParticipants(env.DB, delivery.group_key);

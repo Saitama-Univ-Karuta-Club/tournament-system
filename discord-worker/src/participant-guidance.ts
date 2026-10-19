@@ -26,6 +26,7 @@ export interface ParticipantPaymentResponseInput {
   tournamentId: string;
   discordUserId: string;
   status: "unpaid" | "paid";
+  changedBy?: string;
 }
 
 export interface GuidanceEnqueueResult {
@@ -222,7 +223,7 @@ export async function recordParticipantPaymentResponse(
   const previousStatus = target.payment_status ?? "unpaid";
   if (previousStatus !== input.status) {
     const now = new Date().toISOString();
-    const changedBy = `discord:${input.discordUserId}`;
+    const changedBy = input.changedBy ?? `discord:${input.discordUserId}`;
     await env.DB.batch([
       env.DB.prepare(
         `INSERT INTO tournament_entry_payments (

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   decideMemberRegistration,
+  listAdminMemberAppearances,
   MemberAdminError,
 } from "../src/admin-members";
 
@@ -22,6 +23,42 @@ function decisionEnvironment(requestRow: Record<string, unknown>) {
 }
 
 describe("member registration decisions", () => {
+  it("summarizes confirmed appearances by grade for the current fiscal year", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-10-20T12:00:00+09:00"));
+    const all = vi.fn().mockResolvedValue({
+      results: [
+        { group_key: "G-new", title: "秋大会", event_start_date: "2026-10-19", grade: "C", result_text: "優勝" },
+        { group_key: "G-summer", title: "夏大会", event_start_date: "2026-06-10", grade: "B", result_text: null },
+        { group_key: "G-summer", title: "夏大会", event_start_date: "2026-06-10", grade: "B", result_text: null },
+        { group_key: "G-old", title: "春季大会", event_start_date: "2026-03-20", grade: "C", result_text: "2回戦敗退" },
+      ],
+    });
+    const bind = vi.fn().mockReturnValue({ all });
+    const prepare = vi.fn().mockReturnValue({ bind });
+    const memberId = "M-11111111-1111-4111-8111-111111111111";
+
+    const history = await listAdminMemberAppearances(
+      { DB: { prepare } as unknown as D1Database },
+      memberId,
+    );
+
+    expect(history).toEqual({
+      memberId,
+      fiscalYear: 2026,
+      gradeCounts: { C: 1, B: 1 },
+      appearances: [
+        { title: "秋大会", eventDate: "2026-10-19", grade: "C", resultText: "優勝" },
+        { title: "夏大会", eventDate: "2026-06-10", grade: "B", resultText: null },
+        { title: "春季大会", eventDate: "2026-03-20", grade: "C", resultText: "2回戦敗退" },
+      ],
+    });
+    expect(bind).toHaveBeenCalledWith(memberId, "2026-10-20");
+    expect(prepare.mock.calls[0][0]).toContain("tournament_entries.status = 'selected'");
+    expect(prepare.mock.calls[0][0]).toContain("tournaments.status NOT IN ('canceled', 'deleted')");
+    vi.useRealTimers();
+  });
+
   it("approves an existing member update while preserving the member ID", async () => {
     const requestId = "MR-11111111-1111-4111-8111-111111111111";
     const { env, batch, sqlStatements } = decisionEnvironment({

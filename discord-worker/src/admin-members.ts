@@ -21,6 +21,14 @@ interface MemberDatabaseRow {
   updated_at: string;
 }
 
+interface MemberAppearanceDatabaseRow {
+  group_key: string;
+  title: string;
+  event_start_date: string;
+  grade: string;
+  result_text: string | null;
+}
+
 interface RegistrationRequestDatabaseRow {
   request_id: string;
   member_id: string | null;
@@ -62,6 +70,20 @@ export interface AdminMember {
   discordLinked: boolean;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface AdminMemberAppearance {
+  title: string;
+  eventDate: string;
+  grade: string;
+  resultText: string | null;
+}
+
+export interface AdminMemberAppearanceHistory {
+  memberId: string;
+  fiscalYear: number;
+  gradeCounts: Record<string, number>;
+  appearances: AdminMemberAppearance[];
 }
 
 export interface MemberUpdateInput {
@@ -238,6 +260,64 @@ export async function listAdminMembers(
   ).all<MemberDatabaseRow>();
 
   return members.results.map(toAdminMember);
+}
+
+function currentJstDate(): string {
+  return new Date(Date.now() + 9 * 60 * 60 * 1000).toISOString().slice(0, 10);
+}
+
+export async function listAdminMemberAppearances(
+  env: TournamentEnv,
+  memberId: string,
+): Promise<AdminMemberAppearanceHistory> {
+  const today = currentJstDate();
+  const [year, month] = today.split("-").map(Number);
+  const fiscalYear = month >= 4 ? year : year - 1;
+  const rows = await env.DB.prepare(
+    `SELECT
+      COALESCE(tournaments.registration_group_id, tournaments.tournament_id) AS group_key,
+      tournaments.title,
+      tournaments.event_start_date,
+      CASE
+        WHEN tournaments.all_grades = 1
+          THEN COALESCE(NULLIF(tournament_entries.archive_grade, ''), members.grade)
+        ELSE tournaments.grade
+      END AS grade,
+      tournament_entries.result_text
+    FROM tournament_entries
+    INNER JOIN tournaments
+      ON tournaments.tournament_id = tournament_entries.tournament_id
+    INNER JOIN members
+      ON members.member_id = tournament_entries.member_id
+    WHERE tournament_entries.member_id = ?
+      AND tournament_entries.status = 'selected'
+      AND tournaments.event_start_date <= ?
+      AND tournaments.status NOT IN ('canceled', 'deleted')
+    ORDER BY tournaments.event_start_date DESC, tournaments.created_at DESC`,
+  ).bind(memberId, today).all<MemberAppearanceDatabaseRow>();
+
+  const seenGroups = new Set<string>();
+  const appearances = rows.results
+    .filter((row) => {
+      if (seenGroups.has(row.group_key)) return false;
+      seenGroups.add(row.group_key);
+      return true;
+    })
+    .map((row) => ({
+      title: row.title,
+      eventDate: row.event_start_date,
+      grade: row.grade,
+      resultText: row.result_text,
+    }));
+  const fiscalStart = `${fiscalYear}-04-01`;
+  const fiscalEnd = `${fiscalYear + 1}-03-31`;
+  const gradeCounts: Record<string, number> = {};
+  for (const appearance of appearances) {
+    if (appearance.eventDate < fiscalStart || appearance.eventDate > fiscalEnd) continue;
+    gradeCounts[appearance.grade] = (gradeCounts[appearance.grade] ?? 0) + 1;
+  }
+
+  return { memberId, fiscalYear, gradeCounts, appearances };
 }
 
 export async function listPendingMemberRegistrations(

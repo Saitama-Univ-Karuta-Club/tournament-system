@@ -20,6 +20,7 @@ import {
   type ParticipantPaymentResponseInput,
 } from "./participant-guidance";
 import {
+  enqueueDueOrganizerPaymentReminders,
   enqueueDuePaymentReminders,
   processPostDeadlineQueue,
 } from "./post-deadline";
@@ -82,6 +83,8 @@ export interface Env {
 
 interface DiscordInteraction {
   type: number;
+  application_id?: string;
+  token?: string;
   guild_id?: string;
   channel_id?: string;
   member?: {
@@ -130,6 +133,11 @@ type ParticipantPaymentRecorder = (
   env: Env,
   input: ParticipantPaymentResponseInput,
 ) => Promise<import("./discord-api").DiscordMessagePayload>;
+type InteractionOriginalResponseEditor = (
+  applicationId: string,
+  interactionToken: string,
+  payload: import("./discord-api").DiscordMessagePayload,
+) => Promise<void>;
 type MemberRegistrar = (
   db: D1Database,
   input: RegisterMemberInput,
@@ -171,6 +179,26 @@ const ephemeralMessage = (content: string): Response =>
     type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
     data: { content, flags: 64 },
   });
+
+async function editOriginalInteractionResponse(
+  applicationId: string,
+  interactionToken: string,
+  payload: import("./discord-api").DiscordMessagePayload,
+): Promise<void> {
+  const response = await fetch(
+    `https://discord.com/api/v10/webhooks/${applicationId}/${interactionToken}/messages/@original`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+  );
+  if (!response.ok) {
+    throw new Error(
+      `Discordの操作結果メッセージ更新に失敗しました (${response.status}): ${(await response.text()).slice(0, 500)}`,
+    );
+  }
+}
 
 function getStringOption(
   interaction: DiscordInteraction,
@@ -240,6 +268,7 @@ export async function handleRequest(
   reminderChannelSetter: ReminderChannelSetter = upsertReminderChannel,
   testReminderSender: TestReminderSender = sendTestDeadlineReminder,
   participantPaymentRecorder: ParticipantPaymentRecorder = recordParticipantPaymentResponse,
+  interactionOriginalResponseEditor: InteractionOriginalResponseEditor = editOriginalInteractionResponse,
 ): Promise<Response> {
   const url = new URL(request.url);
 
@@ -520,13 +549,32 @@ export async function handleRequest(
     if (status !== "paid" && status !== "unpaid") {
       return ephemeralMessage("支払い操作が不正です。");
     }
+    const paymentInput: ParticipantPaymentResponseInput = {
+      tournamentId: tournamentId ?? "",
+      discordUserId:
+        interaction.member?.user?.id ?? interaction.user?.id ?? "",
+      status,
+    };
+    if (
+      executionContext &&
+      interaction.application_id &&
+      interaction.token
+    ) {
+      executionContext.waitUntil(
+        participantPaymentRecorder(env, paymentInput)
+          .then((payload) => interactionOriginalResponseEditor(
+            interaction.application_id!,
+            interaction.token!,
+            payload,
+          ))
+          .catch((error: unknown) => {
+            console.error("参加費支払い状態の変更エラー", error);
+          }),
+      );
+      return json({ type: InteractionResponseType.DEFERRED_UPDATE_MESSAGE });
+    }
     try {
-      const payload = await participantPaymentRecorder(env, {
-        tournamentId: tournamentId ?? "",
-        discordUserId:
-          interaction.member?.user?.id ?? interaction.user?.id ?? "",
-        status,
-      });
+      const payload = await participantPaymentRecorder(env, paymentInput);
       return json({ type: InteractionResponseType.UPDATE_MESSAGE, data: payload });
     } catch (error: unknown) {
       console.error("参加費支払い状態の変更エラー", error);
@@ -550,6 +598,7 @@ export default {
   ): void {
     const processPostDeadlineWorkflow = async (): Promise<void> => {
       await enqueueDuePaymentReminders(env);
+      await enqueueDueOrganizerPaymentReminders(env);
       await processPostDeadlineQueue(env);
     };
     ctx.waitUntil(

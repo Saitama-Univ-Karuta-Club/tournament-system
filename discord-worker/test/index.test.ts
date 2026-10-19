@@ -472,4 +472,65 @@ describe("Discord Worker", () => {
       data: { content: "支払い状態を更新しました。" },
     });
   });
+
+  it("acknowledges a payment button immediately and updates it in the background", async () => {
+    const verifier = vi.fn().mockResolvedValue(true);
+    const paymentRecorder = vi.fn().mockResolvedValue({
+      content: "支払い済みとして記録しました。",
+      components: [],
+    });
+    const originalResponseEditor = vi.fn().mockResolvedValue(undefined);
+    let backgroundTask: Promise<unknown> | undefined;
+    const waitUntil = vi.fn((task: Promise<unknown>) => {
+      backgroundTask = task;
+    });
+
+    const response = await handleRequest(
+      new Request("https://example.com/interactions", {
+        method: "POST",
+        headers: {
+          "X-Signature-Ed25519": "signature",
+          "X-Signature-Timestamp": "timestamp",
+        },
+        body: JSON.stringify({
+          type: 3,
+          application_id: "application-id",
+          token: "interaction-token",
+          user: { id: "discord-user-id" },
+          data: {
+            custom_id: "payment:T-11111111-1111-4111-8111-111111111111:paid",
+          },
+        }),
+      }),
+      env,
+      verifier,
+      { waitUntil },
+      vi.fn(),
+      vi.fn(),
+      vi.fn(),
+      vi.fn(),
+      vi.fn(),
+      vi.fn(),
+      vi.fn(),
+      paymentRecorder,
+      originalResponseEditor,
+    );
+
+    await expect(response.json()).resolves.toEqual({ type: 6 });
+    expect(waitUntil).toHaveBeenCalledOnce();
+    await backgroundTask;
+    expect(paymentRecorder).toHaveBeenCalledWith(env, {
+      tournamentId: "T-11111111-1111-4111-8111-111111111111",
+      discordUserId: "discord-user-id",
+      status: "paid",
+    });
+    expect(originalResponseEditor).toHaveBeenCalledWith(
+      "application-id",
+      "interaction-token",
+      {
+        content: "支払い済みとして記録しました。",
+        components: [],
+      },
+    );
+  });
 });

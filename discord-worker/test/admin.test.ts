@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  buildAdminTodoItems,
   editTournaments,
   handleAdminRequest,
   listAdminTournaments,
@@ -8,8 +9,10 @@ import {
   updateTournamentEntriesBatch,
   updateTournamentEntryStatus,
   updateTournamentEntryResult,
+  updateTournamentEntryResultsBatch,
   updateTournamentStatuses,
   type AdminEnv,
+  type AdminTournament,
 } from "../src/admin";
 
 const env = {
@@ -37,6 +40,22 @@ describe("Admin Worker", () => {
 
     expect(script).toBeTruthy();
     expect(() => new Function(script ?? "")).not.toThrow();
+  });
+
+  it("renders an on-demand member appearance history dialog", async () => {
+    const response = await handleAdminRequest(
+      new Request("https://admin.example.com/members"),
+      env,
+      authenticatedContext(),
+    );
+    const html = await response.text();
+
+    expect(html).toContain('id="member-history-dialog"');
+    expect(html).toContain("['氏名', 'よみがな', '出場級', '段位', '出場歴', '状態', 'DM', '操作']");
+    expect(html).toContain("function openMemberHistory(member)");
+    expect(html).toContain("'/api/members/' + encodeURIComponent(member.memberId)");
+    expect(html).toContain("history.fiscalYear + '年度：'");
+    expect(html).toContain("['開催月', '大会名', '出場級', '戦績']");
   });
 
   it("redirects an unauthenticated browser to Discord login", async () => {
@@ -77,6 +96,7 @@ describe("Admin Worker", () => {
   });
 
   it.each([
+    ["todo", "TODO"],
     ["register", "大会登録"],
     ["tournaments", "大会一覧"],
     ["members", "メンバー管理"],
@@ -101,6 +121,130 @@ describe("Admin Worker", () => {
     expect(() => new Function(script!)).not.toThrow();
   });
 
+  it("renders a simple TODO page with one-tap completion actions", async () => {
+    const response = await handleAdminRequest(
+      new Request("https://admin.example.com/todo"),
+      env,
+      authenticatedContext(),
+    );
+
+    const html = await response.text();
+    expect(html).toContain('id="todo-list"');
+    expect(html).toContain('id="todo-count-badge"');
+    expect(html).toContain("todoCountBadge.hidden = normalized === 0");
+    expect(html).toContain("setTodoCountBadge(body.todos.length)");
+    expect(html).toContain("申込完了にする");
+    expect(html).toContain("振込完了にする");
+    expect(html).toContain("結果を入力する");
+    expect(html).toContain("participant.grade");
+    expect(html).toContain("申込メールを作成");
+    expect(html).toContain("申込フォームを開く");
+    expect(html).toContain("合計 '");
+    expect(html).toContain("振込情報を確認");
+    expect(html).toContain("/api/todos");
+    expect(html).toContain("section=results");
+    expect(html).toContain("section=guidance");
+  });
+
+  it("builds grouped deadline TODOs and keeps urgent unfinished work visible", () => {
+    const memberResponse = (entryStatus: string | null = null) => ({
+      member_id: "M-11111111-1111-4111-8111-111111111111",
+      response: "yes",
+      entry_status: entryStatus,
+    });
+    const tournament = (overrides: Record<string, unknown>): AdminTournament => ({
+      tournament_id: "T-11111111-1111-4111-8111-111111111111",
+      registration_group_id: "G-default",
+      title: "テスト大会",
+      event_start_date: "2026-10-25",
+      event_end_date: "2026-10-25",
+      grade: "C",
+      all_grades: 0,
+      tournament_type: "official",
+      internal_deadline: "2026-10-19T14:59:00.000Z",
+      true_deadline: "2026-10-22T14:59:00.000Z",
+      created_at: "2026-10-01T00:00:00.000Z",
+      status: "active",
+      closure_reason: null,
+      archive_published_at: null,
+      responses: [memberResponse()],
+      participant_guidance: null,
+      ...overrides,
+    } as AdminTournament);
+    const paymentGuidance = {
+      payment_collection_method: "advance_manager",
+      organizer_payment_status: "unpaid",
+      payment_deadline: "2026-10-19T14:59:00.000Z",
+      organizer_payment_deadline: "2026-10-21T14:59:00.000Z",
+    };
+    const tournaments = [
+      tournament({ registration_group_id: "G-application" }),
+      tournament({
+        tournament_id: "T-22222222-2222-4222-8222-222222222222",
+        registration_group_id: "G-urgent-application",
+        title: "本日締切大会",
+        true_deadline: "2026-10-20T14:59:00.000Z",
+      }),
+      tournament({
+        tournament_id: "T-33333333-3333-4333-8333-333333333333",
+        registration_group_id: "G-payment",
+        title: "振込大会",
+        status: "applied",
+        responses: [memberResponse("selected")],
+        participant_guidance: paymentGuidance,
+      }),
+      tournament({
+        tournament_id: "T-44444444-4444-4444-8444-444444444444",
+        registration_group_id: "G-urgent-payment",
+        title: "振込超過大会",
+        status: "applied",
+        responses: [memberResponse("selected")],
+        participant_guidance: {
+          ...paymentGuidance,
+          payment_deadline: "2026-10-18T14:59:00.000Z",
+          organizer_payment_deadline: "2026-10-19T14:59:00.000Z",
+        },
+      }),
+      tournament({
+        tournament_id: "T-55555555-5555-4555-8555-555555555555",
+        registration_group_id: "G-results",
+        title: "結果待ち大会",
+        event_start_date: "2026-10-19",
+        event_end_date: "2026-10-19",
+        status: "applied",
+        responses: [memberResponse("selected")],
+      }),
+    ];
+
+    const todos = buildAdminTodoItems(
+      tournaments,
+      new Date("2026-10-20T06:00:00.000Z"),
+    );
+
+    expect(todos).toHaveLength(5);
+    expect(todos.find((item) => item.title === "本日締切大会")).toMatchObject({
+      kind: "application",
+      urgency: "urgent",
+      timing: "today",
+    });
+    expect(todos.find((item) => item.title === "振込超過大会")).toMatchObject({
+      kind: "payment",
+      urgency: "urgent",
+    });
+    expect(todos.find((item) => item.title === "結果待ち大会")).toMatchObject({
+      kind: "results",
+      participantCount: 1,
+    });
+    expect(buildAdminTodoItems(
+      tournaments,
+      new Date("2026-10-19T14:59:59.999Z"),
+    ).some((item) => item.kind === "results")).toBe(false);
+    expect(buildAdminTodoItems(
+      tournaments,
+      new Date("2026-10-19T15:00:00.000Z"),
+    ).some((item) => item.kind === "results")).toBe(true);
+  });
+
   it("shows the queue notice only on the registration page", async () => {
     const response = await handleAdminRequest(
       new Request("https://admin.example.com/register"),
@@ -123,7 +267,7 @@ describe("Admin Worker", () => {
     );
 
     const html = await response.text();
-    expect(html).toContain("['氏名', 'よみがな', '出場級', '段位', '状態', 'DM', '操作']");
+    expect(html).toContain("['氏名', 'よみがな', '出場級', '段位', '出場歴', '状態', 'DM', '操作']");
     expect(html).toContain("renderMemberTableHeader()");
     expect(html).toContain("member-summary-grid");
     expect(html).toContain("item.dataset.label = label");
@@ -172,14 +316,17 @@ describe("Admin Worker", () => {
     expect(html).toContain("tournamentIds: tournaments.map");
     expect(html).toContain("開催級はこの画面では変更できません");
     expect(html).toContain("1. 申込確認名簿（抽選前・");
+    expect(html).toContain("抽選なしで全員を受け入れる大会では、この項目を飛ばし");
     expect(html).toContain("2. 抽選結果・確定名簿・参加費・当日案内");
     expect(html).toContain("3. 大会結果");
+    expect(html).toContain("結果を保存して公開");
+    expect(html).toContain("/api/tournament-results/batch");
     expect(html).toContain("選手ごとの当落・入金状態");
     expect(html).toContain("確定名簿（PDF・Excel）");
     expect(html).toContain("参加費・当日案内");
     expect(html).toContain("キャンセル待ち");
     expect(html).toContain("waitlistNumber");
-    expect(html).toContain("全員分の変更を保存");
+    expect(html).toContain("送信時に全員分をまとめて保存");
     expect(html).toContain("/api/tournament-entries/batch");
     expect(html).toContain("document.createElement('details')");
     expect(html).toContain("entry-management-body");
@@ -471,6 +618,36 @@ describe("Admin Worker", () => {
       status: 400,
     });
     expect(prepare).not.toHaveBeenCalled();
+  });
+
+  it("saves all entrant results through one batch operation", async () => {
+    const prepare = vi.fn((sql: string) => ({
+      bind: vi.fn(() => ({
+        first: vi.fn().mockResolvedValue({ result_text: null }),
+        sql,
+      })),
+    }));
+    const batch = vi.fn(async (items: unknown[]) => items.map(() => ({ success: true })));
+
+    const result = await updateTournamentEntryResultsBatch(
+      { DB: { prepare, batch } as unknown as D1Database },
+      [
+        {
+          tournamentId: "T-11111111-1111-4111-8111-111111111111",
+          memberId: "M-11111111-1111-4111-8111-111111111111",
+          resultText: "3回戦敗退",
+        },
+        {
+          tournamentId: "T-11111111-1111-4111-8111-111111111111",
+          memberId: "M-22222222-2222-4222-8222-222222222222",
+          resultText: "準優勝",
+        },
+      ],
+      "discord:admin",
+    );
+
+    expect(result).toEqual({ entryCount: 2, changedCount: 2 });
+    expect(batch).toHaveBeenCalledTimes(2);
   });
 
   it("publishes a complete tournament archive", async () => {

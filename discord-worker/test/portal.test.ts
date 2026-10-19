@@ -94,9 +94,13 @@ describe("member portal", () => {
     expect(html).toContain('id="answer-tab"');
     expect(html).toContain('id="tournaments-tab"');
     expect(html).toContain('id="archive-tab"');
+    expect(html).toContain('id="profile-tab"');
     expect(html).toContain('id="answer-list"');
     expect(html).toContain('id="tournament-list"');
     expect(html).toContain('id="archive-list"');
+    expect(html).toContain('id="profile-panel"');
+    expect(html).toContain('id="profile-content"');
+    expect(html).toContain('id="payment-alert"');
     expect(html).toContain("過去の大会結果");
     expect(html).toContain("function renderArchives()");
     expect(html).toContain("結果ファイル");
@@ -105,6 +109,11 @@ describe("member portal", () => {
     expect(html).toContain('<option value="open" selected>回答受付中</option>');
     expect(html).toContain('<option value="unanswered">未回答</option>');
     expect(html).toContain('<option value="action">回答が必要な順</option>');
+    expect(html).toContain('<option value="current">すべての進行中</option>');
+    expect(html).toContain('<option value="active">申込受付中</option>');
+    expect(html).toContain('<option value="applied">申込済み</option>');
+    expect(html).toContain('<option value="pre_lottery">抽選前</option>');
+    expect(html).toContain('<option value="confirmed">参加者確定</option>');
     expect(response.headers.get("Content-Security-Policy")).toContain("frame-ancestors 'none'");
     const script = html.match(/<script>([\s\S]*)<\/script>/)?.[1];
     expect(script).toBeTruthy();
@@ -123,8 +132,31 @@ describe("member portal", () => {
     expect(answerRenderer).not.toContain("× ");
     expect(tournamentRenderer).toContain('class="participants"');
     expect(html).toContain(".participants li.empty{display:block;white-space:nowrap}");
+    expect(html).toContain(".tab-count[hidden],.payment-alert[hidden]{display:none}");
     expect(script).toContain("function eligibleAnswerGroups()");
     expect(script).toContain("function canAnswer(target)");
+    expect(script).toContain("function renderPaymentAlert()");
+    expect(script).toContain("function renderProfile()");
+    expect(script).toContain("function saveProfile(event)");
+    expect(script).toContain("現在の登録情報");
+    expect(script).toContain('id="profile-dialog"');
+    expect(script).toContain(">編集</button>");
+    expect(script).toContain(">更新</button>");
+    expect(script).toContain("大会出場履歴");
+    expect(script).toContain("function eventMonth(value)");
+    expect(script).toContain('class="history-table"');
+    expect(script).toContain("未登録");
+    expect(script).toContain("参加費のサークル内支払期限を過ぎています");
+    expect(script).toContain("function savePayment(event)");
+    expect(script).toContain(">振込完了</button>");
+    expect(script).toContain("function tournamentStage(group)");
+    expect(script).toContain("function tournamentResourceLinks(group,stage)");
+    expect(script).toContain("▣ 申込確認名簿");
+    expect(script).toContain("▣ 確定選手名簿");
+    expect(script).toContain("▣ 当日案内");
+    expect(script).not.toContain("payment_status");
+    expect(script).not.toContain("支払済み");
+    expect(script).not.toContain("未納");
   });
 
   it("rejects tournament API access without a member session", async () => {
@@ -235,5 +267,50 @@ describe("member portal", () => {
     expect(response.status).toBe(200);
     expect(sql.find((statement) => statement.includes("INSERT INTO responses"))).toContain("'web'");
     expect(run).toHaveBeenCalledOnce();
+  });
+
+  it("marks only the logged-in participant payment as paid from the portal", async () => {
+    const batch = vi.fn().mockResolvedValue([{ success: true }, { success: true }]);
+    const prepare = vi.fn((statement: string) => ({
+      bind: vi.fn(() => ({
+        first: vi.fn().mockResolvedValue(
+          statement.includes("tournament_participant_guidance.body_text")
+            ? {
+                member_id: member.member_id,
+                title: "支払いテスト大会",
+                body_text: null,
+                document_url: null,
+                file_name: null,
+                payment_collection_method: "advance_manager",
+                participation_fee_yen: 2000,
+                payment_deadline: "2026-10-19T14:00:00.000Z",
+                payment_status: "unpaid",
+              }
+            : member,
+        ),
+        run: vi.fn().mockResolvedValue({ success: true }),
+      })),
+    }));
+    const sessionCookie = await createAuthenticatedCookie(prepare);
+    const response = await handlePortalRequest(
+      new Request(
+        "https://portal.example.com/api/tournaments/T-22222222-2222-4222-8222-222222222222/payment",
+        {
+          method: "PUT",
+          headers: {
+            Cookie: sessionCookie,
+            Origin: "https://portal.example.com",
+          },
+        },
+      ),
+      { ...baseEnv, DB: { prepare, batch } as unknown as D1Database },
+      context,
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ status: "paid" });
+    expect(batch).toHaveBeenCalledOnce();
+    expect(prepare.mock.calls.some(([statement]) =>
+      String(statement).includes("tournament_entry_payment_history"))).toBe(true);
   });
 });
