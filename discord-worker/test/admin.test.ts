@@ -3,6 +3,7 @@ import {
   editTournaments,
   handleAdminRequest,
   listAdminTournaments,
+  updateTournamentEntryStatus,
   type AdminEnv,
 } from "../src/admin";
 
@@ -124,6 +125,41 @@ describe("Admin Worker", () => {
     expect(html).toContain("申込完了にする");
     expect(html).toContain("tournamentIds: tournaments.map");
     expect(html).toContain("開催級はこの画面では変更できません");
+    expect(html).toContain("申込・抽選結果");
+    expect(html).toContain("抽選落選");
+    expect(html).toContain("参加者なし終了");
+  });
+
+  it("stores a lottery result separately from the participation response", async () => {
+    const statements: Array<{ sql: string; values: unknown[] }> = [];
+    const prepare = vi.fn((sql: string) => ({
+      bind: vi.fn((...values: unknown[]) => ({
+        first: vi.fn().mockResolvedValue({ entry_status: "submitted" }),
+        sql,
+        values,
+      })),
+    }));
+    const batch = vi.fn(async (items: Array<{ sql: string; values: unknown[] }>) => {
+      statements.push(...items);
+      return items.map(() => ({ success: true }));
+    });
+
+    const result = await updateTournamentEntryStatus(
+      { DB: { prepare, batch } as unknown as D1Database },
+      "T-11111111-1111-4111-8111-111111111111",
+      "M-11111111-1111-4111-8111-111111111111",
+      "not_selected",
+      "discord:admin",
+    );
+
+    expect(result).toMatchObject({
+      previousStatus: "submitted",
+      status: "not_selected",
+      changed: true,
+    });
+    expect(statements.some((item) => item.sql.includes("INSERT INTO tournament_entries"))).toBe(true);
+    expect(statements.some((item) => item.sql.includes("INSERT INTO tournament_entry_history"))).toBe(true);
+    expect(statements.every((item) => !item.sql.includes("UPDATE responses"))).toBe(true);
   });
 
   it("uses 23:59 as the default organizer deadline time", async () => {

@@ -52,6 +52,7 @@ export interface TournamentRow {
   tournament_type?: string;
   venue?: string | null;
   document_url?: string | null;
+  closure_reason?: "no_participants" | null;
 }
 
 interface TargetMemberRow {
@@ -1719,6 +1720,7 @@ export async function processNotificationQueue(
 export async function notifyPendingTournaments(
   env: TournamentEnv,
 ): Promise<void> {
+  await closeExpiredTournamentsWithoutParticipants(env.DB);
   const pending = await env.DB.prepare(
     `SELECT
       tournaments.tournament_id,
@@ -1776,6 +1778,79 @@ export async function notifyPendingTournaments(
   await enqueueResponseDeadlineReminders(env);
   await enqueueDeadlineReminders(env);
   await processNotificationQueue(env);
+}
+
+export async function closeExpiredTournamentsWithoutParticipants(
+  db: D1Database,
+  now = new Date(),
+): Promise<number> {
+  const candidates = await db.prepare(
+    `SELECT tournaments.tournament_id
+     FROM tournaments
+     WHERE tournaments.status = 'active'
+       AND tournaments.internal_deadline <= ?
+       AND NOT EXISTS (
+         SELECT 1
+         FROM tournaments AS pending_group_member
+         WHERE COALESCE(
+           pending_group_member.registration_group_id,
+           pending_group_member.tournament_id
+         ) = COALESCE(
+           tournaments.registration_group_id,
+           tournaments.tournament_id
+         )
+           AND pending_group_member.status = 'active'
+           AND pending_group_member.internal_deadline > ?
+       )
+       AND NOT EXISTS (
+         SELECT 1
+         FROM tournaments AS response_tournament
+         INNER JOIN responses
+           ON responses.tournament_id = response_tournament.tournament_id
+         INNER JOIN members
+           ON members.member_id = responses.member_id
+         WHERE COALESCE(
+           response_tournament.registration_group_id,
+           response_tournament.tournament_id
+         ) = COALESCE(
+           tournaments.registration_group_id,
+           tournaments.tournament_id
+         )
+           AND response_tournament.status <> 'deleted'
+           AND members.status = 'active'
+           AND responses.response = 'yes'
+           AND responses.is_valid = 1
+       )
+     ORDER BY tournaments.internal_deadline
+     LIMIT 100`,
+  ).bind(now.toISOString(), now.toISOString()).all<{ tournament_id: string }>();
+
+  if (candidates.results.length === 0) return 0;
+  const changedAt = now.toISOString();
+  await db.batch(
+    candidates.results.flatMap(({ tournament_id: tournamentId }) => [
+      db.prepare(
+        `UPDATE tournaments
+         SET status = 'closed', closure_reason = 'no_participants',
+             updated_at = ?
+         WHERE tournament_id = ? AND status = 'active'`,
+      ).bind(changedAt, tournamentId),
+      db.prepare(
+        `INSERT INTO tournament_status_history (
+          tournament_id, previous_status, new_status, changed_by_email, changed_at
+        )
+        SELECT ?, 'active', 'closed', 'system:no-participants', ?
+        WHERE EXISTS (
+          SELECT 1 FROM tournaments
+          WHERE tournament_id = ?
+            AND status = 'closed'
+            AND closure_reason = 'no_participants'
+            AND updated_at = ?
+        )`,
+      ).bind(tournamentId, changedAt, tournamentId, changedAt),
+    ]),
+  );
+  return candidates.results.length;
 }
 
 export async function createTestTournamentAndNotify(

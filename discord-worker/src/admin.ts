@@ -58,6 +58,13 @@ type TournamentEditor = (
   input: TournamentEditInput,
   changedByEmail: string,
 ) => Promise<TournamentEditResult>;
+type TournamentEntryStatusUpdater = (
+  env: AdminEnv,
+  tournamentId: string,
+  memberId: string,
+  status: string,
+  changedByEmail: string,
+) => Promise<TournamentEntryStatusUpdate>;
 type MemberLister = (env: AdminEnv) => Promise<AdminMember[]>;
 type MemberUpdater = (
   env: AdminEnv,
@@ -78,6 +85,7 @@ type MemberRegistrationCounter = (env: AdminEnv) => Promise<number>;
 
 interface AdminTournamentRow extends TournamentRow {
   status: string;
+  closure_reason: "no_participants" | null;
   created_at: string;
   announcements_sent: number;
   invitation_dms_sent: number;
@@ -87,12 +95,14 @@ interface AdminTournamentRow extends TournamentRow {
 
 interface AdminResponseRow {
   tournament_id: string;
+  member_id: string;
   response: string;
   display_name: string;
   display_name_kana: string;
   grade: string;
   is_eligible: number;
   updated_at: string;
+  entry_status: string | null;
 }
 
 export interface AdminTournament extends AdminTournamentRow {
@@ -135,6 +145,14 @@ export interface TournamentEditResult {
   notificationsQueued: number;
 }
 
+export interface TournamentEntryStatusUpdate {
+  tournamentId: string;
+  memberId: string;
+  previousStatus: string | null;
+  status: string;
+  changed: boolean;
+}
+
 class AdminRequestError extends Error {
   constructor(message: string, readonly status: number) {
     super(message);
@@ -147,6 +165,12 @@ const MANAGEABLE_STATUSES = new Set([
   "applied",
   "closed",
   "canceled",
+]);
+const ENTRY_STATUSES = new Set([
+  "submitted",
+  "selected",
+  "not_selected",
+  "withdrawn",
 ]);
 
 interface EditableTournamentRow extends TournamentRow {
@@ -244,6 +268,7 @@ export async function listAdminTournaments(
       tournaments.internal_deadline,
       tournaments.document_url,
       tournaments.status,
+      tournaments.closure_reason,
       tournaments.created_at,
       (SELECT COUNT(*) FROM notification_deliveries
         WHERE notification_deliveries.tournament_id = tournaments.tournament_id
@@ -277,6 +302,7 @@ export async function listAdminTournaments(
   const responseRows = await env.DB.prepare(
     `SELECT
       tournaments.tournament_id,
+      members.member_id,
       COALESCE(responses.response, 'pending') AS response,
       members.display_name,
       COALESCE(
@@ -294,7 +320,8 @@ export async function listAdminTournaments(
           OR members.grade = tournaments.grade
         )
       THEN 1 ELSE 0 END AS is_eligible,
-      COALESCE(responses.updated_at, members.updated_at) AS updated_at
+      COALESCE(responses.updated_at, members.updated_at) AS updated_at,
+      tournament_entries.status AS entry_status
     FROM tournaments
     INNER JOIN members
       ON (
@@ -318,6 +345,9 @@ export async function listAdminTournaments(
       ON responses.tournament_id = tournaments.tournament_id
       AND responses.member_id = members.member_id
       AND responses.is_valid = 1
+    LEFT JOIN tournament_entries
+      ON tournament_entries.tournament_id = tournaments.tournament_id
+      AND tournament_entries.member_id = members.member_id
     WHERE tournaments.status <> 'deleted'
     ORDER BY
       tournaments.tournament_id,
@@ -400,7 +430,7 @@ export async function updateTournamentStatuses(
       changed.flatMap((tournament) => [
         env.DB.prepare(
           `UPDATE tournaments
-           SET status = ?, updated_at = ?,
+           SET status = ?, closure_reason = NULL, updated_at = ?,
              applied_at = CASE WHEN ? = 'applied' THEN ? ELSE applied_at END
            WHERE tournament_id = ? AND status = ?`,
         ).bind(
@@ -426,6 +456,30 @@ export async function updateTournamentStatuses(
     );
   }
 
+  if (status === "applied") {
+    const now = new Date().toISOString();
+    await env.DB.batch(
+      tournaments.map((tournament) =>
+        env.DB.prepare(
+          `INSERT OR IGNORE INTO tournament_entries (
+            tournament_id, member_id, status, created_at, updated_at, updated_by_email
+          )
+          SELECT ?, responses.member_id, 'submitted', ?, ?, ?
+          FROM responses
+          WHERE responses.tournament_id = ?
+            AND responses.response = 'yes'
+            AND responses.is_valid = 1`,
+        ).bind(
+          tournament.tournament_id,
+          now,
+          now,
+          changedByEmail,
+          tournament.tournament_id,
+        ),
+      ),
+    );
+  }
+
   let completionNotificationQueued = false;
   if (status === "applied") {
     const completed = tournaments.map((tournament) => ({
@@ -441,6 +495,73 @@ export async function updateTournamentStatuses(
     changedCount: changed.length,
     completionNotificationQueued,
   };
+}
+
+export async function updateTournamentEntryStatus(
+  env: AdminEnv,
+  tournamentId: string,
+  memberId: string,
+  status: string,
+  changedByEmail: string,
+): Promise<TournamentEntryStatusUpdate> {
+  if (!/^T-[0-9a-f-]{36}$/.test(tournamentId) || !/^M-[0-9a-f-]{36}$/.test(memberId)) {
+    throw new AdminRequestError("大会またはメンバーIDが不正です。", 400);
+  }
+  if (!ENTRY_STATUSES.has(status)) {
+    throw new AdminRequestError("申込・抽選結果が不正です。", 400);
+  }
+  const target = await env.DB.prepare(
+    `SELECT tournament_entries.status AS entry_status
+     FROM tournaments
+     INNER JOIN responses
+       ON responses.tournament_id = tournaments.tournament_id
+      AND responses.member_id = ?
+      AND responses.response = 'yes'
+      AND responses.is_valid = 1
+     LEFT JOIN tournament_entries
+       ON tournament_entries.tournament_id = tournaments.tournament_id
+      AND tournament_entries.member_id = responses.member_id
+     WHERE tournaments.tournament_id = ?
+       AND tournaments.status IN ('applied', 'closed')
+     LIMIT 1`,
+  ).bind(memberId, tournamentId).first<{ entry_status: string | null }>();
+  if (!target) {
+    throw new AdminRequestError(
+      "申込完了済み大会の有効な参加希望者を確認できません。",
+      404,
+    );
+  }
+  const previousStatus = target.entry_status ?? null;
+  if (previousStatus === status) {
+    return { tournamentId, memberId, previousStatus, status, changed: false };
+  }
+
+  const now = new Date().toISOString();
+  await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO tournament_entries (
+        tournament_id, member_id, status, created_at, updated_at, updated_by_email
+      ) VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(tournament_id, member_id) DO UPDATE SET
+        status = excluded.status,
+        updated_at = excluded.updated_at,
+        updated_by_email = excluded.updated_by_email`,
+    ).bind(tournamentId, memberId, status, now, now, changedByEmail),
+    env.DB.prepare(
+      `INSERT INTO tournament_entry_history (
+        tournament_id, member_id, previous_status, new_status,
+        changed_by_email, changed_at
+      ) VALUES (?, ?, ?, ?, ?, ?)`,
+    ).bind(
+      tournamentId,
+      memberId,
+      previousStatus,
+      status,
+      changedByEmail,
+      now,
+    ),
+  ]);
+  return { tournamentId, memberId, previousStatus, status, changed: true };
 }
 
 export async function editTournaments(
@@ -694,6 +815,7 @@ function adminHtml(page: AdminPage): string {
     .badge.active { color: #17643a; background: #e4f7ec; }
     .badge.applied { color: #2452a4; background: #e7efff; }
     .badge.closed { color: #596579; background: #edf0f5; }
+    .badge.no_participants { color: #6f4b12; background: #fff1d6; }
     .badge.canceled { color: #a12822; background: #fdecea; }
     .badge.draft { color: #875c12; background: #fff2d8; }
     .response-sections { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 14px 0; }
@@ -708,6 +830,12 @@ function adminHtml(page: AdminPage): string {
     .status-message { font-size: .84rem; font-weight: 650; }
     .status-message.error { color: #b42318; }
     .notification-note { color: #697386; font-size: .78rem; margin-top: 10px; }
+    .entry-management { margin: 15px 0; padding: 14px; border: 1px solid #dce1eb; border-radius: 9px; background: #fbfcff; }
+    .entry-management h4 { margin: 0 0 10px; font-size: .9rem; }
+    .entry-row { display: grid; grid-template-columns: minmax(160px, 1fr) minmax(190px, auto) auto minmax(90px, auto); gap: 9px; align-items: center; padding: 8px 0; border-top: 1px solid #e7eaf0; }
+    .entry-row select { padding: 8px 10px; }
+    .entry-row button { padding: 8px 12px; }
+    .entry-result { color: #596579; font-size: .78rem; }
     #member-status { color: #697386; margin-bottom: 12px; }
     #member-list { display: grid; gap: 12px; }
     .member-card { border: 1px solid #dce1eb; border-radius: 10px; padding: 16px; }
@@ -738,7 +866,7 @@ function adminHtml(page: AdminPage): string {
     .dialog-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; margin-top: 22px; flex-wrap: wrap; }
     .dialog-actions .status-message { margin-right: auto; }
     @media (max-width: 680px) {
-      .grid, .grade-date-grid, .response-sections, .member-grid, .request-comparison { grid-template-columns: minmax(0, 1fr); }
+      .grid, .grade-date-grid, .response-sections, .member-grid, .request-comparison, .entry-row { grid-template-columns: minmax(0, 1fr); }
       input[type="date"], input[type="datetime-local"] {
         display: block;
         inline-size: 100%;
@@ -804,7 +932,7 @@ function adminHtml(page: AdminPage): string {
       </div>
       <div class="list-controls">
         <label>並び順<select id="tournament-sort"><option value="deadline_asc">締切日が近い順</option><option value="event_asc">開催日が近い順</option><option value="created_desc">登録日が新しい順</option><option value="created_asc">登録日が古い順</option></select></label>
-        <label>ステータス<select id="tournament-status-filter"><option value="all">すべて</option><option value="active">回答受付中</option><option value="applied">申込完了</option><option value="closed">締切済み</option><option value="canceled">中止</option><option value="draft">下書き</option></select></label>
+        <label>ステータス<select id="tournament-status-filter"><option value="all">すべて</option><option value="active">回答受付中</option><option value="applied">申込完了</option><option value="no_participants">参加者なし終了</option><option value="closed">締切済み</option><option value="canceled">中止</option><option value="draft">下書き</option></select></label>
       </div>
       <div id="list-status" role="status" aria-live="polite">読み込み中…</div>
       <div id="tournament-list"></div>
@@ -873,6 +1001,13 @@ function adminHtml(page: AdminPage): string {
       applied: '申込完了',
       closed: '締切済み',
       canceled: '中止',
+      no_participants: '参加者なし終了',
+    };
+    const entryStatusLabels = {
+      submitted: '申込済み（結果待ち）',
+      selected: '出場確定',
+      not_selected: '抽選落選',
+      withdrawn: '辞退',
     };
     const responseLabels = {
       yes: '参加',
@@ -920,6 +1055,12 @@ function adminHtml(page: AdminPage): string {
 
     function tournamentGradeLabel(tournament) {
       return tournament.all_grades === 1 ? 'すべて' : gradeLabel(tournament.grade);
+    }
+
+    function tournamentDisplayStatus(tournament) {
+      return tournament.status === 'closed' && tournament.closure_reason === 'no_participants'
+        ? 'no_participants'
+        : tournament.status;
     }
 
     function selectedRegistrationGrades() {
@@ -1068,9 +1209,57 @@ function adminHtml(page: AdminPage): string {
         const currentGrade = gradeLabel(person.grade);
         row.append(
           element('span', 'response-grade', currentGrade === previousGrade ? '' : currentGrade),
-          element('span', '', person.display_name + ' (' + (person.display_name_kana || 'よみがな未登録') + ')'),
+          element('span', '', person.display_name + ' (' + (person.display_name_kana || 'よみがな未登録') + ')' + (response === 'yes' && person.entry_status ? ' ／ ' + (entryStatusLabels[person.entry_status] || person.entry_status) : '')),
         );
         previousGrade = currentGrade;
+        section.append(row);
+      });
+      return section;
+    }
+
+
+    function renderEntryManagement(tournaments) {
+      if (!tournaments.some((item) => item.status === 'applied' || item.status === 'closed')) return null;
+      const entries = tournaments.flatMap((tournament) => tournament.responses
+        .filter((person) => person.response === 'yes')
+        .map((person) => ({ ...person, tournament })));
+      if (!entries.length) return null;
+      const section = element('section', 'entry-management');
+      section.append(element('h4', '', '申込・抽選結果'));
+      entries.forEach(({ tournament, ...person }) => {
+        const row = element('div', 'entry-row');
+        const name = element('span', '', tournamentGradeLabel(tournament) + ' ' + person.display_name + ' (' + (person.display_name_kana || 'よみがな未登録') + ')');
+        const select = document.createElement('select');
+        Object.entries(entryStatusLabels).forEach(([value, label]) => {
+          const option = document.createElement('option');
+          option.value = value;
+          option.textContent = label;
+          option.selected = value === (person.entry_status || 'submitted');
+          select.append(option);
+        });
+        const save = element('button', 'secondary', '保存');
+        save.type = 'button';
+        const message = element('span', 'entry-result', '');
+        save.addEventListener('click', async () => {
+          save.disabled = true;
+          message.textContent = '保存中…';
+          try {
+            const response = await fetch('/api/tournaments/' + encodeURIComponent(tournament.tournament_id) + '/entries/' + encodeURIComponent(person.member_id), {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ status: select.value }),
+            });
+            const body = await response.json();
+            if (!response.ok) throw new Error(body.error || '結果を保存できませんでした。');
+            message.textContent = body.changed ? '保存しました。' : '変更はありません。';
+            await loadTournaments();
+          } catch (error) {
+            message.textContent = error instanceof Error ? error.message : '結果を保存できませんでした。';
+          } finally {
+            save.disabled = false;
+          }
+        });
+        row.append(name, select, save, message);
         section.append(row);
       });
       return section;
@@ -1081,7 +1270,7 @@ function adminHtml(page: AdminPage): string {
       const labelText = tournament.all_grades === 1 ? 'すべて' : gradeLabel(tournament.grade);
       const statusLabel = element('label', '', labelText + ' ステータス');
       const select = document.createElement('select');
-      Object.entries(statusLabels).forEach(([value, label]) => {
+      Object.entries(statusLabels).filter(([value]) => value !== 'no_participants').forEach(([value, label]) => {
         const option = document.createElement('option');
         option.value = value;
         option.textContent = label;
@@ -1121,7 +1310,7 @@ function adminHtml(page: AdminPage): string {
       const tournament = tournaments[0];
       const card = element('article', 'tournament-card');
       const heading = element('div', 'card-heading');
-      const statuses = [...new Set(tournaments.map((item) => item.status))];
+      const statuses = [...new Set(tournaments.map(tournamentDisplayStatus))];
       heading.append(
         element('h3', '', tournament.title),
         element('span', 'badge ' + (statuses.length === 1 ? statuses[0] : 'draft'), statuses.length === 1 ? (statusLabels[statuses[0]] || statuses[0]) : '複数ステータス'),
@@ -1185,6 +1374,9 @@ function adminHtml(page: AdminPage): string {
         responseSection(tournaments, 'pending'),
       );
       card.append(responseSections);
+
+      const entryManagement = renderEntryManagement(tournaments);
+      if (entryManagement) card.append(entryManagement);
 
       tournaments.forEach((item) => card.append(renderTournamentStatusControl(item)));
 
@@ -1378,7 +1570,7 @@ function adminHtml(page: AdminPage): string {
       const allGroups = groupTournaments(loadedTournaments);
       const groups = status === 'all'
         ? allGroups
-        : allGroups.filter((group) => group.some((tournament) => tournament.status === status));
+        : allGroups.filter((group) => group.some((tournament) => tournamentDisplayStatus(tournament) === status));
       const visibleTournamentCount = groups.reduce((total, group) => total + group.length, 0);
       const sort = tournamentSort.value;
       groups.sort((left, right) => {
@@ -1642,6 +1834,7 @@ export async function handleAdminRequest(
   memberRegistrationCounter: MemberRegistrationCounter = countPendingMemberRegistrations,
   statusesUpdater: TournamentStatusesUpdater = updateTournamentStatuses,
   tournamentEditor: TournamentEditor = editTournaments,
+  entryStatusUpdater: TournamentEntryStatusUpdater = updateTournamentEntryStatus,
 ): Promise<Response> {
   const url = new URL(request.url);
   const authResponse = await handleAdminAuthRequest(request, env);
@@ -1962,6 +2155,36 @@ export async function handleAdminRequest(
       }
       console.error("大会ステータス一括変更エラー", error);
       return json({ error: "ステータスを変更できませんでした。" }, 500);
+    }
+  }
+
+  const entryPath = url.pathname.match(
+    /^\/api\/tournaments\/(T-[0-9a-f-]{36})\/entries\/(M-[0-9a-f-]{36})$/,
+  );
+  if (request.method === "PATCH" && entryPath) {
+    if (!isSameOrigin(request)) {
+      return json({ error: "不正な送信元です。" }, 403);
+    }
+    if (!request.headers.get("Content-Type")?.toLowerCase().startsWith("application/json")) {
+      return json({ error: "JSON形式で送信してください。" }, 415);
+    }
+    let status = "";
+    try {
+      const body = (await request.json()) as { status?: unknown };
+      status = typeof body.status === "string" ? body.status : "";
+    } catch {
+      return json({ error: "入力内容を確認してください。" }, 400);
+    }
+    try {
+      return json(
+        await entryStatusUpdater(env, entryPath[1], entryPath[2], status, actor),
+      );
+    } catch (error: unknown) {
+      if (error instanceof AdminRequestError) {
+        return json({ error: error.message }, error.status);
+      }
+      console.error("申込・抽選結果の変更エラー", error);
+      return json({ error: "申込・抽選結果を変更できませんでした。" }, 500);
     }
   }
 

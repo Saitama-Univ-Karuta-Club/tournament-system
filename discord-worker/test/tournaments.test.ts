@@ -9,6 +9,7 @@ import {
   buildResponseDeadlineChannelReminderMessage,
   buildResponseDeadlineDmReminderMessage,
   buildResponseDeadlineReminderTargets,
+  closeExpiredTournamentsWithoutParticipants,
   createTournaments,
   getDeadlineReminderSchedule,
   getResponseDeadlineReminderSchedule,
@@ -138,6 +139,50 @@ describe("attendance DM", () => {
     expect(dmMessage.embeds?.[0]?.fields).toContainEqual(
       expect.objectContaining({ name: "Web版大会参加確認" }),
     );
+  });
+});
+
+describe("automatic no-participant closure", () => {
+  it("closes every due tournament returned by the zero-participant query", async () => {
+    const statements: Array<{ sql: string; values: unknown[] }> = [];
+    const prepare = vi.fn((sql: string) => ({
+      bind: vi.fn((...values: unknown[]) => ({
+        all: vi.fn().mockResolvedValue({
+          results: [
+            { tournament_id: "T-11111111-1111-4111-8111-111111111111" },
+            { tournament_id: "T-22222222-2222-4222-8222-222222222222" },
+          ],
+        }),
+        sql,
+        values,
+      })),
+    }));
+    const batch = vi.fn(async (items: Array<{ sql: string; values: unknown[] }>) => {
+      statements.push(...items);
+      return items.map(() => ({ success: true }));
+    });
+
+    const changed = await closeExpiredTournamentsWithoutParticipants(
+      { prepare, batch } as unknown as D1Database,
+      new Date("2026-10-26T00:00:00.000Z"),
+    );
+
+    expect(changed).toBe(2);
+    expect(prepare).toHaveBeenCalledWith(expect.stringContaining("responses.response = 'yes'"));
+    expect(statements.filter((item) => item.sql.includes("UPDATE tournaments"))).toHaveLength(2);
+    expect(statements.filter((item) => item.sql.includes("system:no-participants"))).toHaveLength(2);
+  });
+
+  it("does nothing when no due zero-participant tournament exists", async () => {
+    const batch = vi.fn();
+    const prepare = vi.fn(() => ({
+      bind: vi.fn(() => ({ all: vi.fn().mockResolvedValue({ results: [] }) })),
+    }));
+
+    await expect(closeExpiredTournamentsWithoutParticipants(
+      { prepare, batch } as unknown as D1Database,
+    )).resolves.toBe(0);
+    expect(batch).not.toHaveBeenCalled();
   });
 });
 
