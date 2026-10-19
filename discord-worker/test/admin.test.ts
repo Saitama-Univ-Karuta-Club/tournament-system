@@ -649,6 +649,23 @@ describe("Admin Worker", () => {
     expect(html).toContain("fetch('/api/documents'");
   });
 
+  it("supports drag and drop while preserving native file selection", async () => {
+    const response = await handleAdminRequest(
+      new Request("https://admin.example.com/register"),
+      env,
+      authenticatedContext(),
+    );
+
+    const html = await response.text();
+    expect(html).toContain("element('div', 'file-drop-zone')");
+    expect(html).toContain('メールの添付ファイルをここにドロップ');
+    expect(html).toContain("zone.addEventListener('drop'");
+    expect(html).toContain('const transfer = new DataTransfer()');
+    expect(html).toContain("root.querySelectorAll?.('input[type=\"file\"]')");
+    expect(html).toContain('new MutationObserver');
+    expect(html).toContain('input.type !== \'file\'');
+  });
+
   it("clears the complete registration form after a successful submission", async () => {
     const response = await handleAdminRequest(
       new Request("https://admin.example.com/register"),

@@ -2071,6 +2071,13 @@ function adminHtml(page: AdminPage): string {
     .grade-date-settings > strong { display: block; margin-bottom: 10px; font-size: .9rem; }
     .grade-date-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
     .file-note { color: #697386; font-size: .78rem; font-weight: 500; }
+    .file-drop-zone { display: grid; gap: 7px; min-width: 0; padding: 9px; border: 1px dashed #aebbd3; border-radius: 8px; background: #f8faff; transition: border-color .15s, background .15s, box-shadow .15s; }
+    .file-drop-zone.is-dragging { border-color: #3658b2; background: #edf1ff; box-shadow: 0 0 0 3px #7c9cff2e; }
+    .file-drop-zone.has-file { border-style: solid; border-color: #7ca78e; background: #f1faf5; }
+    .file-drop-zone input[type="file"] { padding: 8px; background: white; }
+    .file-drop-hint { color: #596579; font-size: .76rem; font-weight: 600; line-height: 1.45; }
+    .file-drop-zone.has-file .file-drop-hint { color: #17643a; }
+    .file-drop-hint.error { color: #b42318; }
     .application-method { min-width: 0; margin: 0; padding: 14px; border: 1px solid #d7dfef; border-radius: 9px; background: #f8faff; }
     .application-method legend { padding: 0 5px; font-size: .9rem; font-weight: 750; }
     .application-method-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 12px; }
@@ -2186,7 +2193,7 @@ function adminHtml(page: AdminPage): string {
     .result-archive-body { padding-block: 10px; }
     .result-archive-body > .archive-note { margin-bottom: 7px; }
     .result-document-upload { grid-template-columns: minmax(190px, auto) minmax(0, 1fr) auto; align-items: center; gap: 7px 10px; padding: 8px 10px; }
-    .result-document-upload > input[type="file"] { grid-column: 1 / 3; }
+    .result-document-upload > .file-drop-zone { grid-column: 1 / 3; }
     .result-document-upload > button { grid-column: 3; grid-row: 2; }
     .result-document-upload > .entry-result { grid-column: 1 / -1; }
     .result-stage { margin: 8px 0; padding: 9px 11px; gap: 5px; }
@@ -2242,7 +2249,7 @@ function adminHtml(page: AdminPage): string {
       .entry-bulk-actions { justify-content: stretch; }
       .entry-bulk-actions button { width: 100%; }
       .result-document-upload { grid-template-columns: minmax(0, 1fr); }
-      .result-document-upload > input[type="file"], .result-document-upload > button { grid-column: auto; grid-row: auto; }
+      .result-document-upload > .file-drop-zone, .result-document-upload > button { grid-column: auto; grid-row: auto; }
       input[type="date"], input[type="datetime-local"] {
         display: block;
         inline-size: 100%;
@@ -2424,6 +2431,99 @@ function adminHtml(page: AdminPage): string {
       if (text !== undefined) node.textContent = text;
       return node;
     }
+
+    function acceptsDroppedFile(input, file) {
+      const rules = (input.accept || '').split(',').map((rule) => rule.trim().toLowerCase()).filter(Boolean);
+      if (!rules.length) return true;
+      const fileName = file.name.toLowerCase();
+      const mimeType = (file.type || '').toLowerCase();
+      return rules.some((rule) => {
+        if (rule.startsWith('.')) return fileName.endsWith(rule);
+        if (rule.endsWith('/*')) return mimeType.startsWith(rule.slice(0, -1));
+        return mimeType === rule;
+      });
+    }
+
+    function enhanceFileInput(input) {
+      if (!(input instanceof HTMLInputElement) || input.type !== 'file' || input.dataset.dropEnhanced === 'true') return;
+      input.dataset.dropEnhanced = 'true';
+      const zone = element('div', 'file-drop-zone');
+      const hint = element('span', 'file-drop-hint', 'メールの添付ファイルをここにドロップ、または「ファイルを選択」');
+      input.parentNode.insertBefore(zone, input);
+      zone.append(input, hint);
+
+      const showSelectedFile = () => {
+        const selected = input.files?.[0];
+        zone.classList.toggle('has-file', Boolean(selected));
+        hint.classList.remove('error');
+        hint.textContent = selected
+          ? selected.name + ' を選択中'
+          : 'メールの添付ファイルをここにドロップ、または「ファイルを選択」';
+      };
+      input.addEventListener('change', showSelectedFile);
+      input.form?.addEventListener('reset', () => setTimeout(showSelectedFile, 0));
+
+      let dragDepth = 0;
+      zone.addEventListener('dragenter', (event) => {
+        event.preventDefault();
+        dragDepth += 1;
+        zone.classList.add('is-dragging');
+      });
+      zone.addEventListener('dragover', (event) => {
+        event.preventDefault();
+        if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+      });
+      zone.addEventListener('dragleave', (event) => {
+        event.preventDefault();
+        dragDepth = Math.max(0, dragDepth - 1);
+        if (dragDepth === 0) zone.classList.remove('is-dragging');
+      });
+      zone.addEventListener('drop', (event) => {
+        event.preventDefault();
+        dragDepth = 0;
+        zone.classList.remove('is-dragging');
+        const files = Array.from(event.dataTransfer?.files || []);
+        if (!files.length) {
+          hint.textContent = 'このメールサービスからは直接取得できません。「ファイルを選択」を使ってください。';
+          hint.classList.add('error');
+          zone.classList.remove('has-file');
+          return;
+        }
+        if (files.length > 1) {
+          hint.textContent = 'ファイルは1つずつドロップしてください。';
+          hint.classList.add('error');
+          return;
+        }
+        const file = files[0];
+        if (!acceptsDroppedFile(input, file)) {
+          hint.textContent = 'この項目では「' + file.name + '」の形式を登録できません。';
+          hint.classList.add('error');
+          return;
+        }
+        try {
+          const transfer = new DataTransfer();
+          transfer.items.add(file);
+          input.files = transfer.files;
+          input.dispatchEvent(new Event('change', { bubbles: true }));
+        } catch {
+          hint.textContent = 'このブラウザではドロップしたファイルを受け渡せません。「ファイルを選択」を使ってください。';
+          hint.classList.add('error');
+        }
+      });
+      showSelectedFile();
+    }
+
+    function enhanceFileInputs(root) {
+      if (root instanceof HTMLInputElement && root.type === 'file') enhanceFileInput(root);
+      root.querySelectorAll?.('input[type="file"]').forEach(enhanceFileInput);
+    }
+
+    enhanceFileInputs(document);
+    new MutationObserver((mutations) => {
+      mutations.forEach((mutation) => mutation.addedNodes.forEach((node) => {
+        if (node instanceof Element) enhanceFileInputs(node);
+      }));
+    }).observe(document.body, { childList: true, subtree: true });
 
     function setPendingRequestBadge(count) {
       const normalized = Number.isFinite(Number(count)) ? Math.max(0, Number(count)) : 0;
