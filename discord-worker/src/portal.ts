@@ -641,12 +641,71 @@ function portalHtml(): string {
 </html>`;
 }
 
+function googleBackupInformationHtml(page: "home" | "privacy"): string {
+  const privacyUrl = "/google-backup/privacy";
+  const homeUrl = "/google-backup";
+  const content = page === "home"
+    ? `<h1>大会システム Google Driveバックアップ</h1>
+      <p>埼玉大学かるた会が運用する大会管理システムのバックアップ機能です。</p>
+      <h2>機能</h2>
+      <p>大会情報データベースのバックアップと、システムへアップロードされた大会要項・選手名簿・大会結果などのファイルを、サークルが管理するGoogle Driveへ定期的に保存します。</p>
+      <h2>Google Driveへのアクセス</h2>
+      <p>この機能は、バックアップ用フォルダとファイルを作成・更新・整理するためにGoogle Drive APIを使用します。アクセス権限は、このアプリが作成または明示的に扱うファイルに限定され、Google Drive内の無関係なファイルは読み取りません。</p>
+      <p><a class="button" href="${privacyUrl}">プライバシーポリシーを確認</a></p>`
+    : `<h1>プライバシーポリシー</h1>
+      <p>このページは、埼玉大学かるた会の大会システムにおけるGoogle Driveバックアップ機能のデータ取扱方針を説明します。</p>
+      <h2>取得・利用する情報</h2>
+      <p>Google OAuthを通じて、Google Drive上にバックアップ用のフォルダとファイルを作成し、このアプリが作成したファイルを確認・更新・整理する権限を利用します。</p>
+      <h2>利用目的</h2>
+      <p>Cloudflare上で運用する大会情報データベースと、大会システムへアップロードされた文書の障害・誤操作対策用バックアップを作成する目的にのみ利用します。</p>
+      <h2>保存と共有</h2>
+      <p>バックアップは、認証を許可したサークル管理のGoogle Driveに保存します。法令に基づく場合を除き、Googleユーザーデータを第三者へ販売または提供しません。OAuth認証情報は公開コードやデータベースへ保存せず、Cloudflareの暗号化されたSecretとして管理します。</p>
+      <h2>保存期間</h2>
+      <p>データベースの世代バックアップは原則365日間保持します。期限を過ぎたバックアップはGoogle Driveのゴミ箱へ移動します。文書のバックアップは、大会記録を保全するため必要な期間保持します。</p>
+      <h2>権限の解除</h2>
+      <p>Googleアカウントの「サードパーティ製のアプリとサービス」から、いつでもこのアプリのアクセス権を解除できます。解除後は新しいバックアップを作成できなくなります。</p>
+      <h2>お問い合わせ</h2>
+      <p>本機能に関する問い合わせは、埼玉大学かるた会の大会システム管理者へお寄せください。</p>
+      <p><a href="${homeUrl}">アプリ説明へ戻る</a></p>`;
+
+  return `<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="index,follow">
+  <title>${page === "home" ? "Google Driveバックアップ" : "プライバシーポリシー"}｜埼玉大学かるた会</title>
+  <style>
+    *{box-sizing:border-box}body{margin:0;background:#f3f6fb;color:#17213a;font-family:Inter,"Noto Sans JP",system-ui,-apple-system,sans-serif;line-height:1.8}
+    header{background:linear-gradient(135deg,#253b73,#365499);color:#fff;padding:20px}.brand{max-width:760px;margin:auto;font-weight:800}
+    main{max-width:760px;margin:32px auto 64px;padding:0 18px}.card{background:#fff;border:1px solid #dbe2ef;border-radius:18px;padding:clamp(22px,5vw,38px);box-shadow:0 8px 28px #27396610}
+    h1{margin:0 0 18px;font-size:clamp(1.45rem,4vw,2rem);line-height:1.4}h2{margin:28px 0 6px;font-size:1.08rem}p{margin:8px 0;color:#34405a}
+    a{color:#344f9d;font-weight:750}.button{display:inline-block;margin-top:12px;padding:10px 15px;border-radius:9px;background:#425ba8;color:#fff;text-decoration:none}
+  </style>
+</head>
+<body>
+  <header><div class="brand">埼玉大学かるた会 大会システム</div></header>
+  <main><article class="card">${content}</article></main>
+</body>
+</html>`;
+}
+
 export async function handlePortalRequest(
   request: Request,
   env: PortalEnv,
   ctx: Pick<ExecutionContext, "waitUntil">,
 ): Promise<Response> {
   const url = new URL(request.url);
+  if (request.method === "GET" && url.pathname === "/google-backup") {
+    return new Response(googleBackupInformationHtml("home"), {
+      headers: { ...securityHeaders, "Content-Type": "text/html; charset=utf-8", "Cache-Control": "public, max-age=3600" },
+    });
+  }
+  if (request.method === "GET" && url.pathname === "/google-backup/privacy") {
+    return new Response(googleBackupInformationHtml("privacy"), {
+      headers: { ...securityHeaders, "Content-Type": "text/html; charset=utf-8", "Cache-Control": "public, max-age=3600" },
+    });
+  }
   if (request.method === "GET" && url.pathname === "/") {
     return new Response(portalHtml(), {
       headers: { ...securityHeaders, "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },

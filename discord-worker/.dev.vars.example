@@ -13,3 +13,10 @@ SESSION_SECRET="openssl rand -base64 32 等で生成した十分に長いラン�
 
 # 大会管理画面でも上記のDiscord OAuth設定を利用します。
 # 本番の管理画面用Redirect URIはwrangler.admin.jsoncで指定します。
+
+# Google Driveバックアップ専用Worker
+CLOUDFLARE_D1_API_TOKEN="Account API Token（権限はD1 Writeのみ）"
+GOOGLE_CLIENT_ID="Google OAuthクライアントID"
+GOOGLE_CLIENT_SECRET="Google OAuthクライアントシークレット"
+GOOGLE_REFRESH_TOKEN="サークル用Googleアカウントのオフライン更新トークン"
+BACKUP_TRIGGER_SECRET="手動バックアップAPI用の十分に長いランダム値"

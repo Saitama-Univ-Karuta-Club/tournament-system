@@ -57,6 +57,29 @@ afterEach(() => {
 });
 
 describe("member portal", () => {
+  it("serves public Google backup information and privacy pages without login", async () => {
+    const homeResponse = await handlePortalRequest(
+      new Request("https://portal.example.com/google-backup"),
+      baseEnv,
+      context,
+    );
+    const home = await homeResponse.text();
+    const privacyResponse = await handlePortalRequest(
+      new Request("https://portal.example.com/google-backup/privacy"),
+      baseEnv,
+      context,
+    );
+    const privacy = await privacyResponse.text();
+
+    expect(homeResponse.status).toBe(200);
+    expect(home).toContain("大会システム Google Driveバックアップ");
+    expect(home).toContain('href="/google-backup/privacy"');
+    expect(privacyResponse.status).toBe(200);
+    expect(privacy).toContain("プライバシーポリシー");
+    expect(privacy).toContain("Google Drive");
+    expect(privacy).toContain("第三者へ販売または提供しません");
+  });
+
   it("serves a Discord login page without exposing tournament data", async () => {
     const response = await handlePortalRequest(
       new Request("https://portal.example.com/"),

@@ -1,0 +1,38 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "sukc-tournament-backup",
+  "main": "src/backup.ts",
+  "compatibility_date": "2026-10-19",
+  "observability": {
+    "enabled": true
+  },
+  "vars": {
+    "ACCOUNT_ID": "9ea8291abc3716afbef1f4e59fa3bee5",
+    "DATABASE_ID": "d1e159c8-0bc9-4065-a00b-15f8edd21d82",
+    "DATABASE_BACKUP_RETENTION_DAYS": "365"
+  },
+  "triggers": {
+    "crons": ["0 18 * * *"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "sukc-tournament-discord-db",
+      "database_id": "d1e159c8-0bc9-4065-a00b-15f8edd21d82",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "DOCUMENTS",
+      "bucket_name": "sukc-tournament-documents"
+    }
+  ],
+  "workflows": [
+    {
+      "name": "sukc-tournament-google-drive-backup",
+      "binding": "BACKUP_WORKFLOW",
+      "class_name": "TournamentBackupWorkflow"
+    }
+  ]
+}

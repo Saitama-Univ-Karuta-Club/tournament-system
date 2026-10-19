@@ -31,14 +31,16 @@
 - サークル内締切日の2日前0:00に告知チャンネルへ案内し、対象級の未回答メンバーだけへ回答ボタン付きDMを送る自動リマインダー
 - 署名付きPING受信時の開発用サーバーへのコマンド登録
 - D1によるメンバー・大会・回答・通知履歴の管理と、R2による大会要項PDFの保存
+- D1の日次SQLバックアップとR2上のPDFを、サークル用Google Driveへ自動退避
 
 ## Worker構成
 
-役割と認証境界を分けるため、同じソースから3つのWorkerを配備します。
+役割と認証境界を分けるため、同じソースから4つのWorkerを配備します。
 
 - `sukc-tournament-discord-bot`: Discord Interaction受信用。Discord署名を検証し、BotのSecretを保持する
 - `sukc-tournament-admin`: 大会登録画面。移行中はCloudflare Accessを併用し、最終的にDiscord大会管理者ロールで保護する。BotのSecretは保持しない
 - `sukc-tournament-portal`: 承認済みメンバー用。Discord OAuthで本人確認し、大会閲覧・PDF閲覧・Web回答を提供する
+- `sukc-tournament-backup`: 毎日3:00（日本時間）にD1と未退避のR2 PDFをGoogle Driveへ保存する
 
 管理画面で保存した大会はD1へ入り、Discord WorkerのCronが1分以内を目安に取得して告知とDMを送ります。管理画面WorkerへBotトークンを複製しない構成です。
 
@@ -59,6 +61,23 @@ npx wrangler secret put DISCORD_BOT_TOKEN
 ```
 
 BotトークンやSecretの実値はGitへコミットしません。
+
+バックアップ専用Workerには次のSecretを登録します。Discord Botトークンは登録しません。
+`CLOUDFLARE_D1_API_TOKEN` には、CloudflareのAccount API Tokenを使用し、
+権限は `D1 Write` のみにします（D1エクスポートAPIでは `D1 Read` だけでは不足します）。
+
+```sh
+npx wrangler secret put CLOUDFLARE_D1_API_TOKEN --config wrangler.backup.jsonc
+npx wrangler secret put GOOGLE_CLIENT_ID --config wrangler.backup.jsonc
+npx wrangler secret put GOOGLE_CLIENT_SECRET --config wrangler.backup.jsonc
+npx wrangler secret put GOOGLE_REFRESH_TOKEN --config wrangler.backup.jsonc
+npx wrangler secret put BACKUP_TRIGGER_SECRET --config wrangler.backup.jsonc
+```
+
+Google OAuthはサークル用Googleアカウントで、最小権限の
+`https://www.googleapis.com/auth/drive.file` とオフラインアクセスを許可します。
+バックアップWorkerが「大会システムバックアップ」フォルダと、その下の
+`database`・`documents` フォルダを自動作成します。
 
 メンバーポータルには次のSecretを登録します。Botトークンは登録しません。
 
@@ -92,6 +111,7 @@ npm run typecheck
 npm run dev
 npm run dev:admin
 npm run dev:portal
+npm run dev:backup
 ```
 
 ## D1マイグレーション
@@ -112,7 +132,24 @@ npm run db:migrate:remote
 npm run deploy
 npm run deploy:admin
 npm run deploy:portal
+npm run deploy:backup
 ```
+
+## Google Driveバックアップ
+
+`sukc-tournament-backup` は毎日3:00（日本時間）に次を実行します。
+
+1. D1をSQLとしてエクスポートし、Google Driveの `database` へ保存
+2. R2の `documents/` を走査し、未退避または更新されたPDFだけを `documents` へ保存
+3. Drive側に保存済みのPDFが残っていることを確認し、削除されていれば再送
+4. 365日を超えた日次SQLバックアップをGoogle Driveのゴミ箱へ移動
+5. 実行結果をD1の `backup_runs` に記録
+
+失敗は既存Discord Botが管理者用リマインダーチャンネルへ通知し、通知自体も最大5回再試行します。
+Google Driveへのファイル作成には再開可能アップロードを使い、同じ実行や同じR2オブジェクトを重複保存しないための識別情報をDriveの `appProperties` に記録します。
+
+`GET /health` ではSecretの値を公開せず、設定済みかどうかと直近の実行結果だけを返します。
+`POST /run` は `Authorization: Bearer <BACKUP_TRIGGER_SECRET>` を要求し、手動バックアップを開始します。
 
 `sukc-tournament-admin` は、D1の `discord_settings.admin_role_id` に登録したDiscordロールを持つ本番サーバーのメンバーだけを許可します。OAuth移行の検証が終わるまではCloudflare Accessも併用でき、既存管理者は従来のメール認証でも操作できます。Discord認証を本番利用する際は、Developer Portalへ管理画面用Redirect URLを追加し、上記Secretと大会管理者ロールIDを設定してからCloudflare Accessを解除します。
 

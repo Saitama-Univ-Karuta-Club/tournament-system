@@ -14,6 +14,7 @@ import {
   type RegisterMemberInput,
 } from "./members";
 import { processMemberApprovalNotificationQueue } from "./member-notifications";
+import { processBackupFailureAlerts } from "./backup-alerts";
 import {
   createTestTournamentAndNotify,
   notifyPendingTournaments,
@@ -471,6 +472,7 @@ export default {
       Promise.all([
         notifyPendingTournaments(env),
         processMemberApprovalNotificationQueue(env),
+        processBackupFailureAlerts(env),
       ]).then(() => undefined),
     );
   },
