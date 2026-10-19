@@ -3,7 +3,7 @@ import {
   sendChannelMessage,
   sendDirectMessage,
 } from "./discord-api";
-import { formatGrade, normalizeMemberRegistration } from "./members";
+import { formatGrade } from "./members";
 
 export interface TournamentEnv {
   DB: D1Database;
@@ -420,9 +420,6 @@ export function buildAttendanceMessage(
       value: formatJstDateTime(tournament.internal_deadline),
     },
   ];
-  if (tournament.venue) {
-    fields.push({ name: "会場", value: tournament.venue, inline: false });
-  }
   const portalUrl = buildMemberPortalUrl(memberPortalUrl);
   if (portalUrl) {
     fields.push({
@@ -527,9 +524,6 @@ export function buildAnnouncementMessage(
       value: formatJstDateTime(tournament.internal_deadline),
     },
   ];
-  if (tournament.venue) {
-    fields.push({ name: "会場", value: tournament.venue, inline: false });
-  }
   const portalUrl = buildMemberPortalUrl(memberPortalUrl);
   if (portalUrl) {
     fields.push({
@@ -549,7 +543,7 @@ export function buildAnnouncementMessage(
   return {
     content: isUpdate
       ? "【大会情報更新】\n変更後の内容を対象者のDMへ再送します。"
-      : "【大会追加】\n対象者のDMへ参加確認を送信します。",
+      : "【新規大会追加のお知らせ】\n対象者のDMへ参加確認を送信しました。",
     embeds: [
       {
         title: tournament.title,
@@ -568,8 +562,7 @@ export function buildResponseDeadlineChannelReminderMessage(
   const message = buildAnnouncementMessage(tournament, false, memberPortalUrl);
   return {
     ...message,
-    content:
-      "【回答締切リマインダー】サークル内締切の2日前です。未回答の方は回答してください。",
+    content: "サークル内締切の2日前です。未回答の方はお早めに回答お願いします。",
     embeds: message.embeds?.map((embed) => ({ ...embed, color: 0xfee75c })),
   };
 }
@@ -771,8 +764,8 @@ export function buildDeadlineReminderMessage(
     content: isTest
       ? `【テスト送信・締切リマインダー】${deadlineLabel}の通知表示と送信権限の確認です。`
       : isInternal
-        ? "【締切リマインダー】サークル内締切を過ぎました。参加希望者を確認してください。"
-        : "【締切リマインダー】本日が主催者締切です。申込完了後、大会ステータスを「申込完了」に変更してください。",
+        ? "サークル内締切を過ぎました。参加希望者を確認し、申し込みを行なってください。"
+        : "**本日が主催者締切日です。参加希望者リストを確認し、すぐに申し込みを行なってください。**\nすでに申込済みの場合は、大会ステータスを「申込完了」に変更してください。",
     embeds: [
       {
         title: tournament.title,
@@ -1265,7 +1258,7 @@ export async function sendTestDeadlineReminder(
     .bind(env.DISCORD_GUILD_ID)
     .first<{ admin_reminder_channel_id: string | null }>();
   if (!settings?.admin_reminder_channel_id) {
-    throw new Error("管理者用リマインダーチャンネルが未設定です。");
+    throw new Error("担当者用リマインダーチャンネルが未設定です。");
   }
 
   const nowIso = now.toISOString();
@@ -2288,23 +2281,24 @@ export async function createTestTournamentAndNotify(
   env: TournamentEnv,
   rawInput: TestTournamentInput,
 ): Promise<void> {
-  const normalized = normalizeMemberRegistration({
-    discordUserId: rawInput.createdByDiscordUserId,
-    displayName: rawInput.title || "Discord Botテスト大会",
-    displayNameKana: rawInput.title || "Discord Botテスト大会",
-    grade: rawInput.grade,
-    rank: 0,
-  });
+  const title = rawInput.title.trim() || "Discord Botテスト大会";
+  const grade = rawInput.grade.trim();
+  const creatorId = rawInput.createdByDiscordUserId.trim();
+  if (!creatorId) throw new Error("DiscordユーザーIDを取得できません。");
+  if (!title || title.length > 100) throw new Error("大会名は1〜100文字で入力してください。");
+  if (grade === "all" || !TOURNAMENT_GRADES.has(grade)) {
+    throw new Error("出場級の値が不正です。");
+  }
   const now = new Date();
   const tournament = await createTournament(env, {
-    title: normalized.displayName,
+    title,
     eventStartDate: isoDate(addDays(now, 14)),
     eventEndDate: isoDate(addDays(now, 14)),
-    grade: normalized.grade,
+    grade,
     tournamentType: "event",
     internalDeadline: addDays(now, 7).toISOString(),
     trueDeadline: addDays(now, 10).toISOString(),
-    createdByDiscordUserId: normalized.discordUserId,
+    createdByDiscordUserId: creatorId,
   });
   await enqueueTournamentNotifications(env, tournament);
   await processNotificationQueue(env);

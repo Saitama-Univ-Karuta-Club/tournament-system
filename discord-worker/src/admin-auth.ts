@@ -173,7 +173,7 @@ export async function readAdminDiscordPrincipal(
 
 async function beginDiscordLogin(request: Request, env: AdminAuthEnv): Promise<Response> {
   if (!env.DISCORD_APPLICATION_ID || !env.DISCORD_REDIRECT_URI) {
-    return json({ error: "Discord管理者ログインの設定が完了していません。" }, 503);
+    return json({ error: "Discord担当者ログインの設定が完了していません。" }, 503);
   }
   const state = randomBase64Url();
   const verifier = randomBase64Url(48);
@@ -203,7 +203,7 @@ async function finishDiscordLogin(request: Request, env: AdminAuthEnv): Promise<
     !env.DISCORD_REDIRECT_URI ||
     !env.DISCORD_GUILD_ID ||
     !env.SESSION_SECRET
-  ) return json({ error: "Discord管理者ログインの設定が完了していません。" }, 503);
+  ) return json({ error: "Discord担当者ログインの設定が完了していません。" }, 503);
 
   const url = new URL(request.url);
   const cookies = parseCookies(request);
@@ -264,20 +264,20 @@ async function finishDiscordLogin(request: Request, env: AdminAuthEnv): Promise<
   const adminRoleId = settings?.admin_role_id?.trim();
   if (!adminRoleId || !DISCORD_ID.test(adminRoleId)) {
     return htmlPage(
-      "大会管理者ロールが未設定です",
-      "Discordの大会管理者ロールIDをシステムへ登録してから、もう一度お試しください。",
+      "大会担当者ロールが未設定です",
+      "Discordの大会担当者ロールIDをシステムへ登録してから、もう一度お試しください。",
       503,
     );
   }
   if (!Array.isArray(member.roles) || !member.roles.includes(adminRoleId)) {
     return htmlPage(
-      "大会管理者権限がありません",
-      "この管理画面は、Discordで大会管理者ロールを付与されたメンバーだけが利用できます。",
+      "大会担当者権限がありません",
+      "この管理画面は、Discordで大会担当者ロールを付与されたメンバーだけが利用できます。",
       403,
     );
   }
 
-  const displayName = (member.nick || user.global_name || user.username || "Discord管理者").slice(0, 100);
+  const displayName = (member.nick || user.global_name || user.username || "Discord担当者").slice(0, 100);
   const now = Math.floor(Date.now() / 1000);
   const session = await createSession({
     discordUserId: user.id,

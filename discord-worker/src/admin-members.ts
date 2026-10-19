@@ -6,6 +6,10 @@ const MEMBER_STATUSES = new Set(["active", "inactive", "pending", "rejected"]);
 
 interface MemberDatabaseRow {
   member_id: string;
+  last_name: string;
+  first_name: string;
+  last_name_kana: string;
+  first_name_kana: string;
   display_name: string;
   display_name_kana: string;
   grade: string;
@@ -24,11 +28,19 @@ interface RegistrationRequestDatabaseRow {
   request_type: "new" | "update";
   requested_display_name: string;
   requested_display_name_kana: string;
+  requested_last_name: string;
+  requested_first_name: string;
+  requested_last_name_kana: string;
+  requested_first_name_kana: string;
   requested_grade: string;
   requested_rank: number;
   submitted_at: string;
   current_display_name: string | null;
   current_display_name_kana: string | null;
+  current_last_name: string | null;
+  current_first_name: string | null;
+  current_last_name_kana: string | null;
+  current_first_name_kana: string | null;
   current_grade: string | null;
   current_rank: number | null;
   current_status: string | null;
@@ -37,6 +49,10 @@ interface RegistrationRequestDatabaseRow {
 
 export interface AdminMember {
   memberId: string;
+  lastName: string;
+  firstName: string;
+  lastNameKana: string;
+  firstNameKana: string;
   displayName: string;
   displayNameKana: string;
   grade: string;
@@ -49,8 +65,10 @@ export interface AdminMember {
 }
 
 export interface MemberUpdateInput {
-  displayName: string;
-  displayNameKana: string;
+  lastName: string;
+  firstName: string;
+  lastNameKana: string;
+  firstNameKana: string;
   grade: string;
   rank: number;
   status: string;
@@ -62,11 +80,19 @@ export interface AdminMemberRegistrationRequest {
   requestType: "new" | "update";
   requestedDisplayName: string;
   requestedDisplayNameKana: string;
+  requestedLastName: string;
+  requestedFirstName: string;
+  requestedLastNameKana: string;
+  requestedFirstNameKana: string;
   requestedGrade: string;
   requestedRank: number;
   submittedAt: string;
   currentDisplayName?: string;
   currentDisplayNameKana?: string;
+  currentLastName?: string;
+  currentFirstName?: string;
+  currentLastNameKana?: string;
+  currentFirstNameKana?: string;
   currentGrade?: string;
   currentRank?: number;
   currentStatus?: string;
@@ -85,26 +111,37 @@ export class MemberAdminError extends Error {
 }
 
 function normalizeMemberUpdate(raw: MemberUpdateInput): MemberUpdateInput {
-  const displayName =
-    typeof raw.displayName === "string"
-      ? raw.displayName.trim().replace(/\s+/g, " ")
+  const lastName =
+    typeof raw.lastName === "string"
+      ? raw.lastName.trim().replace(/\s+/g, " ")
       : "";
-  const displayNameKana =
-    typeof raw.displayNameKana === "string"
-      ? raw.displayNameKana.trim().replace(/\s+/g, " ")
+  const firstName =
+    typeof raw.firstName === "string"
+      ? raw.firstName.trim().replace(/\s+/g, " ")
+      : "";
+  const lastNameKana =
+    typeof raw.lastNameKana === "string"
+      ? raw.lastNameKana.trim().replace(/\s+/g, " ")
+      : "";
+  const firstNameKana =
+    typeof raw.firstNameKana === "string"
+      ? raw.firstNameKana.trim().replace(/\s+/g, " ")
       : "";
   const grade = typeof raw.grade === "string" ? raw.grade.trim() : "";
   const rank = Number(raw.rank);
   const status = typeof raw.status === "string" ? raw.status.trim() : "";
 
-  if (!displayName || displayName.length > 50) {
-    throw new MemberAdminError("氏名は1〜50文字で入力してください。", 400);
+  if (!lastName || lastName.length > 50) {
+    throw new MemberAdminError("苗字は1〜50文字で入力してください。", 400);
   }
-  if (!displayNameKana || displayNameKana.length > 100) {
-    throw new MemberAdminError(
-      "氏名のよみがなは1〜100文字で入力してください。",
-      400,
-    );
+  if (!firstName || firstName.length > 50) {
+    throw new MemberAdminError("名前は1〜50文字で入力してください。", 400);
+  }
+  if (!lastNameKana || lastNameKana.length > 100) {
+    throw new MemberAdminError("苗字よみがなは1〜100文字で入力してください。", 400);
+  }
+  if (!firstNameKana || firstNameKana.length > 100) {
+    throw new MemberAdminError("名前よみがなは1〜100文字で入力してください。", 400);
   }
   if (!MEMBER_GRADES.has(grade)) {
     throw new MemberAdminError("出場級が不正です。", 400);
@@ -120,8 +157,10 @@ function normalizeMemberUpdate(raw: MemberUpdateInput): MemberUpdateInput {
   }
 
   return {
-    displayName,
-    displayNameKana,
+    lastName,
+    firstName,
+    lastNameKana,
+    firstNameKana,
     grade,
     rank,
     status,
@@ -132,6 +171,10 @@ function normalizeMemberUpdate(raw: MemberUpdateInput): MemberUpdateInput {
 function toAdminMember(row: MemberDatabaseRow): AdminMember {
   return {
     memberId: row.member_id,
+    lastName: row.last_name,
+    firstName: row.first_name,
+    lastNameKana: row.last_name_kana,
+    firstNameKana: row.first_name_kana,
     displayName: row.display_name,
     displayNameKana: row.display_name_kana,
     grade: row.grade,
@@ -174,6 +217,10 @@ export async function listAdminMembers(
   const members = await env.DB.prepare(
     `SELECT
       member_id,
+      last_name,
+      first_name,
+      last_name_kana,
+      first_name_kana,
       display_name,
       display_name_kana,
       grade,
@@ -204,11 +251,19 @@ export async function listPendingMemberRegistrations(
       member_registration_requests.request_type,
       member_registration_requests.requested_display_name,
       member_registration_requests.requested_display_name_kana,
+      member_registration_requests.requested_last_name,
+      member_registration_requests.requested_first_name,
+      member_registration_requests.requested_last_name_kana,
+      member_registration_requests.requested_first_name_kana,
       member_registration_requests.requested_grade,
       member_registration_requests.requested_rank,
       member_registration_requests.submitted_at,
       members.display_name AS current_display_name,
       members.display_name_kana AS current_display_name_kana,
+      members.last_name AS current_last_name,
+      members.first_name AS current_first_name,
+      members.last_name_kana AS current_last_name_kana,
+      members.first_name_kana AS current_first_name_kana,
       members.grade AS current_grade,
       members.rank AS current_rank,
       members.status AS current_status,
@@ -225,11 +280,19 @@ export async function listPendingMemberRegistrations(
     requestType: request.request_type,
     requestedDisplayName: request.requested_display_name,
     requestedDisplayNameKana: request.requested_display_name_kana,
+    requestedLastName: request.requested_last_name,
+    requestedFirstName: request.requested_first_name,
+    requestedLastNameKana: request.requested_last_name_kana,
+    requestedFirstNameKana: request.requested_first_name_kana,
     requestedGrade: request.requested_grade,
     requestedRank: Number(request.requested_rank),
     submittedAt: request.submitted_at,
     currentDisplayName: request.current_display_name ?? undefined,
     currentDisplayNameKana: request.current_display_name_kana ?? undefined,
+    currentLastName: request.current_last_name ?? undefined,
+    currentFirstName: request.current_first_name ?? undefined,
+    currentLastNameKana: request.current_last_name_kana ?? undefined,
+    currentFirstNameKana: request.current_first_name_kana ?? undefined,
     currentGrade: request.current_grade ?? undefined,
     currentRank:
       request.current_rank === null ? undefined : Number(request.current_rank),
@@ -269,11 +332,19 @@ export async function decideMemberRegistration(
       member_registration_requests.request_type,
       member_registration_requests.requested_display_name,
       member_registration_requests.requested_display_name_kana,
+      member_registration_requests.requested_last_name,
+      member_registration_requests.requested_first_name,
+      member_registration_requests.requested_last_name_kana,
+      member_registration_requests.requested_first_name_kana,
       member_registration_requests.requested_grade,
       member_registration_requests.requested_rank,
       member_registration_requests.submitted_at,
       members.display_name AS current_display_name,
       members.display_name_kana AS current_display_name_kana,
+      members.last_name AS current_last_name,
+      members.first_name AS current_first_name,
+      members.last_name_kana AS current_last_name_kana,
+      members.first_name_kana AS current_first_name_kana,
       members.grade AS current_grade,
       members.rank AS current_rank,
       members.status AS current_status,
@@ -307,10 +378,15 @@ export async function decideMemberRegistration(
     const statements = [
       env.DB.prepare(
         `UPDATE members
-         SET display_name = ?, display_name_kana = ?, grade = ?, rank = ?,
+         SET last_name = ?, first_name = ?, last_name_kana = ?, first_name_kana = ?,
+           display_name = ?, display_name_kana = ?, grade = ?, rank = ?,
            status = 'active', updated_at = ?
          WHERE member_id = ?`,
       ).bind(
+        request.requested_last_name,
+        request.requested_first_name,
+        request.requested_last_name_kana,
+        request.requested_first_name_kana,
         request.requested_display_name,
         request.requested_display_name_kana,
         request.requested_grade,
@@ -409,11 +485,14 @@ export async function decideMemberRegistration(
         dm_enabled,
         created_at,
         updated_at
-      ) VALUES (?, ?, ?, '', '', '', ?, ?, ?, ?, 'active', 1, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 1, ?, ?)`,
     ).bind(
       memberId,
       request.discord_user_id,
-      request.requested_display_name,
+      request.requested_last_name,
+      request.requested_last_name_kana,
+      request.requested_first_name,
+      request.requested_first_name_kana,
       request.requested_display_name,
       request.requested_display_name_kana,
       request.requested_rank,
@@ -457,6 +536,10 @@ export async function updateAdminMember(
   const existing = await env.DB.prepare(
     `SELECT
       member_id,
+      last_name,
+      first_name,
+      last_name_kana,
+      first_name_kana,
       display_name,
       display_name_kana,
       grade,
@@ -476,9 +559,13 @@ export async function updateAdminMember(
   }
 
   const nextDmEnabled = input.dmEnabled ? 1 : 0;
+  const displayName = `${input.lastName}${input.firstName}`;
+  const displayNameKana = `${input.lastNameKana}${input.firstNameKana}`;
   const changed =
-    existing.display_name !== input.displayName ||
-    existing.display_name_kana !== input.displayNameKana ||
+    existing.last_name !== input.lastName ||
+    existing.first_name !== input.firstName ||
+    existing.last_name_kana !== input.lastNameKana ||
+    existing.first_name_kana !== input.firstNameKana ||
     existing.grade !== input.grade ||
     existing.rank !== input.rank ||
     existing.status !== input.status ||
@@ -491,12 +578,17 @@ export async function updateAdminMember(
   const statements = [
     env.DB.prepare(
       `UPDATE members
-       SET display_name = ?, display_name_kana = ?, grade = ?, rank = ?, status = ?,
+       SET last_name = ?, first_name = ?, last_name_kana = ?, first_name_kana = ?,
+         display_name = ?, display_name_kana = ?, grade = ?, rank = ?, status = ?,
          dm_enabled = ?, updated_at = ?
        WHERE member_id = ?`,
     ).bind(
-      input.displayName,
-      input.displayNameKana,
+      input.lastName,
+      input.firstName,
+      input.lastNameKana,
+      input.firstNameKana,
+      displayName,
+      displayNameKana,
       input.grade,
       input.rank,
       input.status,
@@ -525,9 +617,9 @@ export async function updateAdminMember(
     ).bind(
       memberId,
       existing.display_name,
-      input.displayName,
+      displayName,
       existing.display_name_kana,
-      input.displayNameKana,
+      displayNameKana,
       existing.rank,
       input.rank,
       existing.grade,
@@ -549,8 +641,12 @@ export async function updateAdminMember(
 
   return {
     ...toAdminMember(existing),
-    displayName: input.displayName,
-    displayNameKana: input.displayNameKana,
+    lastName: input.lastName,
+    firstName: input.firstName,
+    lastNameKana: input.lastNameKana,
+    firstNameKana: input.firstNameKana,
+    displayName,
+    displayNameKana,
     grade: input.grade,
     rank: input.rank,
     status: input.status,

@@ -135,7 +135,7 @@ describe("Discord administrator authentication", () => {
     const response = await handleAdminAuthRequest(callbackRequest(), adminEnv());
 
     expect(response!.status).toBe(403);
-    expect(await response!.text()).toContain("大会管理者権限がありません");
+    expect(await response!.text()).toContain("大会担当者権限がありません");
     expect(response!.headers.get("Set-Cookie") ?? "").not.toContain(
       "__Host-sukc_admin_session",
     );
@@ -146,6 +146,6 @@ describe("Discord administrator authentication", () => {
     const response = await handleAdminAuthRequest(callbackRequest(), adminEnv(null));
 
     expect(response!.status).toBe(503);
-    expect(await response!.text()).toContain("大会管理者ロールが未設定です");
+    expect(await response!.text()).toContain("大会担当者ロールが未設定です");
   });
 });

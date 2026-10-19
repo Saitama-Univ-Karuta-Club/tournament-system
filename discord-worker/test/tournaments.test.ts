@@ -123,6 +123,16 @@ describe("attendance DM", () => {
     }
   });
 
+  it("uses the approved new-tournament text and omits the removed venue", () => {
+    const message = buildAnnouncementMessage({ ...tournament, venue: "浦和会館" });
+
+    expect(message.content).toBe(
+      "【新規大会追加のお知らせ】\n対象者のDMへ参加確認を送信しました。",
+    );
+    expect(message.embeds?.[0]?.fields?.some((field) => field.name === "会場"))
+      .toBe(false);
+  });
+
   it("builds channel and unanswered-member deadline reminders", () => {
     const portalUrl = "https://portal.example.com";
     const channelMessage = buildResponseDeadlineChannelReminderMessage(
@@ -134,7 +144,9 @@ describe("attendance DM", () => {
       portalUrl,
     );
 
-    expect(channelMessage.content).toContain("サークル内締切の2日前");
+    expect(channelMessage.content).toBe(
+      "サークル内締切の2日前です。未回答の方はお早めに回答お願いします。",
+    );
     expect(channelMessage.components).toBeUndefined();
     expect(dmMessage.content).toContain("まだ回答が登録されていません");
     expect(dmMessage.components?.[0]?.components).toHaveLength(3);
@@ -670,7 +682,9 @@ describe("notification queue", () => {
     );
 
     const fields = message.embeds?.[0]?.fields ?? [];
-    expect(message.content).toContain("サークル内締切を過ぎました");
+    expect(message.content).toBe(
+      "サークル内締切を過ぎました。参加希望者を確認し、申し込みを行なってください。",
+    );
     expect(fields.find((field) => field.name === "主催締切日")?.value).toContain("2026");
     expect(fields.find((field) => field.name === "C級 参加希望者（1人）")?.value).toContain("石田洋音");
     expect(fields.find((field) => field.name === "D級 参加希望者（1人）")?.value).toContain("髙田脩矢");

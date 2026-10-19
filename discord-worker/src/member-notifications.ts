@@ -70,7 +70,7 @@ export function buildMemberApprovalMessage(
 
   return {
     content: isNew
-      ? "【メンバー登録承認】\n新規メンバー登録が承認されました。大会案内Botを利用できます。"
+      ? "【メンバー登録承認】\n新規メンバー登録が承認されました。大会お知らせくんを利用できます。"
       : "【登録内容更新承認】\nメンバー登録内容の変更が承認されました。",
     embeds: [
       {

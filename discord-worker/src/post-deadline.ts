@@ -47,11 +47,20 @@ interface RecipientRow {
   dm_enabled: number;
 }
 
-interface UnpaidRow extends RecipientRow {
+interface PaymentRow extends RecipientRow {
+  tournament_id: string;
   display_name: string;
   display_name_kana: string;
   grade: string;
   participation_fee_yen: number;
+  payment_status: "paid" | "unpaid";
+}
+
+export interface PaymentReminderParticipant {
+  display_name: string;
+  grade: string;
+  participation_fee_yen: number;
+  payment_status: "paid" | "unpaid";
 }
 
 const MAX_ATTEMPTS = 5;
@@ -108,10 +117,9 @@ export function buildConfirmationRosterMessage(
   fileName: string,
 ): DiscordMessagePayload {
   return {
-    content: "【申込確認名簿】主催者から抽選前の確認名簿が届きました。",
+    content: "主催者から抽選前の確認名簿が届きました。氏名・出場級を確認してください。\n万が一誤りがある場合は、お早めに大会担当者までお知らせください。",
     embeds: [{
       title,
-      description: "登録内容は正しい前提で手続きを進めます。万が一、氏名・級などに誤りがある場合のみ、大会担当者へDMしてください。",
       color: 0xfee75c,
       fields: [{
         name: "申込確認名簿",
@@ -127,9 +135,10 @@ export function buildPaymentReminderDmMessage(
   title: string,
   participationFeeYen: number,
   paymentDeadline: string,
+  tournamentId: string,
 ): DiscordMessagePayload {
   return {
-    content: "【参加費未納リマインダー】サークル内支払期限を過ぎています。",
+    content: "【参加費リマインダー】サークル内支払期限を過ぎています。お早めにお支払いください。\n出場をキャンセルする場合は、大会担当者までお知らせください。",
     embeds: [{
       title,
       color: 0xed4245,
@@ -137,6 +146,54 @@ export function buildPaymentReminderDmMessage(
         { name: "参加費", value: `${new Intl.NumberFormat("ja-JP").format(participationFeeYen)}円`, inline: true },
         { name: "支払い方法", value: "大会担当者へ事前に支払い", inline: true },
         { name: "サークル内支払期限", value: formatJstDateTime(paymentDeadline), inline: false },
+      ],
+    }],
+    components: [{
+      type: 1,
+      components: [
+        { type: 2, style: 3, label: "支払い完了", custom_id: `payment:${tournamentId}:paid` },
+        { type: 2, style: 2, label: "操作を取り消す", custom_id: `payment:${tournamentId}:unpaid` },
+      ],
+    }],
+    allowed_mentions: { parse: [] },
+  };
+}
+
+export function buildPaymentReminderChannelMessage(
+  title: string,
+  participants: PaymentReminderParticipant[],
+  paymentDeadline: string,
+): DiscordMessagePayload {
+  const paid = participants.filter((participant) => participant.payment_status === "paid");
+  const unpaid = participants.filter((participant) => participant.payment_status === "unpaid");
+  const participantLines = (rows: PaymentReminderParticipant[]) => rows.length
+    ? rows.map((participant) =>
+      `${formatGrade(participant.grade)} ${participant.display_name} ${new Intl.NumberFormat("ja-JP").format(Number(participant.participation_fee_yen))}円`
+    ).join("\n")
+    : "なし";
+  const total = (rows: PaymentReminderParticipant[]) => rows.reduce((sum, participant) =>
+    sum + Number(participant.participation_fee_yen), 0);
+  return {
+    content: "【参加費リマインダー】サークル内支払期限を過ぎました。",
+    embeds: [{
+      title,
+      color: 0xed4245,
+      fields: [
+        {
+          name: `支払い済み（${paid.length}人・${new Intl.NumberFormat("ja-JP").format(total(paid))}円）`,
+          value: participantLines(paid),
+          inline: false,
+        },
+        {
+          name: `未納（${unpaid.length}人・${new Intl.NumberFormat("ja-JP").format(total(unpaid))}円）`,
+          value: participantLines(unpaid),
+          inline: false,
+        },
+        {
+          name: "サークル内支払期限",
+          value: formatJstDateTime(paymentDeadline),
+          inline: false,
+        },
       ],
     }],
     allowed_mentions: { parse: [] },
@@ -202,17 +259,19 @@ export async function enqueueLotteryResultAnnouncement(
   }]);
 }
 
-async function unpaidParticipants(db: D1Database, groupKey: string): Promise<UnpaidRow[]> {
+async function paymentParticipants(db: D1Database, groupKey: string): Promise<PaymentRow[]> {
   const rows = await db.prepare(
     `SELECT DISTINCT
       members.member_id,
+      tournament_entries.tournament_id,
       members.discord_user_id,
       members.status,
       members.dm_enabled,
       members.display_name,
       COALESCE(NULLIF(members.display_name_kana, ''), '') AS display_name_kana,
       CASE WHEN tournaments.all_grades = 1 THEN members.grade ELSE tournaments.grade END AS grade,
-      tournament_participation_fees.amount_yen AS participation_fee_yen
+      tournament_participation_fees.amount_yen AS participation_fee_yen,
+      COALESCE(tournament_entry_payments.status, 'unpaid') AS payment_status
      FROM tournament_entries
      INNER JOIN tournaments ON tournaments.tournament_id = tournament_entries.tournament_id
      INNER JOIN members ON members.member_id = tournament_entries.member_id
@@ -226,10 +285,9 @@ async function unpaidParticipants(db: D1Database, groupKey: string): Promise<Unp
       AND tournament_entry_payments.member_id = tournament_entries.member_id
      WHERE COALESCE(tournaments.registration_group_id, tournaments.tournament_id) = ?
        AND tournament_entries.status = 'selected'
-       AND COALESCE(tournament_entry_payments.status, 'unpaid') = 'unpaid'
        AND tournaments.status NOT IN ('canceled', 'deleted')
      ORDER BY grade, display_name_kana, members.display_name`,
-  ).bind(groupKey).all<UnpaidRow>();
+  ).bind(groupKey).all<PaymentRow>();
   return rows.results;
 }
 
@@ -255,7 +313,8 @@ export async function enqueueDuePaymentReminders(
   ).first<{ admin_reminder_channel_id: string }>();
   let queued = 0;
   for (const guidance of due.results) {
-    const unpaid = await unpaidParticipants(env.DB, guidance.group_key);
+    const payments = await paymentParticipants(env.DB, guidance.group_key);
+    const unpaid = payments.filter((participant) => participant.payment_status === "unpaid");
     const available = unpaid.filter((participant) =>
       participant.status === "active" && participant.dm_enabled === 1 && Boolean(participant.discord_user_id)
     );
@@ -263,7 +322,7 @@ export async function enqueueDuePaymentReminders(
     const targets: DeliveryTarget[] = available.map((participant) => ({
       idempotencyKey: `payment_reminder_dm:${guidance.group_key}:${deadlineKey}:${participant.member_id}`,
       groupKey: guidance.group_key,
-      tournamentId: guidance.representative_tournament_id,
+      tournamentId: participant.tournament_id,
       memberId: participant.member_id,
       kind: "payment_reminder_dm",
       destinationType: "dm",
@@ -432,7 +491,8 @@ export async function processPostDeadlineQueue(
         payload = await lotteryPayload(env.DB, delivery.group_key);
       } else {
         const guidance = await paymentGuidance(env.DB, delivery.group_key);
-        const unpaid = await unpaidParticipants(env.DB, delivery.group_key);
+        const payments = await paymentParticipants(env.DB, delivery.group_key);
+        const unpaid = payments.filter((participant) => participant.payment_status === "unpaid");
         if (delivery.delivery_kind === "payment_reminder_dm") {
           const participant = unpaid.find((candidate) =>
             candidate.member_id === delivery.member_id &&
@@ -447,31 +507,18 @@ export async function processPostDeadlineQueue(
             guidance.title,
             Number(participant.participation_fee_yen),
             guidance.payment_deadline,
+            delivery.tournament_id,
           );
         } else {
           if (!unpaid.length) {
             await markSkipped(env.DB, delivery.delivery_id, "未納者がいないため送信しませんでした。");
             continue;
           }
-          const lines = unpaid.map((participant) =>
-            `${formatGrade(participant.grade)} ${participant.display_name}`
-          ).join("\n");
-          payload = {
-            content: "【参加費未納リマインダー】サークル内支払期限を過ぎました。",
-            embeds: [{
-              title: guidance.title,
-              color: 0xed4245,
-              fields: [
-                { name: `未納者（${unpaid.length}人）`, value: lines, inline: false },
-                {
-                  name: "サークル内支払期限",
-                  value: formatJstDateTime(guidance.payment_deadline),
-                  inline: false,
-                },
-              ],
-            }],
-            allowed_mentions: { parse: [] },
-          };
+          payload = buildPaymentReminderChannelMessage(
+            guidance.title,
+            payments,
+            guidance.payment_deadline,
+          );
         }
       }
 

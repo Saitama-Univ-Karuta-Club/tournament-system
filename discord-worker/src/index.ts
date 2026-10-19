@@ -8,7 +8,6 @@ import { serveTournamentDocument } from "./documents";
 import {
   formatGrade,
   formatRank,
-  normalizeMemberRegistration,
   submitMemberRegistrationRequest,
   type MemberRegistrationRequestResult,
   type RegisterMemberInput,
@@ -334,8 +333,10 @@ export async function handleRequest(
       const registration = await memberRegistrar(env.DB, {
         discordUserId:
           interaction.member?.user?.id ?? interaction.user?.id ?? "",
-        displayName: getStringOption(interaction, "name"),
-        displayNameKana: getStringOption(interaction, "name-kana"),
+        lastName: getStringOption(interaction, "last-name"),
+        firstName: getStringOption(interaction, "first-name"),
+        lastNameKana: getStringOption(interaction, "last-name-kana"),
+        firstNameKana: getStringOption(interaction, "first-name-kana"),
         grade: getStringOption(interaction, "grade"),
         // 再登録直後にDiscord側へ古いコマンド定義が残る時間を考慮する。
         rank: Number.isNaN(dan)
@@ -345,11 +346,11 @@ export async function handleRequest(
 
       if (registration.requestType === "update") {
         return ephemeralMessage(
-          `登録内容変更の申請を受け付けました。\n現在: ${registration.currentDisplayName}（${registration.currentDisplayNameKana || "よみがな未登録"}）・${formatGrade(registration.currentGrade ?? "")}・${formatRank(registration.currentRank ?? 0)}\n申請内容: ${registration.displayName}（${registration.displayNameKana}）・${formatGrade(registration.grade)}・${formatRank(registration.rank)}\n管理者の承認後に反映されます。`,
+          `登録内容変更の申請を受け付けました。\n現在: ${registration.currentDisplayName}（${registration.currentDisplayNameKana || "よみがな未登録"}）・${formatGrade(registration.currentGrade ?? "")}・${formatRank(registration.currentRank ?? 0)}\n申請内容:\n苗字: ${registration.lastName}\n名前: ${registration.firstName}\n苗字よみがな: ${registration.lastNameKana}\n名前よみがな: ${registration.firstNameKana}\n出場級: ${formatGrade(registration.grade)}\n段位: ${formatRank(registration.rank)}\n担当者の承認後に反映されます。`,
         );
       }
       return ephemeralMessage(
-        `メンバー登録の申請を受け付けました。\n氏名: ${registration.displayName}\nよみがな: ${registration.displayNameKana}\n出場級: ${formatGrade(registration.grade)}\n段位: ${formatRank(registration.rank)}\n管理者の承認後に有効になります。`,
+        `メンバー登録の申請を受け付けました。\n苗字: ${registration.lastName}\n名前: ${registration.firstName}\n苗字よみがな: ${registration.lastNameKana}\n名前よみがな: ${registration.firstNameKana}\n出場級: ${formatGrade(registration.grade)}\n段位: ${formatRank(registration.rank)}\n担当者の承認後に有効になります。`,
       );
     } catch (error: unknown) {
       console.error("メンバー登録申請エラー", error);
@@ -398,7 +399,7 @@ export async function handleRequest(
       !canManageGuild(interaction)
     ) {
       return ephemeralMessage(
-        "このチャンネルは管理者用リマインダー送信先に設定できません。",
+        "このチャンネルは担当者用リマインダー送信先に設定できません。",
       );
     }
 
@@ -409,12 +410,12 @@ export async function handleRequest(
         interaction.channel_id,
       );
       return ephemeralMessage(
-        "このチャンネルを管理者用の締切リマインダー送信先に設定しました。",
+        "このチャンネルを担当者用の締切リマインダー送信先に設定しました。",
       );
     } catch (error: unknown) {
       console.error("管理者用リマインダーチャンネル設定エラー", error);
       return ephemeralMessage(
-        "管理者用リマインダーチャンネルの設定に失敗しました。",
+        "担当者用リマインダーチャンネルの設定に失敗しました。",
       );
     }
   }
@@ -434,7 +435,7 @@ export async function handleRequest(
     try {
       const result = await testReminderSender(env);
       return ephemeralMessage(
-        `管理者用チャンネルへ「${result.tournamentTitle}」のテストリマインダーを送信しました。`,
+        `担当者用チャンネルへ「${result.tournamentTitle}」のテストリマインダーを送信しました。`,
       );
     } catch (error: unknown) {
       console.error("締切リマインダーテスト送信エラー", error);
@@ -460,28 +461,28 @@ export async function handleRequest(
     try {
       const creatorId =
         interaction.member?.user?.id ?? interaction.user?.id ?? "";
-      const normalized = normalizeMemberRegistration({
-        discordUserId: creatorId,
-        displayName:
-          getStringOption(interaction, "title") || "Discord Botテスト大会",
-        displayNameKana:
-          getStringOption(interaction, "title") || "Discord Botテスト大会",
-        grade: getStringOption(interaction, "grade"),
-        rank: 0,
-      });
+      const grade = getStringOption(interaction, "grade");
+      if (!new Set(["A", "B", "C", "D", "E", "F", "beginner"]).has(grade)) {
+        throw new Error("出場級の値が不正です。");
+      }
+      const title =
+        getStringOption(interaction, "title").trim() || "Discord Botテスト大会";
+      if (!creatorId || title.length > 50) {
+        throw new Error("大会名またはDiscordユーザーIDが不正です。");
+      }
 
       executionContext.waitUntil(
         testTournamentCreator(env, {
-          grade: normalized.grade,
-          title: normalized.displayName,
-          createdByDiscordUserId: normalized.discordUserId,
+          grade,
+          title,
+          createdByDiscordUserId: creatorId,
         }).catch((error: unknown) => {
           console.error("テスト大会作成・通知エラー", error);
         }),
       );
 
       return ephemeralMessage(
-        `${formatGrade(normalized.grade)}対象のテスト大会作成とDM送信を開始しました。`,
+        `${formatGrade(grade)}対象のテスト大会作成とDM送信を開始しました。`,
       );
     } catch (error: unknown) {
       const message =

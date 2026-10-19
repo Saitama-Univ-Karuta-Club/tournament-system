@@ -336,7 +336,7 @@ async function finishDiscordLogin(
 }
 
 function memberOnlyPage(): Response {
-  const html = `<!doctype html><html lang="ja"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>メンバー登録が必要です</title><style>body{margin:0;background:#f4f6fb;color:#17213a;font-family:system-ui,sans-serif}.card{max-width:560px;margin:12vh auto;background:#fff;border:1px solid #dbe2f0;border-radius:18px;padding:32px;box-shadow:0 14px 40px #27396614}h1{font-size:1.45rem}p{line-height:1.8}.button{display:inline-block;margin-top:10px;padding:12px 18px;border-radius:10px;background:#425ba8;color:#fff;text-decoration:none;font-weight:700}</style><main class="card"><h1>承認済みメンバーを確認できませんでした</h1><p>Discordで <code>/member-register</code> を実行し、管理者の承認後にもう一度ログインしてください。すでに登録済みの場合は、管理者へお問い合わせください。</p><a class="button" href="/auth/discord">もう一度ログイン</a></main></html>`;
+  const html = `<!doctype html><html lang="ja"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>メンバー登録が必要です</title><style>body{margin:0;background:#f4f6fb;color:#17213a;font-family:system-ui,sans-serif}.card{max-width:560px;margin:12vh auto;background:#fff;border:1px solid #dbe2f0;border-radius:18px;padding:32px;box-shadow:0 14px 40px #27396614}h1{font-size:1.45rem}p{line-height:1.8}.button{display:inline-block;margin-top:10px;padding:12px 18px;border-radius:10px;background:#425ba8;color:#fff;text-decoration:none;font-weight:700}</style><main class="card"><h1>承認済みメンバーを確認できませんでした</h1><p>Discordで <code>/member-register</code> を実行し、担当者の承認後にもう一度ログインしてください。すでに登録済みの場合は、担当者へお問い合わせください。</p><a class="button" href="/auth/discord">もう一度ログイン</a></main></html>`;
   return new Response(html, {
     status: 403,
     headers: { ...securityHeaders, "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
@@ -683,7 +683,7 @@ function googleBackupInformationHtml(page: "home" | "privacy"): string {
       <h2>権限の解除</h2>
       <p>Googleアカウントの「サードパーティ製のアプリとサービス」から、いつでもこのアプリのアクセス権を解除できます。解除後は新しいバックアップを作成できなくなります。</p>
       <h2>お問い合わせ</h2>
-      <p>本機能に関する問い合わせは、埼玉大学かるた会の大会システム管理者へお寄せください。</p>
+      <p>本機能に関する問い合わせは、埼玉大学かるた会の大会担当者へお寄せください。</p>
       <p><a href="${homeUrl}">アプリ説明へ戻る</a></p>`;
 
   return `<!doctype html>

@@ -7,6 +7,10 @@ import {
 function registrationDatabase(options: {
   existing?: {
     member_id: string;
+    last_name: string;
+    first_name: string;
+    last_name_kana: string;
+    first_name_kana: string;
     display_name: string;
     display_name_kana: string;
     grade: string;
@@ -41,22 +45,28 @@ function registrationDatabase(options: {
 }
 
 describe("member registration requests", () => {
-  it("氏名のよみがなを必須にする", () => {
+  it("姓・名と各よみがなを必須にする", () => {
     expect(() =>
       normalizeMemberRegistration({
         discordUserId: "discord-ishida",
-        displayName: "石田洋音",
-        displayNameKana: "",
+        lastName: "石田",
+        firstName: "洋音",
+        lastNameKana: "いしだ",
+        firstNameKana: "",
         grade: "C",
         rank: 2,
       }),
-    ).toThrow("よみがなは1〜100文字");
+    ).toThrow("名前よみがなは1〜100文字");
   });
 
   it("recognizes an existing Discord ID as a registration update", async () => {
     const database = registrationDatabase({
       existing: {
         member_id: "M-existing",
+        last_name: "石田",
+        first_name: "洋音",
+        last_name_kana: "いしだ",
+        first_name_kana: "ひろね",
         display_name: "石田洋音",
         display_name_kana: "いしだ ようおん",
         grade: "C",
@@ -66,8 +76,10 @@ describe("member registration requests", () => {
 
     const result = await submitMemberRegistrationRequest(database.db, {
       discordUserId: "discord-ishida",
-      displayName: "石田洋音",
-      displayNameKana: "いしだ ようおん",
+      lastName: "石田",
+      firstName: "洋音",
+      lastNameKana: "いしだ",
+      firstNameKana: "ひろね",
       grade: "B",
       rank: 3,
     });
@@ -91,8 +103,10 @@ describe("member registration requests", () => {
 
     const result = await submitMemberRegistrationRequest(database.db, {
       discordUserId: "discord-new",
-      displayName: "埼玉花子",
-      displayNameKana: "さいたま はなこ",
+      lastName: "埼玉",
+      firstName: "花子",
+      lastNameKana: "さいたま",
+      firstNameKana: "はなこ",
       grade: "D",
       rank: 1,
     });
@@ -105,6 +119,10 @@ describe("member registration requests", () => {
     const database = registrationDatabase({
       existing: {
         member_id: "M-existing",
+        last_name: "石田",
+        first_name: "洋音",
+        last_name_kana: "いしだ",
+        first_name_kana: "ひろね",
         display_name: "石田洋音",
         display_name_kana: "いしだ ようおん",
         grade: "C",
@@ -115,8 +133,10 @@ describe("member registration requests", () => {
 
     const result = await submitMemberRegistrationRequest(database.db, {
       discordUserId: "discord-ishida",
-      displayName: "石田洋音",
-      displayNameKana: "いしだ ようおん",
+      lastName: "石田",
+      firstName: "洋音",
+      lastNameKana: "いしだ",
+      firstNameKana: "ひろね",
       grade: "B",
       rank: 3,
     });

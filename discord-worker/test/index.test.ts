@@ -16,6 +16,14 @@ describe("Discord Worker", () => {
     const command = commands.find((candidate) => candidate.name === "member-register");
     const optionNames = command?.options?.map((option) => option.name) ?? [];
 
+    expect(optionNames).toEqual([
+      "last-name",
+      "first-name",
+      "last-name-kana",
+      "first-name-kana",
+      "grade",
+      "dan",
+    ]);
     expect(optionNames).toContain("dan");
     expect(optionNames).not.toContain("rank");
   });
@@ -144,6 +152,10 @@ describe("Discord Worker", () => {
       requestId: "MR-test",
       requestType: "update",
       discordUserId: "discord-user-id",
+      lastName: "埼玉",
+      firstName: "花子",
+      lastNameKana: "さいたま",
+      firstNameKana: "はなこ",
       displayName: "埼玉 花子",
       displayNameKana: "さいたま はなこ",
       grade: "B",
@@ -170,8 +182,10 @@ describe("Discord Worker", () => {
           data: {
             name: "member-register",
             options: [
-              { name: "name", value: "埼玉 花子" },
-              { name: "name-kana", value: "さいたま はなこ" },
+              { name: "last-name", value: "埼玉" },
+              { name: "first-name", value: "花子" },
+              { name: "last-name-kana", value: "さいたま" },
+              { name: "first-name-kana", value: "はなこ" },
               { name: "grade", value: "B" },
               { name: "dan", value: 2 },
             ],
@@ -193,8 +207,10 @@ describe("Discord Worker", () => {
       env.DB,
       {
         discordUserId: "discord-user-id",
-        displayName: "埼玉 花子",
-        displayNameKana: "さいたま はなこ",
+        lastName: "埼玉",
+        firstName: "花子",
+        lastNameKana: "さいたま",
+        firstNameKana: "はなこ",
         grade: "B",
         rank: 2,
       },

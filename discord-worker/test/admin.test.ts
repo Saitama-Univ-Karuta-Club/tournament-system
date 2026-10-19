@@ -61,7 +61,7 @@ describe("Admin Worker", () => {
 
     expect(response.status).toBe(401);
     await expect(response.json()).resolves.toEqual({
-      error: "Discordでの大会管理者ログインが必要です。",
+      error: "Discordでの大会担当者ログインが必要です。",
     });
   });
 
@@ -1178,6 +1178,10 @@ describe("Admin Worker", () => {
     const memberLister = vi.fn().mockResolvedValue([
       {
         memberId: "M-11111111-1111-4111-8111-111111111111",
+        lastName: "石田",
+        firstName: "洋音",
+        lastNameKana: "いしだ",
+        firstNameKana: "ひろね",
         displayName: "石田 洋音",
         displayNameKana: "いしだ ようおん",
         grade: "C",
@@ -1213,6 +1217,10 @@ describe("Admin Worker", () => {
     const memberId = "M-11111111-1111-4111-8111-111111111111";
     const memberUpdater = vi.fn().mockResolvedValue({
       memberId,
+      lastName: "石田",
+      firstName: "洋音",
+      lastNameKana: "いしだ",
+      firstNameKana: "ひろね",
       displayName: "石田 洋音",
       displayNameKana: "いしだ ようおん",
       grade: "B",
@@ -1222,8 +1230,10 @@ describe("Admin Worker", () => {
       discordLinked: true,
     });
     const input = {
-      displayName: "石田 洋音",
-      displayNameKana: "いしだ ようおん",
+      lastName: "石田",
+      firstName: "洋音",
+      lastNameKana: "いしだ",
+      firstNameKana: "ひろね",
       grade: "B",
       rank: 3,
       status: "active",
@@ -1364,6 +1374,9 @@ describe("Admin Worker", () => {
     expect(html).toContain('class="request-badge"');
     expect(html).toContain("/api/member-requests/count");
     expect(html).toContain("よみがな");
-    expect(html).toContain("displayNameKana: nameKanaInput.value");
+    expect(html).toContain("lastName: lastNameInput.value");
+    expect(html).toContain("firstName: firstNameInput.value");
+    expect(html).toContain("lastNameKana: lastNameKanaInput.value");
+    expect(html).toContain("firstNameKana: firstNameKanaInput.value");
   });
 });

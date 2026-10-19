@@ -2210,7 +2210,7 @@ function adminHtml(page: AdminPage): string {
     .member-row-actions { min-width: 0; display: grid; justify-items: start; gap: 4px; }
     .member-row-actions button { padding: 7px 11px; }
     .member-editor { padding: 14px; background: #fafbfe; }
-    .member-grid { display: grid; grid-template-columns: minmax(145px, 1.3fr) minmax(145px, 1.3fr) minmax(90px, .65fr) minmax(90px, .65fr) minmax(115px, .8fr) auto; gap: 12px; align-items: end; }
+    .member-grid { display: grid; grid-template-columns: repeat(4, minmax(130px, 1fr)); gap: 12px; align-items: end; }
     .member-grid .checkbox { display: flex; align-items: center; gap: 8px; min-height: 42px; }
     .member-grid .checkbox input { width: auto; }
     .member-actions { display: flex; align-items: center; gap: 12px; margin-top: 12px; flex-wrap: wrap; }
@@ -2346,7 +2346,7 @@ function adminHtml(page: AdminPage): string {
       </div>
       <div id="member-status" role="status" aria-live="polite">読み込み中…</div>
       <div id="member-list"></div>
-      <div class="footnote">Discord IDそのものは管理画面に表示しません。氏名・よみがな・出場級・段位・在籍状態・DM送信設定の変更履歴は管理者メールとともに保存されます。</div>
+      <div class="footnote">Discord IDそのものは管理画面に表示しません。氏名・よみがな・出場級・段位・在籍状態・DM送信設定の変更履歴は担当者情報とともに保存されます。</div>
     </section>
   </main>
   <dialog id="edit-tournament-dialog">
@@ -3610,18 +3610,29 @@ function adminHtml(page: AdminPage): string {
       const editor = element('div', 'member-editor');
       editor.hidden = true;
       const grid = element('div', 'member-grid');
-      const nameLabel = element('label', '', '氏名');
-      const nameInput = document.createElement('input');
-      nameInput.value = member.displayName;
-      nameInput.maxLength = 50;
-      nameLabel.append(nameInput);
+      const lastNameLabel = element('label', '', '苗字');
+      const lastNameInput = document.createElement('input');
+      lastNameInput.value = member.lastName || '';
+      lastNameInput.maxLength = 50;
+      lastNameLabel.append(lastNameInput);
 
-      const nameKanaLabel = element('label', '', 'よみがな');
-      const nameKanaInput = document.createElement('input');
-      nameKanaInput.value = member.displayNameKana || '';
-      nameKanaInput.maxLength = 100;
-      nameKanaInput.placeholder = 'いしだ ようおん';
-      nameKanaLabel.append(nameKanaInput);
+      const firstNameLabel = element('label', '', '名前');
+      const firstNameInput = document.createElement('input');
+      firstNameInput.value = member.firstName || '';
+      firstNameInput.maxLength = 50;
+      firstNameLabel.append(firstNameInput);
+
+      const lastNameKanaLabel = element('label', '', '苗字よみがな');
+      const lastNameKanaInput = document.createElement('input');
+      lastNameKanaInput.value = member.lastNameKana || '';
+      lastNameKanaInput.maxLength = 100;
+      lastNameKanaLabel.append(lastNameKanaInput);
+
+      const firstNameKanaLabel = element('label', '', '名前よみがな');
+      const firstNameKanaInput = document.createElement('input');
+      firstNameKanaInput.value = member.firstNameKana || '';
+      firstNameKanaInput.maxLength = 100;
+      firstNameKanaLabel.append(firstNameKanaInput);
 
       const gradeLabelNode = element('label', '', '出場級');
       const gradeSelect = document.createElement('select');
@@ -3661,7 +3672,7 @@ function adminHtml(page: AdminPage): string {
       dmCheckbox.type = 'checkbox';
       dmCheckbox.checked = member.dmEnabled;
       dmLabel.append(dmCheckbox, document.createTextNode('DMを送る'));
-      grid.append(nameLabel, nameKanaLabel, gradeLabelNode, rankLabelNode, statusLabel, dmLabel);
+      grid.append(lastNameLabel, firstNameLabel, lastNameKanaLabel, firstNameKanaLabel, gradeLabelNode, rankLabelNode, statusLabel, dmLabel);
       editor.append(grid);
 
       const actions = element('div', 'member-actions');
@@ -3671,8 +3682,10 @@ function adminHtml(page: AdminPage): string {
       save.type = 'button';
       const message = element('span', 'status-message', '');
       const resetEditor = () => {
-        nameInput.value = member.displayName;
-        nameKanaInput.value = member.displayNameKana || '';
+        lastNameInput.value = member.lastName || '';
+        firstNameInput.value = member.firstName || '';
+        lastNameKanaInput.value = member.lastNameKana || '';
+        firstNameKanaInput.value = member.firstNameKana || '';
         gradeSelect.value = member.grade;
         rankSelect.value = String(member.rank);
         statusSelect.value = member.status;
@@ -3684,7 +3697,7 @@ function adminHtml(page: AdminPage): string {
         resetEditor();
         summary.hidden = true;
         editor.hidden = false;
-        nameInput.focus();
+        lastNameInput.focus();
       });
       cancel.addEventListener('click', () => {
         resetEditor();
@@ -3700,8 +3713,10 @@ function adminHtml(page: AdminPage): string {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-              displayName: nameInput.value,
-              displayNameKana: nameKanaInput.value,
+              lastName: lastNameInput.value,
+              firstName: firstNameInput.value,
+              lastNameKana: lastNameKanaInput.value,
+              firstNameKana: firstNameKanaInput.value,
               grade: gradeSelect.value,
               rank: Number(rankSelect.value),
               status: statusSelect.value,
@@ -3738,13 +3753,13 @@ function adminHtml(page: AdminPage): string {
       const requested = element('div', 'request-value');
       requested.append(
         element('strong', '', request.requestType === 'update' ? '変更後' : '登録内容'),
-        document.createTextNode(request.requestedDisplayName + '（' + (request.requestedDisplayNameKana || 'よみがな未登録') + '） ／ ' + gradeLabel(request.requestedGrade) + ' ／ ' + rankLabel(request.requestedRank)),
+        document.createTextNode('苗字 ' + request.requestedLastName + ' ／ 名前 ' + request.requestedFirstName + ' ／ 苗字よみがな ' + request.requestedLastNameKana + ' ／ 名前よみがな ' + request.requestedFirstNameKana + ' ／ ' + gradeLabel(request.requestedGrade) + ' ／ ' + rankLabel(request.requestedRank)),
       );
       if (request.requestType === 'update') {
         const current = element('div', 'request-value');
         current.append(
           element('strong', '', '現在'),
-          document.createTextNode((request.currentDisplayName || '不明') + '（' + (request.currentDisplayNameKana || 'よみがな未登録') + '） ／ ' + gradeLabel(request.currentGrade || '') + ' ／ ' + rankLabel(request.currentRank)),
+          document.createTextNode('苗字 ' + (request.currentLastName || '未登録') + ' ／ 名前 ' + (request.currentFirstName || '未登録') + ' ／ 苗字よみがな ' + (request.currentLastNameKana || '未登録') + ' ／ 名前よみがな ' + (request.currentFirstNameKana || '未登録') + ' ／ ' + gradeLabel(request.currentGrade || '') + ' ／ ' + rankLabel(request.currentRank)),
         );
         comparison.append(current, element('div', 'request-arrow', '→'), requested);
       } else {
@@ -4174,7 +4189,7 @@ export async function handleAdminRequest(
   }
   if (!principal) {
     if (url.pathname.startsWith("/api/")) {
-      return json({ error: "Discordでの大会管理者ログインが必要です。" }, 401);
+      return json({ error: "Discordでの大会担当者ログインが必要です。" }, 401);
     }
     const returnTo = `${url.pathname}${url.search}`;
     return new Response(null, {
