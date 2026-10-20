@@ -33,6 +33,11 @@
       "name": "sukc-tournament-google-drive-backup",
       "binding": "BACKUP_WORKFLOW",
       "class_name": "TournamentBackupWorkflow"
+    },
+    {
+      "name": "sukc-tournament-google-drive-document-backup",
+      "binding": "DOCUMENT_BACKUP_WORKFLOW",
+      "class_name": "TournamentDocumentBackupWorkflow"
     }
   ]
 }

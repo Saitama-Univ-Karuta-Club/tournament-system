@@ -4,6 +4,12 @@ import {
   sendDirectMessage,
 } from "./discord-api";
 import { formatGrade } from "./members";
+import {
+  applyBotMessageContent,
+  defaultBotMessageContent,
+  type BotMessageKey,
+} from "./bot-message-settings";
+import { getDeadlineAutomationSettings } from "./deadline-settings";
 
 export interface TournamentEnv {
   DB: D1Database;
@@ -391,6 +397,73 @@ export function formatTournamentGrade(tournament: TournamentRow): string {
   return tournament.all_grades === 1 ? "すべて" : formatGrade(tournament.grade);
 }
 
+function attendanceChoiceComponents(
+  tournamentId: string,
+): NonNullable<DiscordMessagePayload["components"]> {
+  return [
+    {
+      type: 1,
+      components: [
+        {
+          type: 2,
+          style: 3,
+          label: "参加",
+          custom_id: `attendance:${tournamentId}:yes`,
+        },
+        {
+          type: 2,
+          style: 2,
+          label: "未定",
+          custom_id: `attendance:${tournamentId}:maybe`,
+        },
+        {
+          type: 2,
+          style: 4,
+          label: "不参加",
+          custom_id: `attendance:${tournamentId}:no`,
+        },
+      ],
+    },
+  ];
+}
+
+function attendanceSelectedComponents(
+  tournamentId: string,
+  selectedResponse: string,
+): NonNullable<DiscordMessagePayload["components"]> {
+  const choices = attendanceChoiceComponents(tournamentId)[0]?.components ?? [];
+  const selected = choices.find((button) =>
+    button.custom_id === `attendance:${tournamentId}:${selectedResponse}`
+  );
+  if (!selected) return attendanceChoiceComponents(tournamentId);
+  return [
+    {
+      type: 1,
+      components: [
+        { ...selected, label: `✓ ${RESPONSE_LABELS[selectedResponse]}` },
+        {
+          type: 2,
+          style: 2,
+          label: "回答を変更",
+          custom_id: `attendance-edit:${tournamentId}`,
+        },
+      ],
+    },
+  ];
+}
+
+export function buildAttendanceEditingMessage(
+  tournamentId: string,
+  currentMessage: Pick<DiscordMessagePayload, "content" | "embeds">,
+): DiscordMessagePayload {
+  return {
+    content: currentMessage.content,
+    embeds: currentMessage.embeds,
+    components: attendanceChoiceComponents(tournamentId),
+    allowed_mentions: { parse: [] },
+  };
+}
+
 export function buildAttendanceMessage(
   tournament: TournamentRow,
   selectedResponse?: string,
@@ -438,8 +511,8 @@ export function buildAttendanceMessage(
 
   return {
     content: isUpdate
-      ? `【大会情報更新】内容が変更されました。参加意思をもう一度確認してください。${selected}`
-      : `大会への参加意思を選択してください。${selected}`,
+      ? `${defaultBotMessageContent("attendance_update")}${selected}`
+      : `${defaultBotMessageContent("attendance_request")}${selected}`,
     embeds: [
       {
         title: tournament.title,
@@ -447,31 +520,9 @@ export function buildAttendanceMessage(
         fields,
       },
     ],
-    components: [
-      {
-        type: 1,
-        components: [
-          {
-            type: 2,
-            style: 3,
-            label: "参加",
-            custom_id: `attendance:${tournament.tournament_id}:yes`,
-          },
-          {
-            type: 2,
-            style: 2,
-            label: "未定",
-            custom_id: `attendance:${tournament.tournament_id}:maybe`,
-          },
-          {
-            type: 2,
-            style: 4,
-            label: "不参加",
-            custom_id: `attendance:${tournament.tournament_id}:no`,
-          },
-        ],
-      },
-    ],
+    components: selectedResponse
+      ? attendanceSelectedComponents(tournament.tournament_id, selectedResponse)
+      : attendanceChoiceComponents(tournament.tournament_id),
     allowed_mentions: { parse: [] },
   };
 }
@@ -542,8 +593,8 @@ export function buildAnnouncementMessage(
 
   return {
     content: isUpdate
-      ? "【大会情報更新】\n変更後の内容を対象者のDMへ再送します。"
-      : "【新規大会追加のお知らせ】\n対象者のDMへ参加確認を送信しました。",
+      ? defaultBotMessageContent("announcement_update")
+      : defaultBotMessageContent("announcement_new"),
     embeds: [
       {
         title: tournament.title,
@@ -562,7 +613,7 @@ export function buildResponseDeadlineChannelReminderMessage(
   const message = buildAnnouncementMessage(tournament, false, memberPortalUrl);
   return {
     ...message,
-    content: "サークル内締切の2日前です。未回答の方はお早めに回答お願いします。",
+    content: defaultBotMessageContent("response_reminder_channel"),
     embeds: message.embeds?.map((embed) => ({ ...embed, color: 0xfee75c })),
   };
 }
@@ -579,8 +630,7 @@ export function buildResponseDeadlineDmReminderMessage(
   );
   return {
     ...message,
-    content:
-      "【回答締切リマインダー】まだ回答が登録されていません。サークル内締切までに参加意思を選択してください。",
+    content: defaultBotMessageContent("response_reminder_dm"),
     embeds: message.embeds?.map((embed) => ({ ...embed, color: 0xfee75c })),
   };
 }
@@ -632,7 +682,7 @@ export function buildApplicationCompletedMessage(
   if (participantChunks.length === 0) participantChunks.push("なし");
 
   return {
-    content: "【申込完了】主催者への大会申込が完了しました。",
+    content: defaultBotMessageContent("application_completed"),
     embeds: [
       {
         title: first.title,
@@ -721,7 +771,7 @@ export function buildEntryResultsAnnouncementMessage(
   };
 
   return {
-    content: "【出場者・キャンセル待ち確定】抽選結果をお知らせします。",
+    content: defaultBotMessageContent("lottery_result"),
     embeds: [
       {
         title: tournamentTitle,
@@ -764,8 +814,8 @@ export function buildDeadlineReminderMessage(
     content: isTest
       ? `【テスト送信・締切リマインダー】${deadlineLabel}の通知表示と送信権限の確認です。`
       : isInternal
-        ? "サークル内締切を過ぎました。参加希望者を確認し、申し込みを行なってください。"
-        : "**本日が主催者締切日です。参加希望者リストを確認し、すぐに申し込みを行なってください。**\nすでに申込済みの場合は、大会ステータスを「申込完了」に変更してください。",
+        ? defaultBotMessageContent("internal_deadline")
+        : defaultBotMessageContent("organizer_deadline"),
     embeds: [
       {
         title: tournament.title,
@@ -955,10 +1005,20 @@ export function getDeadlineReminderSchedule(
 
 export function getResponseDeadlineReminderSchedule(
   tournament: TournamentRow,
+  daysBefore = 2,
+  time = "00:00",
+  timeMode: "same" | "custom" = "custom",
 ): Date {
+  const internalDeadline = new Date(tournament.internal_deadline);
+  const jstDeadline = new Date(
+    internalDeadline.getTime() + JST_OFFSET_MILLISECONDS,
+  ).toISOString();
+  const selectedTime = timeMode === "same" ? jstDeadline.slice(11, 16) : time;
+  const [hours, minutes] = selectedTime.split(":").map(Number);
   return new Date(
     startOfJstDay(tournament.internal_deadline).getTime() -
-      2 * 24 * 60 * 60 * 1000,
+      daysBefore * 24 * 60 * 60 * 1000 +
+      (hours * 60 + minutes) * 60 * 1000,
   );
 }
 
@@ -967,10 +1027,18 @@ export function buildResponseDeadlineReminderTargets(
   announcementChannelId: string,
   unansweredMembers: TargetMemberRow[],
   now = new Date(),
+  daysBefore = 2,
+  time = "00:00",
+  timeMode: "same" | "custom" = "custom",
 ): NotificationTarget[] {
   const nowMs = now.getTime();
   if (
-    nowMs < getResponseDeadlineReminderSchedule(tournament).getTime() ||
+    nowMs < getResponseDeadlineReminderSchedule(
+      tournament,
+      daysBefore,
+      time,
+      timeMode,
+    ).getTime() ||
     nowMs >= new Date(tournament.internal_deadline).getTime()
   ) {
     return [];
@@ -1686,6 +1754,8 @@ export async function enqueueResponseDeadlineReminders(
 ): Promise<number> {
   if (!env.DISCORD_GUILD_ID) return 0;
 
+  const deadlineSettings = await getDeadlineAutomationSettings(env.DB);
+
   const settings = await env.DB.prepare(
     `SELECT announcement_channel_id
      FROM discord_settings
@@ -1749,7 +1819,14 @@ export async function enqueueResponseDeadlineReminders(
 
   let enqueued = 0;
   for (const tournament of tournaments.results) {
-    if (now < getResponseDeadlineReminderSchedule(tournament)) continue;
+    if (
+      now < getResponseDeadlineReminderSchedule(
+        tournament,
+        deadlineSettings.responseReminderDaysBefore,
+        deadlineSettings.responseReminderTime,
+        deadlineSettings.responseReminderTimeMode,
+      )
+    ) continue;
 
     const unansweredMembers = await env.DB.prepare(
       `SELECT members.member_id, members.discord_user_id
@@ -1790,6 +1867,9 @@ export async function enqueueResponseDeadlineReminders(
         settings.announcement_channel_id,
         unansweredMembers.results,
         now,
+        deadlineSettings.responseReminderDaysBefore,
+        deadlineSettings.responseReminderTime,
+        deadlineSettings.responseReminderTimeMode,
       ),
     );
   }
@@ -1997,6 +2077,8 @@ export async function processNotificationQueue(
 
     try {
       let payload: DiscordMessagePayload;
+      let messageSettingKey: BotMessageKey;
+      let messageContentSuffix = "";
       if (notification.delivery_context === "response_reminder") {
         if (
           attemptedAt.getTime() >=
@@ -2050,11 +2132,13 @@ export async function processNotificationQueue(
             notification,
             env.MEMBER_PORTAL_URL,
           );
+          messageSettingKey = "response_reminder_dm";
         } else if (notification.notification_type === "announcement") {
           payload = buildResponseDeadlineChannelReminderMessage(
             notification,
             env.MEMBER_PORTAL_URL,
           );
+          messageSettingKey = "response_reminder_channel";
         } else {
           throw new Error("回答リマインダーの通知種別が不正です。");
         }
@@ -2064,6 +2148,9 @@ export async function processNotificationQueue(
           notification.delivery_context === "update",
           env.MEMBER_PORTAL_URL,
         );
+        messageSettingKey = notification.delivery_context === "update"
+          ? "announcement_update"
+          : "announcement_new";
       } else if (notification.notification_type === "deadline_reminder") {
         if (!notification.reminder_kind) {
           throw new Error("締切リマインダーの種類が未設定です。");
@@ -2090,8 +2177,12 @@ export async function processNotificationQueue(
           false,
           env.TOURNAMENT_ADMIN_URL,
         );
+        messageSettingKey = notification.reminder_kind === "internal_deadline"
+          ? "internal_deadline"
+          : "organizer_deadline";
       } else if (notification.notification_type === "application_completed") {
         payload = await applicationCompletedPayload(env.DB, notification);
+        messageSettingKey = "application_completed";
       } else {
         let selectedResponse: string | undefined;
         if (notification.member_id) {
@@ -2103,13 +2194,25 @@ export async function processNotificationQueue(
             .first<{ response: string }>();
           selectedResponse = current?.response;
         }
+        if (selectedResponse) {
+          messageContentSuffix = `\n現在の回答: **${RESPONSE_LABELS[selectedResponse]}**`;
+        }
         payload = buildAttendanceMessage(
           notification,
           selectedResponse,
           notification.delivery_context === "update",
           env.MEMBER_PORTAL_URL,
         );
+        messageSettingKey = notification.delivery_context === "update"
+          ? "attendance_update"
+          : "attendance_request";
       }
+      payload = await applyBotMessageContent(
+        env.DB,
+        messageSettingKey,
+        payload,
+        messageContentSuffix,
+      );
       const message =
         notification.notification_type !== "invitation_dm"
           ? await sendChannelMessage(
@@ -2360,10 +2463,15 @@ export async function recordAttendanceResponse(
     .bind(target.tournament_id, target.member_id, input.response, now, now)
     .run();
 
-  return buildAttendanceMessage(
-    target,
-    input.response,
-    false,
-    env.MEMBER_PORTAL_URL,
+  return applyBotMessageContent(
+    env.DB,
+    "attendance_request",
+    buildAttendanceMessage(
+      target,
+      input.response,
+      false,
+      env.MEMBER_PORTAL_URL,
+    ),
+    `\n現在の回答: **${RESPONSE_LABELS[input.response]}**`,
   );
 }

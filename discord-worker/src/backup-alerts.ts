@@ -2,6 +2,10 @@ import {
   type DiscordMessagePayload,
   sendChannelMessage,
 } from "./discord-api";
+import {
+  applyBotMessageContent,
+  defaultBotMessageContent,
+} from "./bot-message-settings";
 
 const ALERT_BATCH_SIZE = 5;
 const MAX_ALERT_ATTEMPTS = 5;
@@ -25,7 +29,7 @@ export function buildBackupFailureMessage(
 ): DiscordMessagePayload {
   const source = backup.trigger_source === "scheduled" ? "定期実行" : "手動実行";
   return {
-    content: "⚠️ Google Driveバックアップに失敗しました。",
+    content: defaultBotMessageContent("backup_failure"),
     embeds: [
       {
         title: "大会システム バックアップエラー",
@@ -99,10 +103,15 @@ export async function processBackupFailureAlerts(
 
     processed += 1;
     try {
+      const payload = await applyBotMessageContent(
+        env.DB,
+        "backup_failure",
+        buildBackupFailureMessage(backup),
+      );
       await sendChannelMessage(
         env.DISCORD_BOT_TOKEN,
         settings.admin_reminder_channel_id,
-        buildBackupFailureMessage(backup),
+        payload,
       );
       await env.DB.prepare(
         `UPDATE backup_runs

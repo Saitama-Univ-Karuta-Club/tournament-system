@@ -1,6 +1,11 @@
 import { sendChannelMessage, sendDirectMessage, type DiscordMessagePayload } from "./discord-api";
 import { formatGrade } from "./members";
 import {
+  applyBotMessageContent,
+  defaultBotMessageContent,
+  type BotMessageKey,
+} from "./bot-message-settings";
+import {
   buildEntryResultsAnnouncementMessage,
   getDeadlineReminderSchedule,
   type EntryResultAnnouncementParticipant,
@@ -136,7 +141,7 @@ export function buildConfirmationRosterMessage(
   fileName: string,
 ): DiscordMessagePayload {
   return {
-    content: "主催者から抽選前の確認名簿が届きました。氏名・出場級を確認してください。\n万が一誤りがある場合は、お早めに大会担当者までお知らせください。",
+    content: defaultBotMessageContent("confirmation_roster"),
     embeds: [{
       title,
       color: 0xfee75c,
@@ -157,7 +162,7 @@ export function buildPaymentReminderDmMessage(
   tournamentId: string,
 ): DiscordMessagePayload {
   return {
-    content: "【参加費リマインダー】サークル内支払期限を過ぎています。お早めにお支払いください。\n出場をキャンセルする場合は、大会担当者までお知らせください。",
+    content: defaultBotMessageContent("payment_reminder_dm"),
     embeds: [{
       title,
       color: 0xed4245,
@@ -193,7 +198,7 @@ export function buildPaymentReminderChannelMessage(
   const total = (rows: PaymentReminderParticipant[]) => rows.reduce((sum, participant) =>
     sum + Number(participant.participation_fee_yen), 0);
   return {
-    content: "【参加費リマインダー】サークル内支払期限を過ぎました。",
+    content: defaultBotMessageContent("payment_reminder_channel"),
     embeds: [{
       title,
       color: 0xed4245,
@@ -309,8 +314,8 @@ export function buildOrganizerPaymentMessage(
   }
   return {
     content: overdue
-      ? "**【至急・主催者への振込未完了】本日が主催締切日です。主催者への参加費振込が未完了です。すぐに振込を行い、管理画面で「振込済み」に変更してください。**"
-      : "【担当者向け・参加費振込情報】抽選結果と出場確定者が登録されました。主催者への振込内容を確認してください。",
+      ? defaultBotMessageContent("organizer_payment_overdue")
+      : defaultBotMessageContent("organizer_payment_info"),
     embeds: [{
       title: guidance.title,
       color: overdue ? 0xed4245 : 0x5865f2,
@@ -729,6 +734,7 @@ export async function processPostDeadlineQueue(
     processed += 1;
     try {
       let payload: DiscordMessagePayload;
+      let messageSettingKey: BotMessageKey;
       if (delivery.delivery_kind === "confirmation_roster_dm") {
         const eligible = await env.DB.prepare(
           `SELECT members.member_id FROM members
@@ -746,8 +752,10 @@ export async function processPostDeadlineQueue(
           continue;
         }
         payload = await confirmationPayload(env.DB, delivery);
+        messageSettingKey = "confirmation_roster";
       } else if (delivery.delivery_kind === "lottery_result_channel") {
         payload = await lotteryPayload(env.DB, delivery.group_key);
+        messageSettingKey = "lottery_result";
       } else if (
         delivery.delivery_kind === "organizer_payment_info_channel" ||
         delivery.delivery_kind === "organizer_payment_overdue_channel"
@@ -767,6 +775,9 @@ export async function processPostDeadlineQueue(
           env.TOURNAMENT_ADMIN_URL,
           delivery.delivery_kind === "organizer_payment_overdue_channel",
         );
+        messageSettingKey = delivery.delivery_kind === "organizer_payment_overdue_channel"
+          ? "organizer_payment_overdue"
+          : "organizer_payment_info";
       } else {
         const guidance = await paymentGuidance(env.DB, delivery.group_key);
         const payments = await paymentParticipants(env.DB, delivery.group_key);
@@ -787,6 +798,7 @@ export async function processPostDeadlineQueue(
             guidance.payment_deadline,
             delivery.tournament_id,
           );
+          messageSettingKey = "payment_reminder_dm";
         } else {
           if (!unpaid.length) {
             await markSkipped(env.DB, delivery.delivery_id, "未納者がいないため送信しませんでした。");
@@ -797,8 +809,11 @@ export async function processPostDeadlineQueue(
             payments,
             guidance.payment_deadline,
           );
+          messageSettingKey = "payment_reminder_channel";
         }
       }
+
+      payload = await applyBotMessageContent(env.DB, messageSettingKey, payload);
 
       const message = delivery.destination_type === "channel"
         ? await sendChannelMessage(env.DISCORD_BOT_TOKEN, delivery.destination_id, payload)

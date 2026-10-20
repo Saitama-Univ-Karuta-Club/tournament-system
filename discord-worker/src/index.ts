@@ -25,6 +25,7 @@ import {
   processPostDeadlineQueue,
 } from "./post-deadline";
 import {
+  buildAttendanceEditingMessage,
   createTestTournamentAndNotify,
   loadApplicationEmailTemplate,
   notifyPendingTournaments,
@@ -103,6 +104,10 @@ interface DiscordInteraction {
       name: string;
       value?: unknown;
     }>;
+  };
+  message?: {
+    content?: string;
+    embeds?: import("./discord-api").DiscordMessagePayload["embeds"];
   };
 }
 
@@ -518,6 +523,20 @@ export async function handleRequest(
         error instanceof Error ? error.message : "入力値が不正です。";
       return ephemeralMessage(`テスト大会を作成できません。\n${message}`);
     }
+  }
+
+  if (
+    interaction.type === InteractionType.MESSAGE_COMPONENT &&
+    interaction.data?.custom_id?.startsWith("attendance-edit:")
+  ) {
+    const [, tournamentId] = interaction.data.custom_id.split(":");
+    if (!tournamentId || !interaction.message) {
+      return ephemeralMessage("回答変更画面を開けませんでした。");
+    }
+    return json({
+      type: InteractionResponseType.UPDATE_MESSAGE,
+      data: buildAttendanceEditingMessage(tournamentId, interaction.message),
+    });
   }
 
   if (

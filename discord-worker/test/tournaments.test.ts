@@ -4,6 +4,7 @@ import {
   buildApplicationEmailTemplate,
   buildApplicationCompletedMessage,
   buildEntryResultsAnnouncementMessage,
+  buildAttendanceEditingMessage,
   buildAttendanceMessage,
   buildDeadlineReminderMessage,
   buildDeadlineReminderTargets,
@@ -46,8 +47,30 @@ describe("attendance DM", () => {
 
   it("shows the latest selected response", () => {
     const message = buildAttendanceMessage(tournament, "yes");
+    const buttons = message.components?.[0]?.components ?? [];
 
     expect(message.content).toContain("現在の回答: **参加希望**");
+    expect(buttons.map((button) => button.custom_id)).toEqual([
+      "attendance:T-test:yes",
+      "attendance-edit:T-test",
+    ]);
+    expect(buttons[0]?.label).toBe("✓ 参加希望");
+    expect(buttons[0]?.style).toBe(3);
+    expect(buttons[1]?.label).toBe("回答を変更");
+  });
+
+  it("shows all choices again when editing a response", () => {
+    const message = buildAttendanceEditingMessage("T-test", {
+      content: "現在の回答: **参加希望**",
+      embeds: [{ title: "DMテスト大会" }],
+    });
+
+    expect(message.content).toBe("現在の回答: **参加希望**");
+    expect(message.components?.[0]?.components.map((button) => button.custom_id)).toEqual([
+      "attendance:T-test:yes",
+      "attendance:T-test:maybe",
+      "attendance:T-test:no",
+    ]);
   });
 
   it("reactivates a previously invalidated response when an eligible member answers", async () => {
@@ -531,6 +554,32 @@ describe("notification queue", () => {
   it("サークル内締切日の2日前0時にチャンネルと未回答者DMをキューに入れる", () => {
     const schedule = getResponseDeadlineReminderSchedule(tournament);
     expect(schedule.toISOString()).toBe("2026-10-22T15:00:00.000Z");
+    expect(getResponseDeadlineReminderSchedule(tournament, 4).toISOString()).toBe(
+      "2026-10-20T15:00:00.000Z",
+    );
+    expect(getResponseDeadlineReminderSchedule(tournament, 4, "00:00", "same").toISOString()).toBe(
+      "2026-10-21T12:00:00.000Z",
+    );
+    const customSchedule = getResponseDeadlineReminderSchedule(tournament, 4, "12:30");
+    expect(customSchedule.toISOString()).toBe(
+      "2026-10-21T03:30:00.000Z",
+    );
+    expect(buildResponseDeadlineReminderTargets(
+      tournament,
+      "announcement-channel",
+      [],
+      new Date(customSchedule.getTime() - 1),
+      4,
+      "12:30",
+    )).toEqual([]);
+    expect(buildResponseDeadlineReminderTargets(
+      tournament,
+      "announcement-channel",
+      [],
+      customSchedule,
+      4,
+      "12:30",
+    )).toHaveLength(1);
 
     const targets = buildResponseDeadlineReminderTargets(
       tournament,

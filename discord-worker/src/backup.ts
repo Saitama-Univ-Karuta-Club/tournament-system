@@ -15,17 +15,34 @@ const DRIVE_UPLOAD_BASE = "https://www.googleapis.com/upload/drive/v3";
 const GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
 const D1_API_BASE = "https://api.cloudflare.com/client/v4";
 const GOOGLE_DRIVE_FOLDER_MIME_TYPE = "application/vnd.google-apps.folder";
-const DOCUMENT_PAGE_SIZE = 25;
+// Keep each Workflow step comfortably below the Workers Free subrequest limit.
+// Bursts larger than this are handled by subsequent cursor pages in the same run.
+const DOCUMENT_PAGE_SIZE = 5;
+const DRIVE_VERIFICATION_INTERVAL_MS = 30 * 24 * 60 * 60 * 1000;
 const DEFAULT_RETENTION_DAYS = 365;
 
 export interface BackupWorkflowParams {
   source: "scheduled" | "manual";
 }
 
+export interface DocumentBackupWorkflowParams {
+  runId: string;
+  databaseFolderId: string;
+  documentsFolderId: string;
+  databaseFileId: string;
+  databaseFileName: string;
+  startedAt: string;
+  cursor?: string;
+  pageNumber: number;
+  documentsScanned: number;
+  documentsUploaded: number;
+}
+
 export interface BackupEnv {
   DB: D1Database;
   DOCUMENTS: R2Bucket;
   BACKUP_WORKFLOW: Workflow<BackupWorkflowParams>;
+  DOCUMENT_BACKUP_WORKFLOW: Workflow<DocumentBackupWorkflowParams>;
   ACCOUNT_ID: string;
   DATABASE_ID: string;
   DATABASE_BACKUP_RETENTION_DAYS?: string;
@@ -81,6 +98,7 @@ interface DocumentPageResult {
 interface DocumentCopyRow {
   r2_etag: string;
   google_drive_file_id: string;
+  last_verified_at: string;
 }
 
 interface DriveListResponse {
@@ -594,41 +612,50 @@ export async function backupDocumentPage(
   cursor: string | undefined,
   fetcher: typeof fetch = fetch,
 ): Promise<DocumentPageResult> {
-  const accessToken = await getGoogleAccessToken(env, fetcher);
   const page = await env.DOCUMENTS.list({
     prefix: "documents/",
     limit: DOCUMENT_PAGE_SIZE,
     cursor,
   });
   let uploaded = 0;
-  const now = new Date().toISOString();
+  const nowDate = new Date();
+  const now = nowDate.toISOString();
+  let accessTokenPromise: Promise<string> | undefined;
+  const accessToken = (): Promise<string> => {
+    accessTokenPromise ??= getGoogleAccessToken(env, fetcher);
+    return accessTokenPromise;
+  };
 
   for (const object of page.objects) {
     const recorded = await env.DB.prepare(
-      `SELECT r2_etag, google_drive_file_id
+      `SELECT r2_etag, google_drive_file_id, last_verified_at
        FROM backup_document_copies
        WHERE r2_key = ?`,
     ).bind(object.key).first<DocumentCopyRow>();
-    if (
-      recorded?.r2_etag === object.etag &&
-      await driveFileExists(
-        accessToken,
+    if (recorded?.r2_etag === object.etag) {
+      const verifiedAt = Date.parse(recorded.last_verified_at);
+      const verificationDue = !Number.isFinite(verifiedAt) ||
+        nowDate.getTime() - verifiedAt >= DRIVE_VERIFICATION_INTERVAL_MS;
+      if (!verificationDue) continue;
+
+      if (await driveFileExists(
+        await accessToken(),
         recorded.google_drive_file_id,
         documentsFolderId,
         fetcher,
-      )
-    ) {
-      await env.DB.prepare(
-        `UPDATE backup_document_copies
-         SET last_verified_at = ?
-         WHERE r2_key = ?`,
-      ).bind(now, object.key).run();
-      continue;
+      )) {
+        await env.DB.prepare(
+          `UPDATE backup_document_copies
+           SET last_verified_at = ?
+           WHERE r2_key = ?`,
+        ).bind(now, object.key).run();
+        continue;
+      }
     }
 
     const identity = await sha256Hex(`${object.key}\n${object.etag}`);
     const existing = await findDriveFileByProperty(
-      accessToken,
+      await accessToken(),
       "sukcR2ObjectId",
       identity,
       documentsFolderId,
@@ -640,7 +667,7 @@ export async function backupDocumentPage(
       const source = await env.DOCUMENTS.get(object.key);
       if (!source) continue;
       const file = await uploadDriveStream(
-        accessToken,
+        await accessToken(),
         documentsFolderId,
         fileName,
         source.httpMetadata?.contentType || "application/pdf",
@@ -812,34 +839,103 @@ export class TournamentBackupWorkflow extends WorkflowEntrypoint<
           startedAt,
         ),
       );
+      const documentWorkflow = await step.do(
+        "R2文書バックアップ開始",
+        { retries: { limit: 3, delay: "10 seconds", backoff: "exponential" } },
+        async () => (await this.env.DOCUMENT_BACKUP_WORKFLOW.create({
+          params: {
+            runId,
+            databaseFolderId: folders.databaseId,
+            documentsFolderId: folders.documentsId,
+            databaseFileId: databaseFile.fileId,
+            databaseFileName: databaseFile.fileName,
+            startedAt: startedAt.toISOString(),
+            pageNumber: 1,
+            documentsScanned: 0,
+            documentsUploaded: 0,
+          },
+        })).id,
+      );
+      return {
+        runId,
+        databaseFileName: databaseFile.fileName,
+        documentWorkflowId: documentWorkflow,
+      };
+    } catch (error: unknown) {
+      await step.do(
+        "バックアップ失敗記録",
+        { retries: { limit: 3, delay: "5 seconds", backoff: "exponential" } },
+        async () => {
+          await failBackupRun(this.env, runId, error);
+          return { failed: true };
+        },
+      );
+      throw error;
+    }
+  }
+}
 
-      let cursor: string | undefined;
-      let pageNumber = 1;
-      let documentsScanned = 0;
-      let documentsUploaded = 0;
-      do {
-        const result = await step.do(
-          `R2 PDFバックアップ ${pageNumber}`,
-          { retries: { limit: 3, delay: "15 seconds", backoff: "exponential" } },
-          () => backupDocumentPage(this.env, folders.documentsId, cursor),
+export class TournamentDocumentBackupWorkflow extends WorkflowEntrypoint<
+  BackupEnv,
+  DocumentBackupWorkflowParams
+> {
+  async run(
+    event: Readonly<WorkflowEvent<DocumentBackupWorkflowParams>>,
+    step: WorkflowStep,
+  ): Promise<unknown> {
+    const params = event.payload;
+    try {
+      assertBackupConfiguration(this.env);
+      const result = await step.do(
+        `R2文書バックアップ ${params.pageNumber}`,
+        { retries: { limit: 3, delay: "15 seconds", backoff: "exponential" } },
+        () => backupDocumentPage(
+          this.env,
+          params.documentsFolderId,
+          params.cursor,
+        ),
+      );
+      const documentsScanned = params.documentsScanned + result.scanned;
+      const documentsUploaded = params.documentsUploaded + result.uploaded;
+
+      if (result.cursor) {
+        const nextWorkflow = await step.do(
+          "次の文書ページを開始",
+          { retries: { limit: 3, delay: "10 seconds", backoff: "exponential" } },
+          async () => (await this.env.DOCUMENT_BACKUP_WORKFLOW.create({
+            params: {
+              ...params,
+              cursor: result.cursor || undefined,
+              pageNumber: params.pageNumber + 1,
+              documentsScanned,
+              documentsUploaded,
+            },
+          })).id,
         );
-        documentsScanned += result.scanned;
-        documentsUploaded += result.uploaded;
-        cursor = result.cursor || undefined;
-        pageNumber += 1;
-      } while (cursor);
+        return {
+          runId: params.runId,
+          continuedAs: nextWorkflow,
+          documentsScanned,
+          documentsUploaded,
+        };
+      }
 
+      const startedAt = new Date(params.startedAt);
       const expiredTrashed = await step.do(
         "期限切れD1バックアップ整理",
         { retries: { limit: 3, delay: "10 seconds", backoff: "exponential" } },
-        () => trashExpiredDatabaseBackups(this.env, folders.databaseId, startedAt),
+        () => trashExpiredDatabaseBackups(
+          this.env,
+          params.databaseFolderId,
+          startedAt,
+        ),
       );
       await step.do("バックアップ完了記録", async () => {
         await completeBackupRun(
           this.env,
-          runId,
-          databaseFile.fileId,
-          databaseFile.fileName,
+          params.runId,
+          params.databaseFileId,
+          params.databaseFileName,
           documentsScanned,
           documentsUploaded,
           expiredTrashed,
@@ -847,8 +943,7 @@ export class TournamentBackupWorkflow extends WorkflowEntrypoint<
         return { completed: true };
       });
       return {
-        runId,
-        databaseFileName: databaseFile.fileName,
+        runId: params.runId,
         documentsScanned,
         documentsUploaded,
         expiredTrashed,
@@ -858,7 +953,7 @@ export class TournamentBackupWorkflow extends WorkflowEntrypoint<
         "バックアップ失敗記録",
         { retries: { limit: 3, delay: "5 seconds", backoff: "exponential" } },
         async () => {
-          await failBackupRun(this.env, runId, error);
+          await failBackupRun(this.env, params.runId, error);
           return { failed: true };
         },
       );

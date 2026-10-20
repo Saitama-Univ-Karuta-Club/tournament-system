@@ -427,6 +427,41 @@ describe("Discord Worker", () => {
     });
   });
 
+  it("restores all attendance choices from the change-response button", async () => {
+    const verifier = vi.fn().mockResolvedValue(true);
+    const response = await handleRequest(
+      new Request("https://example.com/interactions", {
+        method: "POST",
+        headers: {
+          "X-Signature-Ed25519": "signature",
+          "X-Signature-Timestamp": "timestamp",
+        },
+        body: JSON.stringify({
+          type: 3,
+          user: { id: "discord-user-id" },
+          data: { custom_id: "attendance-edit:tournament-id" },
+          message: {
+            content: "現在の回答: **参加希望**",
+            embeds: [{ title: "DMテスト大会" }],
+          },
+        }),
+      }),
+      env,
+      verifier,
+    );
+
+    const body = await response.json() as {
+      type: number;
+      data: { components: Array<{ components: Array<{ custom_id: string }> }> };
+    };
+    expect(body.type).toBe(7);
+    expect(body.data.components[0]?.components.map((button) => button.custom_id)).toEqual([
+      "attendance:tournament-id:yes",
+      "attendance:tournament-id:maybe",
+      "attendance:tournament-id:no",
+    ]);
+  });
+
   it("updates payment status from a participant-guidance DM button", async () => {
     const verifier = vi.fn().mockResolvedValue(true);
     const paymentRecorder = vi.fn().mockResolvedValue({

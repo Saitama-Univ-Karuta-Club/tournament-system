@@ -2,6 +2,10 @@ import {
   sendDirectMessage,
   type DiscordMessagePayload,
 } from "./discord-api";
+import {
+  applyBotMessageContent,
+  defaultBotMessageContent,
+} from "./bot-message-settings";
 
 export interface ParticipantGuidanceEnv {
   DB: D1Database;
@@ -137,7 +141,7 @@ export function buildParticipantGuidanceMessage(
     });
   }
   return {
-    content: "【参加者向け案内】出場確定者へのお知らせです。",
+    content: defaultBotMessageContent("participant_guidance"),
     embeds: [{
       title: guidance.tournamentTitle,
       description: guidance.bodyText || "添付された案内ファイルを確認してください。",
@@ -257,17 +261,21 @@ export async function recordParticipantPaymentResponse(
       ),
     ]);
   }
-  return buildParticipantGuidanceMessage({
-    tournamentId: input.tournamentId,
-    tournamentTitle: target.title,
-    bodyText: target.body_text,
-    documentUrl: target.document_url,
-    fileName: target.file_name,
-    paymentCollectionMethod: target.payment_collection_method,
-    participationFeeYen: Number(target.participation_fee_yen),
-    paymentDeadline: target.payment_deadline,
-    paymentStatus: input.status,
-  });
+  return applyBotMessageContent(
+    env.DB,
+    "participant_guidance",
+    buildParticipantGuidanceMessage({
+      tournamentId: input.tournamentId,
+      tournamentTitle: target.title,
+      bodyText: target.body_text,
+      documentUrl: target.document_url,
+      fileName: target.file_name,
+      paymentCollectionMethod: target.payment_collection_method,
+      participationFeeYen: Number(target.participation_fee_yen),
+      paymentDeadline: target.payment_deadline,
+      paymentStatus: input.status,
+    }),
+  );
 }
 
 export async function enqueueParticipantGuidance(
@@ -460,9 +468,9 @@ export async function processParticipantGuidanceQueue(
     }
 
     try {
-      const message = await sendDirectMessage(
-        env.DISCORD_BOT_TOKEN,
-        delivery.destination_id,
+      const payload = await applyBotMessageContent(
+        env.DB,
+        "participant_guidance",
         buildParticipantGuidanceMessage({
           tournamentId: delivery.tournament_id,
           tournamentTitle: delivery.title,
@@ -474,6 +482,11 @@ export async function processParticipantGuidanceQueue(
           paymentDeadline: delivery.payment_deadline,
           paymentStatus: delivery.payment_status ?? "unpaid",
         }),
+      );
+      const message = await sendDirectMessage(
+        env.DISCORD_BOT_TOKEN,
+        delivery.destination_id,
+        payload,
       );
       await env.DB.prepare(
         `UPDATE participant_guidance_deliveries

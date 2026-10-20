@@ -3,6 +3,10 @@ import {
   sendDirectMessage,
 } from "./discord-api";
 import { formatGrade, formatRank } from "./members";
+import {
+  applyBotMessageContent,
+  defaultBotMessageContent,
+} from "./bot-message-settings";
 
 const QUEUE_BATCH_SIZE = 20;
 const MAX_NOTIFICATION_ATTEMPTS = 5;
@@ -70,8 +74,8 @@ export function buildMemberApprovalMessage(
 
   return {
     content: isNew
-      ? "【メンバー登録承認】\n新規メンバー登録が承認されました。大会お知らせくんを利用できます。"
-      : "【登録内容更新承認】\nメンバー登録内容の変更が承認されました。",
+      ? defaultBotMessageContent("member_registration_approved")
+      : defaultBotMessageContent("member_update_approved"),
     embeds: [
       {
         title: isNew ? "登録された内容" : "更新後の登録内容",
@@ -183,10 +187,17 @@ export async function processMemberApprovalNotificationQueue(
 
     processed += 1;
     try {
+      const payload = await applyBotMessageContent(
+        env.DB,
+        notification.notification_type === "registration_approved"
+          ? "member_registration_approved"
+          : "member_update_approved",
+        buildMemberApprovalMessage(notification, env.MEMBER_PORTAL_URL),
+      );
       const message = await sendDirectMessage(
         env.DISCORD_BOT_TOKEN,
         notification.destination_id,
-        buildMemberApprovalMessage(notification, env.MEMBER_PORTAL_URL),
+        payload,
       );
       await env.DB.prepare(
         `UPDATE member_notification_deliveries

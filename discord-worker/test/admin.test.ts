@@ -60,14 +60,14 @@ describe("Admin Worker", () => {
 
   it("redirects an unauthenticated browser to Discord login", async () => {
     const response = await handleAdminRequest(
-      new Request("https://admin.example.com/"),
+      new Request("https://admin.example.com/register"),
       env,
       { waitUntil: vi.fn() },
     );
 
     expect(response.status).toBe(302);
     expect(response.headers.get("Location")).toBe(
-      "/auth/discord?return_to=%2F",
+      "/auth/discord?return_to=%2Fregister",
     );
   });
 
@@ -97,9 +97,10 @@ describe("Admin Worker", () => {
 
   it.each([
     ["todo", "TODO"],
-    ["register", "大会登録"],
-    ["tournaments", "大会一覧"],
+    ["register", "大会新規登録"],
+    ["tournaments", "一覧"],
     ["members", "メンバー管理"],
+    ["settings", "設定"],
   ])("serves the %s page with tab navigation", async (path, label) => {
     const response = await handleAdminRequest(
       new Request(`https://admin.example.com/${path}`),
@@ -112,13 +113,90 @@ describe("Admin Worker", () => {
       "frame-ancestors 'none'",
     );
     const html = await response.text();
-    expect(html).toContain("大会管理（Discord版MVP）");
+    expect(html).toContain('class="admin-brand-name">埼玉大学かるた会</span>');
+    expect(html).toContain("<h1>運営管理ポータル</h1>");
+    expect(html).toContain(">大会管理<span");
+    expect(html).toContain(">メンバー管理");
+    expect(html).toContain(">設定</a>");
     expect(html).toContain(`>${label}`);
     expect(html).toContain(`href="/${path}" aria-current="page"`);
     expect(html).toContain(`data-page="${path}"`);
     const script = html.match(/<script>([\s\S]*)<\/script>/)?.[1];
     expect(script).toBeTruthy();
     expect(() => new Function(script!)).not.toThrow();
+  });
+
+  it("groups tournament pages under a secondary navigation and renders the settings categories", async () => {
+    const tournamentResponse = await handleAdminRequest(
+      new Request("https://admin.example.com/todo"),
+      env,
+      authenticatedContext(),
+    );
+    const tournamentHtml = await tournamentResponse.text();
+    expect(tournamentHtml).toContain('aria-label="大会管理メニュー"');
+    expect(tournamentHtml).toContain('href="/register">大会新規登録</a>');
+    expect(tournamentHtml).toContain('href="/todo" aria-current="page">TODO</a>');
+    expect(tournamentHtml).toContain('href="/tournaments">一覧</a>');
+    expect(tournamentHtml).toContain('<main class="tournament-workspace">');
+    expect(tournamentHtml).toContain('main.tournament-workspace { display: grid; grid-template-columns: 180px minmax(0, 1fr)');
+    expect(tournamentHtml).toContain('.subtabs { display: grid; gap: 2px;');
+
+    const settingsResponse = await handleAdminRequest(
+      new Request("https://admin.example.com/settings"),
+      env,
+      authenticatedContext(),
+    );
+    const settingsHtml = await settingsResponse.text();
+    expect(settingsHtml).toContain('id="settings-title">設定</h2>');
+    expect(settingsHtml).toContain('class="desktop-recommended">PC推奨</span>');
+    expect(settingsHtml).not.toContain("通知文面、期限の自動入力、運用マニュアルをここで管理します。");
+    expect(settingsHtml).toContain('id="message-settings"');
+    expect(settingsHtml).toContain("Discord Botメッセージ");
+    expect(settingsHtml).toContain('id="deadline-settings"');
+    expect(settingsHtml).toContain("自動入力・期限");
+    expect(settingsHtml).toContain('id="manual-settings"');
+    expect(settingsHtml).toContain("運用マニュアル");
+    expect(settingsHtml).toContain('aria-label="運用マニュアル目次"');
+    expect(settingsHtml).toContain('class="manual-menu-heading">はじめに</span>');
+    expect(settingsHtml).toContain('class="manual-menu-heading">日常操作</span>');
+    expect(settingsHtml).toContain('class="manual-menu-heading">運用・保守</span>');
+    expect(settingsHtml).toContain('data-manual-view="tournaments">大会管理</button>');
+    expect(settingsHtml).toContain('data-manual-view="cloudflare">Cloudflare保守</button>');
+    expect(settingsHtml).toContain('data-manual-view="discord">Discord Bot保守</button>');
+    expect(settingsHtml).toContain("function selectManualView(name)");
+    expect(settingsHtml).toContain('href="/todo">TODO</a>');
+    expect(settingsHtml).toContain("最終更新：2026年10月20日");
+    expect(settingsHtml).toContain(".manual-updated { display: block; margin-top: 5px; color: white;");
+    expect(settingsHtml).not.toContain("大会案内の登録から結果公開まで、担当者が行う作業の概要です。");
+    expect(settingsHtml).toContain('class="settings-menu"');
+    expect(settingsHtml).toContain('data-settings-view="messages"');
+    expect(settingsHtml).toContain('data-settings-view="deadlines"');
+    expect(settingsHtml).toContain('data-settings-view="manuals"');
+    expect(settingsHtml).toContain("function selectSettingsView(name, updateHash = true)");
+    expect(settingsHtml).toContain('class="subtab-bar" hidden');
+    expect(settingsHtml).toContain('id="message-template-list"');
+    expect(settingsHtml).toContain("element('details', 'message-template-category')");
+    expect(settingsHtml).toContain("element('summary', 'message-template-group', category)");
+    expect(settingsHtml).toContain('id="message-template-content"');
+    expect(settingsHtml).toContain('id="message-template-preview"');
+    expect(settingsHtml).toContain('本文のみ編集');
+    expect(settingsHtml).toContain("fetch('/api/settings/messages')");
+    expect(settingsHtml).toContain("次回以降の通知に反映されます。");
+    expect(settingsHtml).toContain('id="deadline-settings-form"');
+    expect(settingsHtml).toContain('name="internalDeadlineDaysBefore"');
+    expect(settingsHtml).toContain('name="internalDeadlineTimeMode"');
+    expect(settingsHtml).toContain('name="internalDeadlineTime"');
+    expect(settingsHtml).toContain('name="organizerPaymentTimeMode"');
+    expect(settingsHtml).toContain('name="organizerPaymentTime"');
+    expect(settingsHtml).toContain('name="paymentDeadlineTimeMode"');
+    expect(settingsHtml).toContain('name="paymentDeadlineTime"');
+    expect(settingsHtml).toContain('name="responseReminderDaysBefore"');
+    expect(settingsHtml).toContain('name="responseReminderTimeMode"');
+    expect(settingsHtml).toContain('name="responseReminderTime"');
+    expect(settingsHtml).toContain('data-time-target="internalDeadlineTime"');
+    expect(settingsHtml).toContain('>基準と同じ</option><option value="custom">自由設定</option>');
+    expect(settingsHtml).toContain("timeInput.hidden = modeSelect.value !== 'custom'");
+    expect(settingsHtml).toContain("fetch('/api/settings/deadlines')");
   });
 
   it("renders a simple TODO page with one-tap completion actions", async () => {
@@ -139,6 +217,13 @@ describe("Admin Worker", () => {
     expect(html).toContain("participant.grade");
     expect(html).toContain("申込メールを作成");
     expect(html).toContain("申込フォームを開く");
+    expect(html).toContain("element('a', '', '申込名簿ファイル')");
+    expect(html).toContain("element('a', '', '申込先メールアドレス')");
+    expect(html).toContain("element('a', '', '申込フォーム')");
+    expect(html).toContain("excel_email: '名簿ファイルをメール提出'");
+    expect(html).toContain("excel_form: '名簿ファイルをフォーム提出'");
+    expect(html).toContain("direct_form: 'フォーム提出'");
+    expect(html).toContain("'申込方法（' + applicationLabel + '）'");
     expect(html).toContain("合計 '");
     expect(html).toContain("振込情報を確認");
     expect(html).toContain("/api/todos");
@@ -311,19 +396,73 @@ describe("Admin Worker", () => {
 
     const html = await response.text();
     expect(html).toContain('id="edit-tournament-dialog"');
+    expect(html).toContain('id="status-confirm-dialog"');
     expect(html).toContain("大会情報を編集");
-    expect(html).toContain("ステータスを変更");
+    expect(html).toContain("大会ステータスを変更しますか？");
+    expect(html).toContain("function confirmTournamentStatusChange(message, sendsNotification)");
+    expect(html).toContain("statusSelect.addEventListener('change'");
+    expect(html).toContain("headingTitle.append(element('h3', '', tournament.title), editButton)");
+    expect(html).not.toContain("const statusButton");
+    expect(html).toContain(".entry-row.has-waitlist");
+    expect(html).toContain(".entry-row.has-payment");
+    expect(html).toContain(".entry-row, .entry-row.has-waitlist, .entry-row.has-payment { grid-template-columns: repeat(2, minmax(0, 1fr));");
+    expect(html).toContain(".deadline-control { grid-template-columns: minmax(0, 1fr); }");
+    expect(html).toContain('input[type="date"], input[type="time"], input[type="datetime-local"]');
+    expect(html).toContain('input[type="time"]::-webkit-date-and-time-value');
+    expect(html).toContain("row.classList.toggle('has-waitlist', waitlisted)");
+    expect(html).toContain("row.classList.toggle('has-payment', showsPayment)");
     expect(html).toContain("tournamentIds: tournaments.map");
     expect(html).toContain("開催級はこの画面では変更できません");
     expect(html).toContain("1. 申込確認名簿（抽選前・");
-    expect(html).toContain("抽選なしで全員を受け入れる大会では、この項目を飛ばし");
+    expect(html).not.toContain("抽選なしで全員を受け入れる大会では、この項目を飛ばし");
     expect(html).toContain("2. 抽選結果・確定名簿・参加費・当日案内");
     expect(html).toContain("3. 大会結果");
     expect(html).toContain("結果を保存して公開");
     expect(html).toContain("/api/tournament-results/batch");
     expect(html).toContain("選手ごとの当落・入金状態");
-    expect(html).toContain("確定名簿（PDF・Excel／Excelは検索可能なPDFへ自動変換）");
+    expect(html).toContain("rosterBox.append(element('strong', '', '確定名簿'))");
+    expect(html).not.toContain("確定名簿（PDF・Excel／Excelは検索可能なPDFへ自動変換）");
     expect(html).toContain("参加費・当日案内");
+    expect(html).toContain("当日案内の登録方法");
+    expect(html).not.toContain("guidanceSection.append(element('h6', '', '当日案内'))");
+    expect(html).not.toContain("paymentSection.append(element('h6', '', '参加費・支払い方法'))");
+    expect(html).toContain("テキストで登録");
+    expect(html).toContain("ファイルで登録（PDF・Word）");
+    expect(html).toContain("const row = element('div', 'fee-row')");
+    expect(html).toContain("feeGrid.append(element('h6', '', '級別参加費'))");
+    expect(html).not.toContain("級別参加費（参加者DMに表示）");
+    expect(html).toContain(".payment-method-label { width: auto;");
+    expect(html).toContain(".payment-method-label select { width: 8.5em;");
+    expect(html).toContain(".fee-row { display: grid; grid-template-columns: 3.5em minmax(130px, 200px);");
+    expect(html).toContain("['advance_manager', '事前集金']");
+    expect(html).toContain("['onsite_cash', '当日支払']");
+    expect(html).not.toContain("事前集金（参加者 → 大会担当者 → 主催者）");
+    expect(html).toContain("form.append('guidanceInputType', guidanceInputType.value)");
+    expect(html).not.toContain("抽選結果と確定名簿は大会お知らせチャンネルへ送信し");
+    expect(html).not.toContain("参加者には級別参加費と支払い方法だけを案内します");
+    expect(html).not.toContain("参加者DMには表示されません。主催者への一括振込に必要な口座・名義などを保存します。");
+    expect(html).toContain("--font-size-brand: 1.125rem;");
+    expect(html).toContain("--font-size-page: 1rem;");
+    expect(html).toContain("--font-size-section: .9375rem;");
+    expect(html).toContain("--font-size-body: .8125rem;");
+    expect(html).toContain("--font-size-note: .75rem;");
+    expect(html).toContain("--font-size-meta: .6875rem;");
+    expect(html).toContain("--font-size-control: .875rem;");
+    expect(html).toContain("font-size: var(--font-size-control)");
+    expect(html).toContain("--control-padding-block: 8px;");
+    expect(html).toContain("--control-padding-inline: 10px;");
+    expect(html).toContain("padding: var(--control-padding-block) var(--control-padding-inline)");
+    expect(html).toContain("body { margin: 0; font-size: var(--font-size-body);");
+    expect(html).toContain("button, .todo-link { min-height: 44px;");
+    expect(html).toContain(".card-title-actions h3 { min-width: 0; font-size: var(--font-size-page);");
+    expect(html).toContain(".entry-management { min-width: 0; max-width: 100%; margin: 5px 0 0;");
+    expect(html).toContain(".entry-management > summary { cursor: pointer; padding: 5px 0 3px; font-size: var(--font-size-section);");
+    expect(html).toContain(".archive-management { min-width: 0; max-width: 100%; margin: 5px 0 0;");
+    expect(html).toContain(".archive-management > summary { cursor: pointer; padding: 5px 0 3px; font-size: var(--font-size-section);");
+    expect(html).toContain(".stage-box h5 { margin: 0; color: #263550; font-size: var(--font-size-section);");
+    expect(html).toContain(".guidance-management h5 { margin: 0; color: #263550; font-size: var(--font-size-section);");
+    expect(html).toContain(".guidance-subsection h6 { margin: 0; color: #263550; font-size: var(--font-size-body);");
+    expect(html).toContain(".organizer-payment-box h6 { margin: 0; font-size: var(--font-size-section);");
     expect(html).toContain("キャンセル待ち");
     expect(html).toContain("waitlistNumber");
     expect(html).toContain("送信時に全員分をまとめて保存");
@@ -343,7 +482,9 @@ describe("Admin Worker", () => {
     );
     expect(entryManagementSource).not.toContain("成績を保存");
     expect(entryManagementSource).not.toContain("entry-save");
-    expect(html).toContain("選手ごとの個人成績");
+    expect(html).toContain("個人成績の登録");
+    expect(html).not.toContain("結果ファイルと全出場者の個人成績が揃うと");
+    expect(html).not.toContain("大会終了後に、出場者ごとの成績を登録します。");
   });
 
   it("saves all entrant statuses and payments in one D1 batch", async () => {
@@ -715,9 +856,8 @@ describe("Admin Worker", () => {
 
     const html = await response.text();
     expect(html).toContain("+ 'T23:59'");
-    expect(html).toContain(
-      "form.elements.internalDeadline.value = dateValue(threeDaysEarlier) + organizerDeadline.slice(10)",
-    );
+    expect(html).toContain("deadlineAutomationSettings.internalDeadlineTimeMode");
+    expect(html).toContain("deadlineAutomationSettings.internalDeadlineTime");
   });
 
   it("places the organizer deadline first and derives the internal deadline three days earlier", async () => {
@@ -731,8 +871,8 @@ describe("Admin Worker", () => {
     expect(html.indexOf('name="trueDeadline"')).toBeLessThan(
       html.indexOf('name="internalDeadline"'),
     );
-    expect(html).toContain("基本的に主催締切日の3日前を自動入力");
-    expect(html).toContain("3 * 86400000");
+    expect(html).toContain("設定値に基づき自動入力");
+    expect(html).toContain("deadlineAutomationSettings.internalDeadlineDaysBefore");
     expect(html).toContain(
       "trueDeadline.addEventListener('input', setInternalDeadlineFromOrganizer)",
     );
@@ -771,7 +911,7 @@ describe("Admin Worker", () => {
     );
     expect(formHtml).toContain('class="grade-picker wide"');
     expect(formHtml).toContain(
-      '<span>サークル内締切日 <span class="optional">（基本的に主催締切日の3日前を自動入力）</span></span>',
+      '<span>サークル内締切日 <span class="optional">（設定値に基づき自動入力）</span></span>',
     );
     expect(html).toContain("payload.eventStartDate = payload.eventDate");
     expect(html).toContain("payload.eventEndDate = payload.eventDate");

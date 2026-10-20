@@ -16,6 +16,7 @@ function configuredEnv(overrides: Partial<BackupEnv> = {}): BackupEnv {
     DB: {} as D1Database,
     DOCUMENTS: {} as R2Bucket,
     BACKUP_WORKFLOW: {} as Workflow<{ source: "scheduled" | "manual" }>,
+    DOCUMENT_BACKUP_WORKFLOW: {} as BackupEnv["DOCUMENT_BACKUP_WORKFLOW"],
     ACCOUNT_ID: "account-id",
     DATABASE_ID: "database-id",
     CLOUDFLARE_D1_API_TOKEN: "cloudflare-token",
@@ -206,9 +207,81 @@ describe("Google Drive backup Worker", () => {
     await expect(
       backupDocumentPage(env, "documents-folder-id", undefined, fetcher),
     ).resolves.toEqual({ cursor: null, scanned: 1, uploaded: 1 });
+    expect(list).toHaveBeenCalledWith({
+      prefix: "documents/",
+      limit: 5,
+      cursor: undefined,
+    });
     expect(get).toHaveBeenCalledWith(
       "documents/11111111-1111-4111-8111-111111111111/大会要項.pdf",
     );
     expect(run).toHaveBeenCalled();
+  });
+
+  it("skips recently verified unchanged documents without calling Google", async () => {
+    const first = vi.fn().mockResolvedValue({
+      r2_etag: "etag-1",
+      google_drive_file_id: "drive-file-id",
+      last_verified_at: new Date().toISOString(),
+    });
+    const run = vi.fn();
+    const prepare = vi.fn().mockReturnValue({
+      bind: vi.fn().mockReturnValue({ first, run }),
+    });
+    const list = vi.fn().mockResolvedValue({
+      objects: [{ key: "documents/id/file.pdf", etag: "etag-1", size: 13 }],
+      truncated: false,
+    });
+    const fetcher = vi.fn() as unknown as typeof fetch;
+    const env = configuredEnv({
+      DB: { prepare } as unknown as D1Database,
+      DOCUMENTS: { list } as unknown as R2Bucket,
+    });
+
+    await expect(
+      backupDocumentPage(env, "documents-folder-id", undefined, fetcher),
+    ).resolves.toEqual({ cursor: null, scanned: 1, uploaded: 0 });
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("checks an unchanged Drive copy again after 30 days", async () => {
+    const first = vi.fn().mockResolvedValue({
+      r2_etag: "etag-1",
+      google_drive_file_id: "drive-file-id",
+      last_verified_at: "2026-01-01T00:00:00.000Z",
+    });
+    const run = vi.fn().mockResolvedValue({ meta: { changes: 1 } });
+    const prepare = vi.fn().mockReturnValue({
+      bind: vi.fn().mockReturnValue({ first, run }),
+    });
+    const list = vi.fn().mockResolvedValue({
+      objects: [{ key: "documents/id/file.pdf", etag: "etag-1", size: 13 }],
+      truncated: false,
+    });
+    const fetcher = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url === "https://oauth2.googleapis.com/token") {
+        return Response.json({ access_token: "temporary-access-token" });
+      }
+      if (url.includes("/files/drive-file-id?")) {
+        return Response.json({
+          id: "drive-file-id",
+          trashed: false,
+          parents: ["documents-folder-id"],
+        });
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    }) as unknown as typeof fetch;
+    const env = configuredEnv({
+      DB: { prepare } as unknown as D1Database,
+      DOCUMENTS: { list } as unknown as R2Bucket,
+    });
+
+    await expect(
+      backupDocumentPage(env, "documents-folder-id", undefined, fetcher),
+    ).resolves.toEqual({ cursor: null, scanned: 1, uploaded: 0 });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(run).toHaveBeenCalledOnce();
   });
 });

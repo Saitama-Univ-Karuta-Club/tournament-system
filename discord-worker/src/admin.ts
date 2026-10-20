@@ -48,6 +48,18 @@ import {
   enqueueLotteryResultAnnouncement,
   enqueueOrganizerPaymentInfo,
 } from "./post-deadline";
+import {
+  BotMessageSettingError,
+  listBotMessageSettings,
+  resetBotMessageSetting,
+  saveBotMessageSetting,
+} from "./bot-message-settings";
+import {
+  DeadlineAutomationSettingError,
+  getDeadlineAutomationSettings,
+  resetDeadlineAutomationSettings,
+  saveDeadlineAutomationSettings,
+} from "./deadline-settings";
 
 export interface AdminEnv extends TournamentEnv, DocumentEnv, AdminAuthEnv {}
 
@@ -396,10 +408,18 @@ const ENTRY_RESULT_OPTIONS = new Set([
   "優勝",
 ]);
 
-function defaultJstDeadline(value: string, daysBefore: number, label: string): string {
+function defaultJstDeadline(
+  value: string,
+  daysBefore: number,
+  label: string,
+  time = "23:59",
+): string {
   const source = new Date(value);
   if (Number.isNaN(source.getTime())) {
     throw new AdminRequestError(`${label}が不正です。`, 400);
+  }
+  if (!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(time)) {
+    throw new AdminRequestError(`${label}の時刻が不正です。`, 400);
   }
   const jst = new Date(source.getTime() + 9 * 60 * 60 * 1000);
   const candidate = new Date(Date.UTC(
@@ -407,21 +427,24 @@ function defaultJstDeadline(value: string, daysBefore: number, label: string): s
     jst.getUTCMonth(),
     jst.getUTCDate() - daysBefore,
   ));
-  return new Date(Date.UTC(
-    candidate.getUTCFullYear(),
-    candidate.getUTCMonth(),
-    candidate.getUTCDate(),
-    14,
-    59,
-  )).toISOString();
+  const date = candidate.toISOString().slice(0, 10);
+  return new Date(`${date}T${time}:00+09:00`).toISOString();
 }
 
-export function defaultOrganizerPaymentDeadline(trueDeadline: string): string {
-  return defaultJstDeadline(trueDeadline, 2, "主催締切日");
+export function defaultOrganizerPaymentDeadline(
+  trueDeadline: string,
+  daysBefore = 2,
+  time = "23:59",
+): string {
+  return defaultJstDeadline(trueDeadline, daysBefore, "主催締切日", time);
 }
 
-export function defaultPaymentDeadline(organizerDeadline: string): string {
-  return defaultJstDeadline(organizerDeadline, 1, "担当者の支払日");
+export function defaultPaymentDeadline(
+  organizerDeadline: string,
+  daysBefore = 1,
+  time = "23:59",
+): string {
+  return defaultJstDeadline(organizerDeadline, daysBefore, "担当者の支払日", time);
 }
 
 interface EditableTournamentRow extends TournamentRow {
@@ -1535,6 +1558,8 @@ export async function saveParticipantGuidance(
 ): Promise<ParticipantGuidanceSaveResult> {
   const form = await request.formData();
   const bodyText = String(form.get("bodyText") ?? "").trim();
+  const requestedGuidanceInputType = String(form.get("guidanceInputType") ?? "").trim();
+  const guidanceInputType = requestedGuidanceInputType || (bodyText ? "text" : "file");
   const paymentCollectionMethod = String(form.get("paymentCollectionMethod") ?? "").trim();
   const organizerPaymentSource = String(form.get("organizerPaymentSource") ?? "").trim();
   const organizerPaymentDetails = String(form.get("organizerPaymentDetails") ?? "").trim();
@@ -1542,6 +1567,9 @@ export async function saveParticipantGuidance(
   const paymentDeadline = String(form.get("paymentDeadline") ?? "").trim();
   if (bodyText.length > 3500) {
     throw new DocumentUploadError("参加者向け案内の本文は3500文字以内にしてください。");
+  }
+  if (!new Set(["text", "file"]).has(guidanceInputType)) {
+    throw new DocumentUploadError("当日案内の登録方法を選択してください。");
   }
   if (!new Set(["advance_manager", "onsite_cash"]).has(paymentCollectionMethod)) {
     throw new DocumentUploadError("参加費の支払い方法を選択してください。");
@@ -1629,7 +1657,12 @@ export async function saveParticipantGuidance(
   let contentType = existing?.content_type ?? null;
   const conversionWarnings: string[] = [];
   const file = form.get("file");
-  if (file instanceof File && file.size > 0) {
+  if (guidanceInputType === "text") {
+    documentUrl = null;
+    fileName = null;
+    fileSize = null;
+    contentType = null;
+  } else if (file instanceof File && file.size > 0) {
     const extensionMatch = file.name.toLowerCase().match(/\.(pdf|doc|docx)$/);
     if (!extensionMatch) {
       throw new DocumentUploadError("案内ファイルはPDF・Word（.doc/.docx）のみ登録できます。");
@@ -1658,8 +1691,12 @@ export async function saveParticipantGuidance(
       conversionWarnings.push("当日案内の原本は保存しましたが、閲覧用PDFを生成できませんでした。原本のダウンロードリンクを使用します。");
     }
   }
-  if (!bodyText && !documentUrl) {
-    throw new DocumentUploadError("案内本文または案内ファイルを登録してください。");
+  const storedBodyText = guidanceInputType === "text" ? bodyText : "";
+  if (guidanceInputType === "text" && !storedBodyText) {
+    throw new DocumentUploadError("当日案内のテキストを入力してください。");
+  }
+  if (guidanceInputType === "file" && !documentUrl) {
+    throw new DocumentUploadError("当日案内のPDFまたはWordを登録してください。");
   }
   let organizerPaymentDocumentUrl = existing?.organizer_payment_document_url ?? null;
   let organizerPaymentFileName = existing?.organizer_payment_file_name ?? null;
@@ -1701,7 +1738,7 @@ export async function saveParticipantGuidance(
   if (advancePayment && organizerPaymentSource === "file" && !organizerPaymentDocumentUrl) {
     throw new DocumentUploadError("主催者振込情報のPDFまたはWordを登録してください。");
   }
-  if (advancePayment && organizerPaymentSource === "guidance" && !bodyText && !documentUrl) {
+  if (advancePayment && organizerPaymentSource === "guidance" && !storedBodyText && !documentUrl) {
     throw new DocumentUploadError("振込情報を含む当日案内を登録してください。");
   }
   const revision = Number(existing?.revision ?? 0) + 1;
@@ -1738,7 +1775,7 @@ export async function saveParticipantGuidance(
   ).bind(
     groupKey,
     tournaments[0].tournament_id,
-    bodyText || null,
+    storedBodyText || null,
     documentUrl,
     fileName,
     fileSize,
@@ -1768,7 +1805,7 @@ export async function saveParticipantGuidance(
   await env.DB.batch(statements);
   return {
     groupKey,
-    bodyText: bodyText || null,
+    bodyText: storedBodyText || null,
     documentUrl,
     fileName,
     fileSize,
@@ -2455,17 +2492,26 @@ function isSameOrigin(request: Request): boolean {
   return origin === new URL(request.url).origin;
 }
 
-type AdminPage = "todo" | "register" | "tournaments" | "members";
+type AdminPage = "todo" | "register" | "tournaments" | "members" | "settings";
+type AdminSection = "tournament-management" | "members" | "settings";
 
 function adminHtml(page: AdminPage): string {
   const pageTitle = {
     todo: "TODO",
-    register: "大会登録",
+    register: "大会新規登録",
     tournaments: "大会一覧・回答集計",
     members: "メンバー管理",
+    settings: "設定",
   }[page];
-  const tabClass = (tab: AdminPage): string =>
-    tab === page ? "tab active" : "tab";
+  const section: AdminSection = page === "members"
+    ? "members"
+    : page === "settings"
+    ? "settings"
+    : "tournament-management";
+  const tabClass = (tab: AdminSection): string =>
+    tab === section ? "tab active" : "tab";
+  const subtabClass = (tab: AdminPage): string =>
+    tab === page ? "subtab active" : "subtab";
   const currentPage = (tab: AdminPage): string =>
     tab === page ? ' aria-current="page"' : "";
   const hiddenPage = (tab: AdminPage): string =>
@@ -2476,84 +2522,118 @@ function adminHtml(page: AdminPage): string {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>${pageTitle} | 埼玉大学かるた会</title>
+  <title>${pageTitle} | 埼玉大学かるた会 運営管理ポータル</title>
   <style>
-    :root { color-scheme: light; font-family: system-ui, -apple-system, "Hiragino Sans", "Yu Gothic UI", sans-serif; color: #172033; background: #f4f6fa; }
+    :root {
+      color-scheme: light;
+      font-family: system-ui, -apple-system, "Hiragino Sans", "Yu Gothic UI", sans-serif;
+      color: #172033;
+      background: #f4f6fa;
+      --font-size-brand: 1.125rem;
+      --font-size-page: 1rem;
+      --font-size-section: .9375rem;
+      --font-size-body: .8125rem;
+      --font-size-note: .75rem;
+      --font-size-meta: .6875rem;
+      --font-size-control: .875rem;
+      --font-size-touch-control: 1rem;
+      --control-radius: 7px;
+      --control-padding-block: 8px;
+      --control-padding-inline: 10px;
+      --button-padding-block: 8px;
+      --button-padding-inline: 14px;
+    }
     * { box-sizing: border-box; }
-    body { margin: 0; }
+    body { margin: 0; font-size: var(--font-size-body); line-height: 1.5; }
     header { background: #293c74; color: white; padding: 18px 24px; box-shadow: 0 2px 8px #17203322; }
     .header-inner { max-width: 1080px; margin: auto; display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }
-    h1 { margin: 0; font-size: 1.25rem; }
-    h2 { margin: 0 0 20px; font-size: 1.15rem; }
-    h3 { margin: 0; font-size: 1.05rem; }
-    .identity-wrap { display: inline-flex; align-items: center; gap: 10px; font-size: .82rem; }
+    .admin-brand { display: grid; gap: 1px; }
+    .admin-brand-name { color: #dbe4ff; font-size: var(--font-size-meta); font-weight: 650; letter-spacing: .04em; }
+    h1 { margin: 0; font-size: var(--font-size-brand); line-height: 1.35; }
+    h2 { margin: 0 0 20px; font-size: var(--font-size-page); }
+    h3 { margin: 0; font-size: var(--font-size-section); }
+    .identity-wrap { display: inline-flex; align-items: center; gap: 10px; font-size: var(--font-size-note); }
     #identity { opacity: .85; }
     #logout { color: white; text-underline-offset: 3px; }
     .tab-bar { background: white; border-bottom: 1px solid #dce1eb; box-shadow: 0 2px 8px #1720330a; }
     .tabs { max-width: 1080px; margin: auto; padding: 0 18px; display: flex; gap: 4px; overflow-x: auto; }
     .tab { position: relative; display: inline-flex; align-items: center; color: #596579; text-decoration: none; font-weight: 700; white-space: nowrap; padding: 15px 18px 12px; border-bottom: 3px solid transparent; }
     .tab:hover { color: #294796; background: #f6f8ff; }
+    .subtab-bar { position: sticky; top: 16px; background: transparent; border: 0; }
+    .subtab-bar[hidden] { display: none; }
+    .subtabs { display: grid; gap: 2px; padding: 2px 18px 2px 0; border-right: 1px solid #dce1eb; }
+    .subtab { display: block; width: 100%; color: #596579; text-decoration: none; font-size: var(--font-size-body); font-weight: 750; white-space: nowrap; padding: 8px 10px; border: 0; border-left: 3px solid transparent; border-radius: 0; text-align: left; transition: color .15s ease, background .15s ease, border-color .15s ease; }
+    .subtab:hover { color: #294796; background: #f4f6fb; }
+    .subtab.active { color: #294796; background: #eef2fb; border-left-color: #3658b2; }
     .tab.active { color: #294796; border-bottom-color: #3658b2; }
-    .request-badge { position: absolute; top: 2px; right: 1px; min-width: 20px; height: 20px; padding: 0 5px; border-radius: 999px; display: inline-flex; align-items: center; justify-content: center; color: white; background: #d92d20; box-shadow: 0 0 0 2px white; font-size: .72rem; font-weight: 800; line-height: 1; }
+    .request-badge { position: absolute; top: 2px; right: 1px; min-width: 20px; height: 20px; padding: 0 5px; border-radius: 999px; display: inline-flex; align-items: center; justify-content: center; color: white; background: #d92d20; box-shadow: 0 0 0 2px white; font-size: var(--font-size-meta); font-weight: 800; line-height: 1; }
     main { max-width: 1080px; margin: 24px auto; padding: 0 18px 48px; }
+    main.tournament-workspace { display: grid; grid-template-columns: 180px minmax(0, 1fr); gap: 28px; align-items: start; }
+    .admin-page-content { min-width: 0; }
     .notice { border-left: 4px solid #da8c10; background: #fff7e8; padding: 12px 16px; margin-bottom: 18px; line-height: 1.7; }
-    .panel { background: white; border: 1px solid #dce1eb; border-radius: 12px; padding: 24px; box-shadow: 0 8px 24px #1720330c; }
+    .panel { background: white; border: 1px solid #dce1eb; border-radius: 12px; padding: 20px; box-shadow: 0 8px 24px #1720330c; }
     .panel + .panel { margin-top: 26px; }
     [hidden] { display: none !important; }
     .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
     .grid > label, .grid > fieldset, .grade-date-grid > label { width: 100%; min-width: 0; }
-    label { display: grid; gap: 7px; font-weight: 650; font-size: .9rem; }
+    label { display: grid; gap: 7px; font-weight: 650; font-size: var(--font-size-body); }
     .wide { grid-column: 1 / -1; }
-    .optional { color: #697386; font-size: .78rem; font-weight: 500; }
-    input, select, textarea { width: 100%; min-width: 0; max-width: 100%; border: 1px solid #b9c1d0; border-radius: 8px; padding: 11px 12px; font: inherit; color: inherit; background: white; }
+    .optional { color: #697386; font-size: var(--font-size-meta); font-weight: 500; }
+    input, select, textarea { width: 100%; min-width: 0; max-width: 100%; border: 1px solid #b9c1d0; border-radius: var(--control-radius); padding: var(--control-padding-block) var(--control-padding-inline); font: inherit; font-size: var(--font-size-control); color: inherit; background: white; }
     input:focus, select:focus, textarea:focus { outline: 3px solid #7c9cff3b; border-color: #526fc4; }
     .grade-picker { min-width: 0; margin: 0; padding: 0; border: 0; }
-    .grade-picker legend { margin-bottom: 7px; padding: 0; font-size: .9rem; font-weight: 650; }
-    .grade-options { display: flex; flex-wrap: wrap; gap: 8px; padding: 9px; border: 1px solid #b9c1d0; border-radius: 8px; background: #fff; }
+    .grade-picker legend { margin-bottom: 7px; padding: 0; font-size: var(--font-size-body); font-weight: 650; }
+    .grade-options { display: flex; flex-wrap: wrap; gap: 8px; padding: 7px; border: 1px solid #b9c1d0; border-radius: var(--control-radius); background: #fff; }
     .grade-option { display: inline-flex; grid-template-columns: none; align-items: center; gap: 6px; padding: 3px 7px; border-radius: 6px; font-weight: 600; white-space: nowrap; }
     .grade-option:has(input:checked) { color: #294796; background: #edf1ff; }
     .grade-option input { width: auto; margin: 0; }
-    .grade-date-settings { grid-column: 1 / -1; padding: 14px; border-radius: 9px; background: #f5f7fb; }
-    .grade-date-settings > strong { display: block; margin-bottom: 10px; font-size: .9rem; }
+    .grade-date-settings { grid-column: 1 / -1; padding: 12px; border-radius: 9px; background: #f5f7fb; }
+    .grade-date-settings > strong { display: block; margin-bottom: 10px; font-size: var(--font-size-body); }
     .grade-date-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
-    .file-note { color: #697386; font-size: .78rem; font-weight: 500; }
-    .file-drop-zone { display: grid; gap: 7px; min-width: 0; padding: 9px; border: 1px dashed #aebbd3; border-radius: 8px; background: #f8faff; transition: border-color .15s, background .15s, box-shadow .15s; }
+    .file-note { color: #697386; font-size: var(--font-size-meta); font-weight: 500; }
+    .file-drop-zone { display: grid; gap: 6px; min-width: 0; padding: 7px; border: 1px dashed #aebbd3; border-radius: var(--control-radius); background: #f8faff; transition: border-color .15s, background .15s, box-shadow .15s; }
     .file-drop-zone.is-dragging { border-color: #3658b2; background: #edf1ff; box-shadow: 0 0 0 3px #7c9cff2e; }
     .file-drop-zone.has-file { border-style: solid; border-color: #7ca78e; background: #f1faf5; }
-    .file-drop-zone input[type="file"] { padding: 8px; background: white; }
-    .file-drop-hint { color: #596579; font-size: .76rem; font-weight: 600; line-height: 1.45; }
+    .file-drop-zone input[type="file"] { padding: 6px 8px; background: white; }
+    .file-drop-hint { color: #596579; font-size: var(--font-size-meta); font-weight: 600; line-height: 1.45; }
     .file-drop-zone.has-file .file-drop-hint { color: #17643a; }
     .file-drop-hint.error { color: #b42318; }
-    .application-method { min-width: 0; margin: 0; padding: 14px; border: 1px solid #d7dfef; border-radius: 9px; background: #f8faff; }
-    .application-method legend { padding: 0 5px; font-size: .9rem; font-weight: 750; }
+    .application-method { min-width: 0; margin: 0; padding: 11px; border: 1px solid #d7dfef; border-radius: 9px; background: #f8faff; }
+    .application-method legend { padding: 0 5px; font-size: var(--font-size-body); font-weight: 750; }
     .application-method-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 12px; }
     .application-method-fields > .wide { grid-column: 1 / -1; }
     .actions { margin-top: 24px; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
-    button { border: 0; border-radius: 8px; padding: 12px 20px; background: #3658b2; color: white; font: inherit; font-weight: 700; cursor: pointer; }
+    button { border: 0; border-radius: var(--control-radius); padding: var(--button-padding-block) var(--button-padding-inline); background: #3658b2; color: white; font: inherit; font-size: var(--font-size-control); font-weight: 700; cursor: pointer; }
     button:hover { background: #294796; }
     button:disabled { opacity: .55; cursor: wait; }
-    button.secondary { padding: 9px 14px; color: #294796; background: #edf1ff; }
+    button.secondary { padding: 7px 12px; color: #294796; background: #edf1ff; }
     button.secondary:hover { background: #dfe6ff; }
     #result { min-height: 1.5em; font-weight: 650; }
     #result.ok { color: #17643a; }
     #result.error { color: #b42318; }
-    .footnote { margin-top: 16px; color: #697386; font-size: .84rem; line-height: 1.6; }
+    .footnote { margin-top: 16px; color: #697386; font-size: var(--font-size-note); line-height: 1.6; }
     .list-heading, .card-heading, .status-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
-    .list-controls { display: flex; align-items: end; gap: 12px; margin: 4px 0 14px; padding: 12px; border-radius: 9px; background: #f5f7fb; flex-wrap: wrap; }
+    .list-controls { display: flex; align-items: end; gap: 12px; margin: 4px 0 14px; padding: 10px; border-radius: 9px; background: #f5f7fb; flex-wrap: wrap; }
     .list-controls label { min-width: 190px; }
-    .list-controls select { padding: 9px 10px; }
+    .list-controls select { padding: 7px 9px; }
     #list-status { color: #697386; margin-bottom: 12px; }
     #tournament-list { display: grid; gap: 14px; }
-    .tournament-card { border: 1px solid #dce1eb; border-radius: 10px; padding: 18px; }
+    .tournament-card { border: 1px solid #dce1eb; border-radius: 10px; padding: 15px; }
+    .card-title-actions { display: flex; align-items: center; gap: 10px; min-width: 0; }
+    .card-title-actions h3 { min-width: 0; font-size: var(--font-size-page); }
+    button.card-edit-button { width: auto; padding: 1px 0; border: 0; border-bottom: 1px solid currentColor; border-radius: 0; color: #596579; background: transparent; font-size: var(--font-size-meta); font-weight: 700; white-space: nowrap; }
+    button.card-edit-button:hover { color: #294796; background: transparent; }
     .card-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 10px 0 4px; }
-    .card-status-select { width: auto; min-width: 145px; padding: 8px 10px; }
-    button.success { padding: 9px 14px; background: #18794e; }
+    .card-status-control { display: flex; align-items: center; gap: 9px; }
+    .card-status-label { color: #596579; font-size: var(--font-size-meta); font-weight: 700; }
+    .card-status-select { width: auto; min-width: 135px; padding: 7px 9px; }
+    button.success { padding: 7px 12px; background: #18794e; }
     button.success:hover { background: #12633f; }
-    .meta { color: #596579; margin: 8px 0 14px; font-size: .88rem; line-height: 1.6; }
-    .application-summary { display: flex; align-items: center; gap: 8px 12px; flex-wrap: wrap; margin: -4px 0 12px; padding: 9px 11px; border-radius: 8px; color: #465166; background: #f5f7fb; font-size: .8rem; }
+    .meta { color: #596579; margin: 8px 0 14px; font-size: var(--font-size-body); line-height: 1.6; }
+    .application-summary { display: flex; align-items: center; gap: 8px 12px; flex-wrap: wrap; margin: -4px 0 12px; padding: 7px 9px; border-radius: 8px; color: #465166; background: #f5f7fb; font-size: var(--font-size-note); }
     .application-summary strong { color: #263550; }
     .application-summary a { color: #294796; font-weight: 700; }
-    .badge { display: inline-flex; align-items: center; border-radius: 999px; padding: 5px 10px; font-size: .78rem; font-weight: 750; white-space: nowrap; }
+    .badge { display: inline-flex; align-items: center; border-radius: 999px; padding: 4px 8px; font-size: var(--font-size-meta); font-weight: 750; white-space: nowrap; }
     .badge.active { color: #17643a; background: #e4f7ec; }
     .badge.applied { color: #2452a4; background: #e7efff; }
     .badge.closed { color: #596579; background: #edf0f5; }
@@ -2561,107 +2641,114 @@ function adminHtml(page: AdminPage): string {
     .badge.canceled { color: #a12822; background: #fdecea; }
     .badge.draft { color: #875c12; background: #fff2d8; }
     .response-sections { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 14px 0; }
-    .response-section { min-width: 0; border-radius: 8px; padding: 11px 12px; background: #f5f7fb; }
-    .response-section h4 { margin: 0 0 7px; font-size: .88rem; }
-    .response-person { display: grid; grid-template-columns: 3.5em minmax(0, 1fr); gap: 7px; color: #465166; font-size: .84rem; line-height: 1.65; }
+    .response-section { min-width: 0; border-radius: 8px; padding: 9px 10px; background: #f5f7fb; }
+    .response-section h4 { margin: 0 0 7px; font-size: var(--font-size-body); }
+    .response-person { display: grid; grid-template-columns: 3.5em minmax(0, 1fr); gap: 7px; color: #465166; font-size: var(--font-size-note); line-height: 1.65; }
     .response-grade { color: #294796; font-weight: 750; }
-    .response-empty { color: #8992a3; font-size: .84rem; }
+    .response-empty { color: #8992a3; font-size: var(--font-size-note); }
     .status-row { margin-top: 15px; padding-top: 14px; border-top: 1px solid #e7eaf0; justify-content: flex-start; flex-wrap: wrap; }
     .status-row label { display: flex; align-items: center; gap: 9px; }
-    .status-row select { width: auto; min-width: 145px; padding: 8px 10px; }
-    .status-message { font-size: .84rem; font-weight: 650; }
+    .status-row select { width: auto; min-width: 135px; padding: 7px 9px; }
+    .status-message { font-size: var(--font-size-note); font-weight: 650; }
     .status-message.error { color: #b42318; }
-    .notification-note { color: #697386; font-size: .78rem; margin-top: 10px; }
+    .notification-note { color: #697386; font-size: var(--font-size-meta); margin-top: 10px; }
     #todo-status { color: #697386; margin-bottom: 12px; }
-    #todo-action-status { min-height: 1.4em; margin-bottom: 12px; color: #17643a; font-size: .86rem; font-weight: 700; }
+    #todo-action-status { min-height: 1.4em; margin-bottom: 12px; color: #17643a; font-size: var(--font-size-body); font-weight: 700; }
     #todo-list { display: grid; gap: 12px; }
-    .todo-card { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px 18px; align-items: center; padding: 15px 16px; border: 1px solid #dce1eb; border-left: 5px solid #526fc4; border-radius: 10px; background: #fff; }
+    .todo-card { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px 18px; align-items: center; padding: 12px 14px; border: 1px solid #dce1eb; border-left: 5px solid #526fc4; border-radius: 10px; background: #fff; }
     .todo-card.urgent { border-color: #efb6b1; border-left-color: #d92d20; background: #fff7f6; box-shadow: 0 4px 14px #b4231812; }
     .todo-main { min-width: 0; }
     .todo-heading { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-    .todo-heading h3 { font-size: .98rem; }
-    .todo-kind { display: inline-flex; padding: 4px 8px; border-radius: 999px; color: #294796; background: #edf1ff; font-size: .72rem; font-weight: 800; }
+    .todo-heading h3 { font-size: var(--font-size-section); }
+    .todo-kind { display: inline-flex; padding: 4px 8px; border-radius: 999px; color: #294796; background: #edf1ff; font-size: var(--font-size-meta); font-weight: 800; }
     .todo-card.urgent .todo-kind { color: #a12822; background: #fde4e1; }
-    .todo-description { margin: 7px 0 0; color: #465166; font-size: .86rem; line-height: 1.55; }
+    .todo-description { margin: 7px 0 0; color: #465166; font-size: var(--font-size-body); line-height: 1.55; }
     .todo-deadline { color: #596579; font-weight: 700; }
     .todo-card.urgent .todo-deadline { color: #b42318; }
-    .todo-details { display: flex; align-items: center; gap: 5px 12px; flex-wrap: wrap; margin-top: 8px; color: #596579; font-size: .76rem; line-height: 1.5; }
+    .todo-details { display: flex; align-items: center; gap: 5px 12px; flex-wrap: wrap; margin-top: 8px; color: #596579; font-size: var(--font-size-meta); line-height: 1.5; }
     .todo-participant { white-space: nowrap; }
     .todo-participant-grade { margin-right: 4px; color: #294796; font-weight: 800; }
     .todo-payment-amount { color: #263550; font-weight: 700; white-space: nowrap; }
     .todo-payment-total { color: #172033; font-weight: 800; white-space: nowrap; }
     .todo-resource-link { color: #294796; font-weight: 750; text-underline-offset: 2px; white-space: nowrap; }
     .todo-action { min-width: 170px; }
-    .todo-link { display: inline-flex; align-items: center; justify-content: center; min-width: 170px; padding: 10px 14px; border-radius: 8px; color: white; background: #3658b2; text-decoration: none; font-weight: 700; }
+    .todo-link { display: inline-flex; align-items: center; justify-content: center; min-width: 160px; padding: 8px 12px; border-radius: var(--control-radius); color: white; background: #3658b2; text-decoration: none; font-size: var(--font-size-control); font-weight: 700; }
     .todo-link:hover { background: #294796; }
     .todo-card.urgent .todo-action { background: #b42318; }
     .todo-card.urgent .todo-action:hover { background: #8f1d17; }
     .todo-empty { padding: 36px 14px; border: 1px dashed #cfd6e3; border-radius: 10px; color: #596579; text-align: center; line-height: 1.7; white-space: pre-line; }
     .tournament-card.focused { outline: 4px solid #f1b94f55; border-color: #da8c10; }
-    .entry-management { margin: 15px 0; border: 1px solid #dce1eb; border-radius: 9px; background: #fbfcff; }
-    .entry-management > summary { cursor: pointer; padding: 13px 14px; font-size: .9rem; font-weight: 800; color: #263550; user-select: none; }
-    .entry-management > summary:hover { background: #f3f6fc; border-radius: 9px; }
-    .entry-management[open] > summary { border-bottom: 1px solid #e7eaf0; border-radius: 9px 9px 0 0; }
-    .entry-management-body { padding: 0 14px 14px; }
-    .entry-row { display: grid; grid-template-columns: minmax(230px, 1.35fr) minmax(190px, .85fr) minmax(90px, .42fr) minmax(130px, .58fr) minmax(140px, .55fr); column-gap: 12px; row-gap: 4px; align-items: end; padding: 7px 0; border-top: 1px solid #e7eaf0; }
-    .entry-name { align-self: center; line-height: 1.35; font-weight: 700; }
+    .entry-management { min-width: 0; max-width: 100%; margin: 5px 0 0; border: 0; border-top: 1px solid #dce1eb; border-radius: 0; background: transparent; }
+    .entry-management > summary { cursor: pointer; padding: 5px 0 3px; font-size: var(--font-size-section); font-weight: 800; color: #263550; user-select: none; }
+    .entry-management > summary:hover { color: #294796; background: transparent; }
+    .entry-management[open] > summary { border-bottom: 0; border-radius: 0; }
+    .entry-management-body { min-width: 0; padding: 0 0 6px; }
+    .entry-row { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(145px, .85fr); column-gap: 12px; row-gap: 4px; align-items: end; min-width: 0; padding: 7px 0; border-top: 1px solid #e7eaf0; }
+    .entry-row.has-waitlist { grid-template-columns: minmax(0, 1.35fr) minmax(145px, .85fr) minmax(90px, .48fr); }
+    .entry-row.has-payment { grid-template-columns: minmax(0, 1.35fr) minmax(145px, .85fr) minmax(115px, .58fr); }
+    .entry-name { align-self: center; font-size: var(--font-size-body); line-height: 1.35; font-weight: 700; }
     .entry-field { display: grid; gap: 2px; min-width: 0; }
-    .entry-field-label { color: #697386; font-size: .68rem; line-height: 1.2; font-weight: 700; }
+    .entry-field-label { color: #697386; font-size: var(--font-size-meta); line-height: 1.2; font-weight: 700; }
     .entry-status-field { grid-column: 2; }
-    .waitlist-field { grid-column: 3; }
-    .payment-field { grid-column: 4; }
+    .waitlist-field, .payment-field { grid-column: 3; }
     .waitlist-control { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 5px; }
-    .waitlist-suffix { color: #596579; font-size: .84rem; font-weight: 700; }
-    .entry-row select, .entry-row input { padding: 6px 9px; }
-    .entry-row button { padding: 7px 12px; white-space: nowrap; }
-    .entry-result { grid-column: 1 / -1; color: #596579; font-size: .75rem; line-height: 1.25; }
+    .waitlist-suffix { color: #596579; font-size: var(--font-size-note); font-weight: 700; }
+    .entry-row select, .entry-row input { padding: 5px 8px; }
+    .entry-row button { padding: 6px 10px; white-space: nowrap; }
+    .entry-result { grid-column: 1 / -1; color: #596579; font-size: var(--font-size-meta); line-height: 1.25; }
     .entry-result:empty { display: none; }
     .entry-bulk-actions { display: flex; justify-content: flex-end; align-items: center; gap: 10px; flex-wrap: wrap; padding: 12px 0 0; border-top: 1px solid #e7eaf0; }
     .entry-bulk-actions .entry-result { flex: 1 1 220px; }
-    .stage-box { display: grid; gap: 9px; margin: 12px 0; padding: 12px; border: 1px solid #d7dfef; border-radius: 9px; background: white; }
-    .stage-box h5 { margin: 0; font-size: .9rem; }
+    .stage-box { display: grid; gap: 9px; min-width: 0; max-width: 100%; margin: 8px 0 14px; padding: 4px 0; border: 0; border-radius: 0; background: transparent; }
+    .stage-box h5 { margin: 0; color: #263550; font-size: var(--font-size-section); }
     .stage-actions { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
     .result-list { display: grid; }
     .result-row { display: grid; grid-template-columns: minmax(230px, 1fr) minmax(190px, .72fr); gap: 9px; align-items: center; padding: 5px 0; border-top: 1px solid #e7eaf0; }
     .result-row:first-child { border-top: 0; }
-    .result-row select { padding-block: 7px; }
-    .result-row button { padding: 7px 12px; white-space: nowrap; }
+    .result-row select { padding-block: 6px; }
+    .result-row button { padding: 6px 10px; white-space: nowrap; }
     .result-row .entry-result { grid-column: 1 / -1; }
     .guidance-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; align-items: start; }
-    .guidance-subsection { display: grid; gap: 9px; padding: 11px; border: 1px solid #dce1eb; border-radius: 8px; background: #fbfcff; }
-    .guidance-subsection h6 { margin: 0; font-size: .86rem; }
-    .guidance-guide-grid { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(260px, .65fr); gap: 10px; align-items: start; }
-    .guidance-file-box { display: grid; gap: 7px; padding: 9px; border-radius: 7px; background: #f5f7fb; }
-    .payment-setup-grid { display: grid; grid-template-columns: minmax(280px, .8fr) minmax(0, 1.2fr); gap: 10px; align-items: start; }
-    .fee-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; padding: 10px; border-radius: 8px; background: #f5f7fb; }
-    .fee-grid h6 { grid-column: 1 / -1; margin: 0; font-size: .84rem; }
-    .fee-grid select { padding-block: 8px; }
-    .organizer-payment-box { display: grid; gap: 9px; padding: 10px; border-radius: 8px; border: 1px solid #dce1eb; background: #fbfcff; }
-    .organizer-payment-box h6 { margin: 0; font-size: .84rem; }
+    .guidance-subsection { display: grid; gap: 9px; min-width: 0; max-width: 100%; padding: 10px 0; border: 0; border-radius: 0; background: transparent; }
+    .guidance-subsection h6 { margin: 0; color: #263550; font-size: var(--font-size-body); }
+    .guidance-input-selector { max-width: 520px; }
+    .guidance-input-branch { display: grid; min-width: 0; max-width: 100%; }
+    .guidance-guide-grid { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(260px, .65fr); gap: 10px; min-width: 0; max-width: 100%; align-items: start; }
+    .guidance-file-box { display: grid; gap: 7px; min-width: 0; max-width: 100%; padding: 0; border-radius: 0; background: transparent; }
+    .payment-setup-grid { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 18px; min-width: 0; max-width: 100%; align-items: start; }
+    .payment-method-label { width: auto; max-width: none; white-space: nowrap; }
+    .payment-method-label select { width: 8.5em; max-width: 100%; }
+    .fee-grid { display: grid; gap: 7px; min-width: 0; max-width: 100%; padding: 0; border-radius: 0; background: transparent; }
+    .fee-grid h6 { margin: 0 0 2px; font-size: var(--font-size-body); }
+    .fee-row { display: grid; grid-template-columns: 3.5em minmax(130px, 200px); gap: 10px; align-items: center; justify-content: start; min-width: 0; }
+    .fee-grade { color: #263550; font-size: var(--font-size-body); font-weight: 750; }
+    .fee-row select { width: 100%; padding-block: 7px; }
+    .organizer-payment-box { display: grid; gap: 9px; min-width: 0; max-width: 100%; margin-top: 8px; padding: 10px 0 0; border: 0; border-radius: 0; background: transparent; }
+    .organizer-payment-box h6 { margin: 0; font-size: var(--font-size-section); }
     .organizer-payment-selector { max-width: 520px; }
     .organizer-payment-branch { display: grid; gap: 8px; }
-    .organizer-payment-note { color: #596579; font-size: .8rem; line-height: 1.5; }
+    .organizer-payment-note { color: #596579; font-size: var(--font-size-note); line-height: 1.5; }
     .organizer-payment-status { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; padding-top: 2px; }
     .organizer-payment-status strong { min-width: 7em; }
-    .archive-management { margin: 15px 0; border: 1px solid #cad5eb; border-radius: 9px; background: #f7f9ff; }
-    .archive-management > summary { cursor: pointer; padding: 13px 14px; font-size: .9rem; font-weight: 800; color: #263550; user-select: none; }
-    .archive-management > summary:hover { background: #eef3ff; border-radius: 9px; }
-    .archive-management[open] > summary { border-bottom: 1px solid #dce1eb; border-radius: 9px 9px 0 0; }
-    .archive-management-body { padding: 14px; }
-    .archive-note { margin: 0 0 12px; color: #596579; font-size: .82rem; line-height: 1.55; }
-    .guidance-management { display: grid; gap: 9px; padding: 12px; margin-bottom: 14px; border: 1px solid #d7dfef; border-radius: 9px; background: #fff; }
-    .guidance-management h5 { margin: 0; font-size: .9rem; }
+    .archive-management { min-width: 0; max-width: 100%; margin: 5px 0 0; border: 0; border-top: 1px solid #dce1eb; border-radius: 0; background: transparent; }
+    .archive-management > summary { cursor: pointer; padding: 5px 0 3px; font-size: var(--font-size-section); font-weight: 800; color: #263550; user-select: none; }
+    .archive-management > summary:hover { color: #294796; background: transparent; }
+    .archive-management[open] > summary { border-bottom: 0; border-radius: 0; }
+    .archive-management-body { min-width: 0; max-width: 100%; padding: 0 0 6px; }
+    .archive-note { margin: 0 0 12px; color: #596579; font-size: var(--font-size-note); line-height: 1.55; }
+    .guidance-management { display: grid; gap: 9px; min-width: 0; max-width: 100%; padding: 6px 0 0; margin: 10px 0 14px; border: 0; border-radius: 0; background: transparent; }
+    .guidance-management h5 { margin: 0; color: #263550; font-size: var(--font-size-section); }
     .guidance-management textarea { height: 72px; min-height: 72px; resize: vertical; line-height: 1.45; }
-    .guidance-fields input[type="datetime-local"] { min-height: 42px; padding-block: 8px; }
+    .guidance-fields input[type="datetime-local"] { min-height: 36px; padding-block: 7px; }
     .deadline-control { display: grid; grid-template-columns: minmax(0, 1fr) 112px; gap: 8px; }
     .deadline-control input { min-width: 0; }
     .guidance-actions { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
-    .guidance-current { color: #596579; font-size: .8rem; }
+    .guidance-current { color: #596579; font-size: var(--font-size-note); }
     .guidance-current a { color: #294796; font-weight: 700; }
     .archive-documents { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
-    .archive-document { display: grid; gap: 7px; padding: 11px; border-radius: 8px; background: white; border: 1px solid #dce1eb; }
-    .archive-document strong { font-size: .86rem; }
-    .archive-document a { color: #294796; font-size: .82rem; font-weight: 700; }
+    .archive-document { display: grid; gap: 7px; min-width: 0; max-width: 100%; padding: 6px 0 14px; border: 0; border-radius: 0; background: transparent; }
+    .archive-document strong { font-size: var(--font-size-section); }
+    .archive-document a { color: #294796; font-size: var(--font-size-note); font-weight: 700; overflow-wrap: anywhere; }
     .archive-document button { justify-self: start; }
     .archive-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
     .result-archive-body { padding-block: 10px; }
@@ -2676,11 +2763,11 @@ function adminHtml(page: AdminPage): string {
     #member-status { color: #697386; margin-bottom: 12px; }
     #member-list.has-members { overflow: hidden; border: 1px solid #dce1eb; border-radius: 10px; }
     .member-table-header, .member-summary-grid { display: grid; grid-template-columns: minmax(115px, 1.1fr) minmax(140px, 1.25fr) minmax(62px, .5fr) minmax(62px, .5fr) minmax(68px, .55fr) minmax(66px, .5fr) minmax(76px, .58fr) minmax(100px, .75fr); gap: 10px; align-items: center; }
-    .member-table-header { padding: 10px 14px; color: #697386; background: #f5f7fb; border-bottom: 1px solid #dce1eb; font-size: .76rem; font-weight: 750; }
+    .member-table-header { padding: 10px 14px; color: #697386; background: #f5f7fb; border-bottom: 1px solid #dce1eb; font-size: var(--font-size-meta); font-weight: 750; }
     .member-card { border-bottom: 1px solid #e7eaf0; }
     .member-card:last-child { border-bottom: 0; }
     .member-summary-grid { min-height: 58px; padding: 10px 14px; }
-    .member-summary-item { min-width: 0; color: #172033; font-size: .88rem; font-weight: 700; overflow-wrap: anywhere; }
+    .member-summary-item { min-width: 0; color: #172033; font-size: var(--font-size-body); font-weight: 700; overflow-wrap: anywhere; }
     .member-row-actions { min-width: 0; display: grid; justify-items: start; gap: 4px; }
     .member-row-actions button { padding: 7px 11px; }
     .member-editor { padding: 14px; background: #fafbfe; }
@@ -2688,15 +2775,15 @@ function adminHtml(page: AdminPage): string {
     .member-grid .checkbox { display: flex; align-items: center; gap: 8px; min-height: 42px; }
     .member-grid .checkbox input { width: auto; }
     .member-actions { display: flex; align-items: center; gap: 12px; margin-top: 12px; flex-wrap: wrap; }
-    .member-link { color: #596579; font-size: .8rem; }
-    .member-history-link { appearance: none; width: auto; padding: 0; color: #294796; background: transparent; border: 0; border-radius: 0; font-size: .86rem; font-weight: 750; text-decoration: underline; text-underline-offset: 3px; }
+    .member-link { color: #596579; font-size: var(--font-size-note); }
+    .member-history-link { appearance: none; width: auto; padding: 0; color: #294796; background: transparent; border: 0; border-radius: 0; font-size: var(--font-size-body); font-weight: 750; text-decoration: underline; text-underline-offset: 3px; }
     .member-history-link:hover { color: #1f397c; background: transparent; }
     .member-history-summary { margin: 0 0 14px; color: #465166; font-weight: 700; }
     .member-history-table-wrap { overflow-x: auto; }
     .member-history-table { width: 100%; border-collapse: collapse; white-space: nowrap; }
     .member-history-table th, .member-history-table td { padding: 9px 10px; border-bottom: 1px solid #e7eaf0; text-align: left; }
-    .member-history-table th { color: #697386; font-size: .76rem; }
-    .member-history-table td { font-size: .88rem; }
+    .member-history-table th { color: #697386; font-size: var(--font-size-meta); }
+    .member-history-table td { font-size: var(--font-size-body); }
     .member-history-table tr:last-child td { border-bottom: 0; }
     .member-history-loading { padding: 24px 0; color: #697386; text-align: center; }
     #request-status { color: #697386; margin-bottom: 12px; }
@@ -2707,9 +2794,9 @@ function adminHtml(page: AdminPage): string {
     .request-title { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
     .request-comparison { display: grid; grid-template-columns: 1fr auto 1fr; gap: 12px; align-items: center; margin-top: 14px; }
     .request-value { background: #f5f7fb; border-radius: 8px; padding: 12px; line-height: 1.6; }
-    .request-value strong { display: block; font-size: .78rem; color: #697386; }
+    .request-value strong { display: block; font-size: var(--font-size-meta); color: #697386; }
     .request-arrow { color: #697386; font-weight: 800; }
-    .request-note { color: #596579; font-size: .82rem; margin-top: 10px; }
+    .request-note { color: #596579; font-size: var(--font-size-note); margin-top: 10px; }
     button.danger { color: #a12822; background: #fdecea; }
     button.danger:hover { background: #f9d9d5; }
     .empty { color: #697386; text-align: center; padding: 30px 10px; }
@@ -2717,24 +2804,113 @@ function adminHtml(page: AdminPage): string {
     dialog::backdrop { background: #17203388; }
     .dialog-form { padding: 24px; }
     .dialog-form h2 { margin-bottom: 8px; }
-    .dialog-note { margin: 0 0 18px; color: #697386; font-size: .84rem; }
+    .dialog-note { margin: 0 0 18px; color: #697386; font-size: var(--font-size-note); }
+    .status-confirm-message { margin: 0; color: #465166; line-height: 1.75; white-space: pre-line; }
+    .status-confirm-note { margin: 12px 0 0; padding: 10px 12px; border-left: 4px solid #da8c10; color: #6f4b12; background: #fff7e8; font-size: var(--font-size-note); }
     .dialog-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; margin-top: 22px; flex-wrap: wrap; }
     .dialog-actions .status-message { margin-right: auto; }
+    .settings-heading { margin-bottom: 18px; }
+    .settings-title-row { display: flex; align-items: center; gap: 9px; }
+    .settings-title-row h2 { margin: 0; }
+    .desktop-recommended { padding: 3px 8px; border-radius: 999px; color: #294796; background: #eef2fb; font-size: var(--font-size-meta); font-weight: 800; line-height: 1.3; }
+    .settings-layout { display: grid; grid-template-columns: 210px minmax(0, 1fr); gap: 28px; align-items: start; }
+    .settings-menu { position: sticky; top: 16px; display: grid; gap: 2px; padding: 2px 18px 2px 0; border-right: 1px solid #dce1eb; }
+    .settings-menu-item { appearance: none; width: 100%; padding: 10px 12px; border: 0; border-left: 3px solid transparent; border-radius: 0; color: #697386; background: transparent; font: inherit; font-size: var(--font-size-body); font-weight: 700; text-align: left; cursor: pointer; transition: color .15s ease, background .15s ease, border-color .15s ease; }
+    .settings-menu-item:hover { color: #294796; background: #f4f6fb; }
+    .settings-menu-item[aria-selected="true"] { color: #294796; border-left-color: #3658b2; background: #eef2fb; }
+    .settings-content { min-width: 0; padding-top: 2px; }
+    .settings-panel { min-width: 0; padding: 0; border: 0; border-radius: 0; background: transparent; }
+    .settings-panel[hidden] { display: none; }
+    .settings-panel-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; margin-bottom: 14px; padding-bottom: 12px; border-bottom: 1px solid #dce1eb; }
+    .settings-panel h3 { line-height: 1.45; }
+    .settings-panel p { margin: 0 0 18px; color: #596579; font-size: var(--font-size-body); }
+    .settings-panel ul { margin: 0; padding: 0; list-style: none; color: #465166; font-size: var(--font-size-body); }
+    .settings-panel li { padding: 10px 0; border-top: 1px solid #e7eaf0; }
+    .settings-panel li:first-child { border-top: 0; }
+    .settings-status { flex: 0 0 auto; padding: 2px 0; color: #7a8497; background: transparent; font-size: var(--font-size-meta); font-weight: 750; white-space: nowrap; }
+    .message-settings-workspace { display: grid; grid-template-columns: 230px minmax(0, 1fr); min-width: 0; border-top: 1px solid #dce1eb; }
+    .message-template-list { min-width: 0; padding: 8px 16px 8px 0; border-right: 1px solid #dce1eb; }
+    .message-template-category { border-bottom: 1px solid #e7eaf0; }
+    .message-template-category:last-child { border-bottom: 0; }
+    .message-template-group { display: flex; align-items: center; gap: 6px; padding: 9px 5px; color: #465166; font-size: var(--font-size-meta); font-weight: 800; cursor: pointer; list-style: none; user-select: none; }
+    .message-template-group::-webkit-details-marker { display: none; }
+    .message-template-group::before { content: "▸"; color: #697386; transition: transform .15s ease; }
+    .message-template-category[open] > .message-template-group::before { transform: rotate(90deg); }
+    .message-template-category-buttons { padding: 0 0 7px; }
+    .message-template-button { appearance: none; width: 100%; min-height: 0; padding: 7px 9px; border: 0; border-left: 3px solid transparent; border-radius: 0; color: #465166; background: transparent; font: inherit; font-size: var(--font-size-note); font-weight: 700; text-align: left; cursor: pointer; }
+    .message-template-button:hover { color: #294796; background: #f4f6fb; }
+    .message-template-button[aria-selected="true"] { color: #294796; border-left-color: #3658b2; background: #eef2fb; }
+    .message-template-editor { min-width: 0; padding: 12px 0 4px 20px; }
+    .message-template-editor[hidden] { display: none; }
+    .message-template-editor-head { display: flex; align-items: start; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+    .message-template-editor h4 { margin: 0; font-size: var(--font-size-section); }
+    .message-template-recipient { color: #697386; font-size: var(--font-size-note); }
+    .message-template-label { color: #263550; font-size: var(--font-size-body); font-weight: 750; }
+    .message-template-label textarea { display: block; width: 100%; height: 132px; min-height: 96px; margin-top: 5px; resize: vertical; line-height: 1.55; }
+    .message-template-note { margin: 7px 0 0 !important; color: #697386 !important; font-size: var(--font-size-meta) !important; }
+    .message-template-preview { margin-top: 14px; padding: 12px 14px; border-radius: 8px; color: #f2f3f5; background: #313338; font-size: var(--font-size-body); line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .message-template-actions { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; margin-top: 12px; }
+    .message-template-actions .status-message { margin-left: 2px; }
+    .deadline-settings-table-wrap { max-width: 760px; overflow-x: auto; border-top: 1px solid #dce1eb; }
+    .deadline-settings-table { width: 100%; min-width: 690px; border-collapse: collapse; color: #263550; }
+    .deadline-settings-table th, .deadline-settings-table td { padding: 10px 8px; border-bottom: 1px solid #e7eaf0; text-align: left; vertical-align: middle; }
+    .deadline-settings-table th { color: #697386; font-size: var(--font-size-meta); font-weight: 800; }
+    .deadline-settings-table td:first-child { font-weight: 750; }
+    .deadline-settings-table input { width: 92px; min-height: 36px; padding: 6px 8px; }
+    .deadline-settings-table .deadline-time { width: 112px; }
+    .deadline-time-control { display: flex; align-items: center; gap: 7px; }
+    .deadline-settings-table .deadline-time-mode { width: 9em; min-height: 36px; padding: 6px 8px; }
+    .deadline-settings-fixed { color: #697386; font-size: var(--font-size-note); }
+    .deadline-settings-actions { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; margin-top: 14px; }
+    .deadline-settings-actions .status-message { margin-left: 2px; }
+    .manual-workspace { display: grid; grid-template-columns: 190px minmax(0, 1fr); min-width: 0; border-top: 1px solid #dce1eb; }
+    .manual-menu { position: sticky; top: 16px; display: grid; align-content: start; gap: 13px; min-width: 0; padding: 13px 16px 13px 0; border-right: 1px solid #dce1eb; }
+    .manual-menu-group { display: grid; gap: 2px; }
+    .manual-menu-heading { padding: 0 9px 4px; color: #7a8497; font-size: var(--font-size-meta); font-weight: 800; }
+    .manual-menu-item { appearance: none; width: 100%; min-height: 0; padding: 7px 9px; border: 0; border-left: 3px solid transparent; border-radius: 0; color: #596579; background: transparent; font: inherit; font-size: var(--font-size-note); font-weight: 700; text-align: left; cursor: pointer; }
+    .manual-menu-item:hover { color: #294796; background: #f4f6fb; }
+    .manual-menu-item[aria-selected="true"] { color: #294796; border-left-color: #3658b2; background: #eef2fb; }
+    .manual-content { min-width: 0; padding: 14px 0 8px 22px; }
+    .manual-page[hidden] { display: none; }
+    .manual-page-header { margin-bottom: 15px; padding-bottom: 11px; border-bottom: 1px solid #dce1eb; }
+    .manual-page-header h4 { margin: 0 0 4px; font-size: var(--font-size-section); }
+    .manual-updated { display: block; margin-top: 5px; color: white; font-size: var(--font-size-meta); }
+    .manual-section { padding: 11px 0; border-top: 1px solid #e7eaf0; }
+    .manual-page-header + .manual-section { padding-top: 0; border-top: 0; }
+    .manual-section h5 { margin: 0 0 6px; color: #263550; font-size: var(--font-size-body); }
+    .manual-section p { margin: 0 0 7px; font-size: var(--font-size-note); line-height: 1.65; }
+    .manual-section ol, .manual-section ul { margin: 0; padding-left: 1.45em; color: #465166; font-size: var(--font-size-note); line-height: 1.75; }
+    .manual-section li { padding: 1px 0; border: 0; }
+    .manual-section a { color: #294796; font-weight: 700; text-underline-offset: 2px; }
+    .manual-warning { margin-top: 8px !important; padding: 8px 10px; border-left: 3px solid #da8c10; color: #6f4b12 !important; background: #fff7e8; }
+    .manual-troubles { margin: 0; }
+    .manual-troubles dt { margin-top: 11px; color: #263550; font-size: var(--font-size-body); font-weight: 750; }
+    .manual-troubles dt:first-child { margin-top: 0; }
+    .manual-troubles dd { margin: 3px 0 0; color: #596579; font-size: var(--font-size-note); line-height: 1.65; }
     @media (max-width: 680px) {
-      .grid, .grade-date-grid, .application-method-fields, .response-sections, .member-grid, .request-comparison, .entry-row, .archive-documents, .guidance-fields, .guidance-guide-grid, .payment-setup-grid, .result-row { grid-template-columns: minmax(0, 1fr); }
+      .grid, .grade-date-grid, .application-method-fields, .response-sections, .member-grid, .request-comparison, .entry-row, .archive-documents, .guidance-fields, .guidance-guide-grid, .payment-setup-grid, .result-row, .settings-layout, .message-settings-workspace, main.tournament-workspace { grid-template-columns: minmax(0, 1fr); }
+      input, select, textarea { min-height: 44px; font-size: var(--font-size-touch-control); }
+      button, .todo-link { min-height: 44px; }
       #member-list.has-members { overflow: visible; border: 0; border-radius: 0; display: grid; gap: 10px; }
       .member-table-header { display: none; }
       .member-card, .member-card:last-child { overflow: hidden; border: 1px solid #dce1eb; border-radius: 9px; }
       .member-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); min-height: 0; padding: 12px; }
-      .member-summary-item::before { content: attr(data-label); display: block; margin-bottom: 3px; color: #697386; font-size: .7rem; font-weight: 650; }
+      .member-summary-item::before { content: attr(data-label); display: block; margin-bottom: 3px; color: #697386; font-size: var(--font-size-meta); font-weight: 650; }
       .member-summary-item:nth-child(-n + 2) { grid-column: 1 / -1; }
       .member-row-actions { grid-column: 1 / -1; display: flex; align-items: center; gap: 10px; }
-      .entry-status-field, .waitlist-field, .payment-field { grid-column: auto; }
+      .entry-row, .entry-row.has-waitlist, .entry-row.has-payment { grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 8px; }
+      .entry-name { grid-column: 1 / -1; min-width: 0; overflow-wrap: anywhere; }
+      .entry-status-field { grid-column: 1; }
+      .waitlist-field, .payment-field { grid-column: 2; }
+      .entry-row select, .entry-row input { width: 100%; max-width: 100%; }
+      .guidance-fields > label, .organizer-payment-box, .organizer-payment-branch { min-width: 0; max-width: 100%; }
+      .deadline-control { grid-template-columns: minmax(0, 1fr); }
+      .deadline-control input { width: 100%; max-width: 100%; }
       .entry-bulk-actions { justify-content: stretch; }
       .entry-bulk-actions button { width: 100%; }
       .result-document-upload { grid-template-columns: minmax(0, 1fr); }
       .result-document-upload > .file-drop-zone, .result-document-upload > button { grid-column: auto; grid-row: auto; }
-      input[type="date"], input[type="datetime-local"] {
+      input[type="date"], input[type="time"], input[type="datetime-local"] {
         display: block;
         inline-size: 100%;
         min-inline-size: 0;
@@ -2742,22 +2918,36 @@ function adminHtml(page: AdminPage): string {
         overflow: hidden;
         -webkit-appearance: none;
         appearance: none;
-        font-size: 16px;
+        font-size: var(--font-size-control);
       }
       input[type="date"]::-webkit-date-and-time-value,
+      input[type="time"]::-webkit-date-and-time-value,
       input[type="datetime-local"]::-webkit-date-and-time-value,
       input[type="date"]::-webkit-datetime-edit,
+      input[type="time"]::-webkit-datetime-edit,
       input[type="datetime-local"]::-webkit-datetime-edit {
         min-inline-size: 0;
         text-align: left;
       }
       .request-arrow { transform: rotate(90deg); text-align: center; }
       .wide, .grade-date-settings { grid-column: auto; }
-      .panel { padding: 18px; }
+      .panel { padding: 15px; }
       .header-inner { display: block; }
       .identity-wrap { margin-top: 6px; }
       .tabs { padding: 0 8px; }
-      .tab { padding-inline: 13px; }
+      .tab { flex: 1; justify-content: center; padding-inline: 8px; }
+      .subtab-bar { position: static; }
+      .subtabs { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0; padding: 0 0 10px; border-right: 0; border-bottom: 1px solid #dce1eb; }
+      .subtab { min-width: 0; padding: 9px 5px; border-left: 0; border-bottom: 3px solid transparent; font-size: var(--font-size-meta); text-align: center; }
+      .subtab.active { border-bottom-color: #3658b2; background: transparent; }
+      .settings-menu { position: static; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0; padding: 0 0 10px; border-right: 0; border-bottom: 1px solid #dce1eb; }
+      .settings-menu-item { padding: 9px 5px; border-left: 0; border-bottom: 3px solid transparent; font-size: var(--font-size-meta); text-align: center; }
+      .settings-menu-item[aria-selected="true"] { border-bottom-color: #3658b2; background: transparent; }
+      .message-template-list { padding: 8px 0 10px; border-right: 0; border-bottom: 1px solid #dce1eb; }
+      .message-template-editor { padding: 12px 0 0; }
+      .manual-workspace { grid-template-columns: minmax(0, 1fr); }
+      .manual-menu { position: static; padding: 12px 0; border-right: 0; border-bottom: 1px solid #dce1eb; }
+      .manual-content { padding: 14px 0 0; }
       .card-heading { align-items: flex-start; }
       .list-controls { align-items: stretch; }
       .list-controls label { flex: 1 1 100%; }
@@ -2767,16 +2957,23 @@ function adminHtml(page: AdminPage): string {
   </style>
 </head>
 <body data-page="${page}">
-  <header><div class="header-inner"><h1>大会管理（Discord版MVP）</h1><span class="identity-wrap"><span id="identity">認証情報を確認中…</span><a id="logout" href="/auth/logout" hidden>ログアウト</a></span></div></header>
+  <header><div class="header-inner"><div class="admin-brand"><span class="admin-brand-name">埼玉大学かるた会</span><h1>運営管理ポータル</h1></div><span class="identity-wrap"><span id="identity">認証情報を確認中…</span><a id="logout" href="/auth/logout" hidden>ログアウト</a></span></div></header>
   <div class="tab-bar">
     <nav class="tabs" aria-label="管理画面メニュー">
-      <a class="${tabClass("todo")}" href="/todo"${currentPage("todo")}>TODO<span id="todo-count-badge" class="request-badge" role="status" aria-live="polite" hidden>0</span></a>
-      <a class="${tabClass("register")}" href="/register"${currentPage("register")}>大会登録</a>
-      <a class="${tabClass("tournaments")}" href="/tournaments"${currentPage("tournaments")}>大会一覧</a>
+      <a class="${tabClass("tournament-management")}" href="/register"${section === "tournament-management" ? ' aria-current="true"' : ""}>大会管理<span id="todo-count-badge" class="request-badge" role="status" aria-live="polite" hidden>0</span></a>
       <a class="${tabClass("members")}" href="/members"${currentPage("members")}>メンバー管理<span id="pending-request-badge" class="request-badge" role="status" aria-live="polite" hidden>0</span></a>
+      <a class="${tabClass("settings")}" href="/settings"${currentPage("settings")}>設定</a>
     </nav>
   </div>
-  <main>
+  <main${section === "tournament-management" ? ' class="tournament-workspace"' : ""}>
+    <div class="subtab-bar"${section === "tournament-management" ? "" : " hidden"}>
+      <nav class="subtabs" aria-label="大会管理メニュー">
+        <a class="${subtabClass("register")}" href="/register"${currentPage("register")}>大会新規登録</a>
+        <a class="${subtabClass("todo")}" href="/todo"${currentPage("todo")}>TODO</a>
+        <a class="${subtabClass("tournaments")}" href="/tournaments"${currentPage("tournaments")}>一覧</a>
+      </nav>
+    </div>
+    <div class="admin-page-content">
     <section class="panel" aria-labelledby="todo-list-title"${hiddenPage("todo")}>
       <div class="list-heading">
         <h2 id="todo-list-title">やること</h2>
@@ -2788,7 +2985,7 @@ function adminHtml(page: AdminPage): string {
     </section>
     <div class="notice"${hiddenPage("register")}><strong>テスト運用中です。</strong> 登録後1分以内を目安に告知チャンネルへ投稿し、該当級の登録済みメンバー全員へのDMをキューに登録します。送信失敗時は最大5回まで自動再送します。</div>
     <form id="tournament-form" class="panel"${hiddenPage("register")}>
-      <h2>大会登録</h2>
+      <h2>大会新規登録</h2>
       <div class="grid">
         <label class="wide">大会名<input name="title" required maxlength="100" autocomplete="off"></label>
         <fieldset class="grade-picker wide"><legend>開催級 <span class="optional">複数選択可</span></legend><div class="grade-options"><label class="grade-option"><input type="checkbox" name="grades" value="all">すべて</label><label class="grade-option"><input type="checkbox" name="grades" value="A">A級</label><label class="grade-option"><input type="checkbox" name="grades" value="B">B級</label><label class="grade-option"><input type="checkbox" name="grades" value="C">C級</label><label class="grade-option"><input type="checkbox" name="grades" value="D">D級</label><label class="grade-option"><input type="checkbox" name="grades" value="E">E級</label><label class="grade-option"><input type="checkbox" name="grades" value="F">F級</label><label class="grade-option"><input type="checkbox" name="grades" value="beginner">初心者</label></div></fieldset>
@@ -2796,7 +2993,7 @@ function adminHtml(page: AdminPage): string {
         <label>大会種別<select name="tournamentType" required><option value="official">公認大会</option><option value="support">後援大会</option><option value="event">その他イベント</option></select></label>
         <div id="grade-date-settings" class="grade-date-settings" hidden><strong>級ごとの開催日 <span class="optional">同じ大会で日程が異なる級だけ変更してください</span></strong><div id="grade-date-grid" class="grade-date-grid"></div></div>
         <label>主催締切日<input type="datetime-local" name="trueDeadline" required></label>
-        <label><span>サークル内締切日 <span class="optional">（基本的に主催締切日の3日前を自動入力）</span></span><input type="datetime-local" name="internalDeadline" required></label>
+        <label><span>サークル内締切日 <span class="optional">（設定値に基づき自動入力）</span></span><input type="datetime-local" name="internalDeadline" required></label>
         <fieldset class="application-method wide">
           <legend>申込方法</legend>
           <label>主催者への申込方法<select name="applicationMethod" required><option value="">選択してください</option><option value="excel_email">Excel名簿に選手名を記入してメール送信</option><option value="excel_form">Excel名簿に選手名を記入してフォームで送信</option><option value="direct_form">フォームに選手名を直接入力して送信</option></select></label>
@@ -2844,7 +3041,107 @@ function adminHtml(page: AdminPage): string {
       <div id="member-list"></div>
       <div class="footnote">Discord IDそのものは管理画面に表示しません。氏名・よみがな・出場級・段位・在籍状態・DM送信設定の変更履歴は担当者情報とともに保存されます。</div>
     </section>
+    <section class="panel" aria-labelledby="settings-title"${hiddenPage("settings")}>
+      <div class="settings-heading"><div class="settings-title-row"><h2 id="settings-title">設定</h2><span class="desktop-recommended">PC推奨</span></div></div>
+      <div class="settings-layout">
+        <nav class="settings-menu" role="tablist" aria-label="設定項目">
+          <button class="settings-menu-item" type="button" role="tab" aria-selected="true" aria-controls="message-settings" data-settings-view="messages">Discord Botメッセージ</button>
+          <button class="settings-menu-item" type="button" role="tab" aria-selected="false" aria-controls="deadline-settings" data-settings-view="deadlines">自動入力・期限</button>
+          <button class="settings-menu-item" type="button" role="tab" aria-selected="false" aria-controls="manual-settings" data-settings-view="manuals">運用マニュアル</button>
+        </nav>
+        <div class="settings-content">
+          <section class="settings-panel" id="message-settings" role="tabpanel">
+            <div class="settings-panel-head"><h3>Discord Botメッセージ</h3><span class="settings-status">本文のみ編集</span></div>
+            <p>通知を選択して本文を変更します。大会名・氏名・期限・リンク・ボタンなどの自動表示部分は変更されません。</p>
+            <div id="message-setting-status" class="status-message" role="status" aria-live="polite">読み込み中…</div>
+            <div class="message-settings-workspace">
+              <nav id="message-template-list" class="message-template-list" aria-label="Discord Botメッセージ一覧"></nav>
+              <form id="message-template-editor" class="message-template-editor" hidden>
+                <div class="message-template-editor-head"><div><h4 id="message-template-title"></h4><span id="message-template-recipient" class="message-template-recipient"></span></div><span id="message-template-customized" class="settings-status"></span></div>
+                <label class="message-template-label">本文<textarea id="message-template-content" maxlength="2000" required></textarea></label>
+                <p class="message-template-note">2000文字以内。埋め込み情報と操作ボタンはシステムが自動で付け加えます。</p>
+                <div id="message-template-preview" class="message-template-preview"></div>
+                <div class="message-template-actions"><button id="save-message-template" type="submit">本文を保存</button><button id="reset-message-template" type="button" class="secondary">初期文面に戻す</button><span id="message-template-result" class="status-message" role="status" aria-live="polite"></span></div>
+              </form>
+            </div>
+          </section>
+          <section class="settings-panel" id="deadline-settings" role="tabpanel" hidden>
+            <div class="settings-panel-head"><h3>自動入力・期限</h3><span id="deadline-settings-customized" class="settings-status">読み込み中…</span></div>
+            <p>大会新規登録と参加費案内で自動入力する期限、未回答リマインダーの送信日時を設定します。保存済みの大会日時は変更されません。</p>
+            <div id="deadline-setting-status" class="status-message" role="status" aria-live="polite">読み込み中…</div>
+            <form id="deadline-settings-form">
+              <div class="deadline-settings-table-wrap">
+                <table class="deadline-settings-table">
+                  <thead><tr><th>自動設定する項目</th><th>基準</th><th>何日前</th><th>時刻</th></tr></thead>
+                  <tbody>
+                    <tr><td>サークル内締切</td><td>主催締切</td><td><input type="number" name="internalDeadlineDaysBefore" min="0" max="30" required inputmode="numeric" aria-label="サークル内締切の日数"></td><td><div class="deadline-time-control"><select class="deadline-time-mode" name="internalDeadlineTimeMode" data-time-target="internalDeadlineTime" aria-label="サークル内締切の時刻設定"><option value="same">基準と同じ</option><option value="custom">自由設定</option></select><input class="deadline-time" type="time" name="internalDeadlineTime" required aria-label="サークル内締切の時刻"></div></td></tr>
+                    <tr><td>担当者の支払日</td><td>主催締切</td><td><input type="number" name="organizerPaymentDaysBefore" min="0" max="30" required inputmode="numeric" aria-label="担当者の支払日の日数"></td><td><div class="deadline-time-control"><select class="deadline-time-mode" name="organizerPaymentTimeMode" data-time-target="organizerPaymentTime" aria-label="担当者の支払日の時刻設定"><option value="same">基準と同じ</option><option value="custom">自由設定</option></select><input class="deadline-time" type="time" name="organizerPaymentTime" required aria-label="担当者の支払日の時刻"></div></td></tr>
+                    <tr><td>サークル内支払期限</td><td>担当者の支払日</td><td><input type="number" name="paymentDeadlineDaysBefore" min="1" max="30" required inputmode="numeric" aria-label="サークル内支払期限の日数"></td><td><div class="deadline-time-control"><select class="deadline-time-mode" name="paymentDeadlineTimeMode" data-time-target="paymentDeadlineTime" aria-label="サークル内支払期限の時刻設定"><option value="same">基準と同じ</option><option value="custom">自由設定</option></select><input class="deadline-time" type="time" name="paymentDeadlineTime" required aria-label="サークル内支払期限の時刻"></div></td></tr>
+                    <tr><td>未回答リマインダー</td><td>サークル内締切日</td><td><input type="number" name="responseReminderDaysBefore" min="0" max="30" required inputmode="numeric" aria-label="未回答リマインダーの日数"></td><td><div class="deadline-time-control"><select class="deadline-time-mode" name="responseReminderTimeMode" data-time-target="responseReminderTime" aria-label="未回答リマインダーの時刻設定"><option value="same">基準と同じ</option><option value="custom">自由設定</option></select><input class="deadline-time" type="time" name="responseReminderTime" required aria-label="未回答リマインダーの時刻"></div></td></tr>
+                  </tbody>
+                </table>
+              </div>
+              <div class="deadline-settings-actions"><button id="save-deadline-settings" type="submit">設定を保存</button><button id="reset-deadline-settings" type="button" class="secondary">初期値に戻す</button><span id="deadline-settings-result" class="status-message" role="status" aria-live="polite"></span></div>
+            </form>
+          </section>
+          <section class="settings-panel" id="manual-settings" role="tabpanel" hidden>
+            <div class="settings-panel-head"><h3>運用マニュアル</h3><span class="settings-status">草案</span></div>
+            <div class="manual-workspace">
+              <nav class="manual-menu" role="tablist" aria-label="運用マニュアル目次">
+                <div class="manual-menu-group"><span class="manual-menu-heading">はじめに</span><button class="manual-menu-item" type="button" role="tab" aria-selected="true" aria-controls="manual-overview" data-manual-view="overview">全体の流れ</button></div>
+                <div class="manual-menu-group"><span class="manual-menu-heading">日常操作</span><button class="manual-menu-item" type="button" role="tab" aria-selected="false" aria-controls="manual-tournaments" data-manual-view="tournaments">大会管理</button><button class="manual-menu-item" type="button" role="tab" aria-selected="false" aria-controls="manual-members" data-manual-view="members">メンバー管理</button><button class="manual-menu-item" type="button" role="tab" aria-selected="false" aria-controls="manual-troubleshooting" data-manual-view="troubleshooting">よくあるトラブル</button></div>
+                <div class="manual-menu-group"><span class="manual-menu-heading">運用・保守</span><button class="manual-menu-item" type="button" role="tab" aria-selected="false" aria-controls="manual-cloudflare" data-manual-view="cloudflare">Cloudflare保守</button><button class="manual-menu-item" type="button" role="tab" aria-selected="false" aria-controls="manual-discord" data-manual-view="discord">Discord Bot保守</button></div>
+              </nav>
+              <div class="manual-content">
+                <article class="manual-page" id="manual-overview" role="tabpanel" data-manual-page="overview">
+                  <header class="manual-page-header"><h4>全体の流れ</h4><span class="manual-updated">最終更新：2026年10月20日</span></header>
+                  <section class="manual-section"><h5>大会運営の基本フロー</h5><ol><li>大会案内と申込方法を登録し、対象者へ参加確認を送信します。</li><li>サークル内締切後、参加希望者を確認して主催者へ申し込みます。</li><li>抽選前名簿が届いた場合は登録し、申込者へ確認を依頼します。</li><li>抽選結果・確定名簿・参加費・当日案内を登録して送信します。</li><li>必要な参加費を取りまとめ、主催者への振込完了を記録します。</li><li>大会終了後、結果ファイルと個人成績を登録して公開します。</li></ol></section>
+                  <section class="manual-section"><h5>まず確認する場所</h5><p><a href="/todo">TODO</a>には、申込・振込・結果登録のうち現在対応が必要な作業だけが表示されます。日常運用では、最初にTODOを確認してください。</p><p class="manual-warning">主催締切日や担当者振込期日を過ぎた項目は強調表示されます。対応後は必ず完了操作まで行ってください。</p></section>
+                </article>
+                <article class="manual-page" id="manual-tournaments" role="tabpanel" data-manual-page="tournaments" hidden>
+                  <header class="manual-page-header"><h4>大会管理</h4><span class="manual-updated">最終更新：2026年10月20日</span></header>
+                  <section class="manual-section"><h5>1. 大会を登録する</h5><ol><li><a href="/register">大会新規登録</a>を開きます。</li><li>大会名、開催級、開催日、締切、要項、申込方法を入力します。</li><li>登録後、対象メンバーへ参加確認DMが届いたことを確認します。</li></ol></section>
+                  <section class="manual-section"><h5>2. 主催者へ申し込む</h5><ol><li><a href="/todo">TODO</a>で参加希望者と申込情報を確認します。</li><li>名簿ファイルまたはフォームを使って主催者へ申し込みます。</li><li>完了後、「申込済みにする」を押します。</li></ol></section>
+                  <section class="manual-section"><h5>3. 抽選後の案内を送る</h5><ol><li><a href="/tournaments">大会一覧</a>から対象大会を開きます。</li><li>確定名簿、選手ごとの当落、参加費、当日案内を入力します。</li><li>送信ボタンを押し、保存と案内送信をまとめて完了します。</li></ol></section>
+                  <section class="manual-section"><h5>4. 大会結果を公開する</h5><ol><li>大会翌日以降に表示されるTODOから入力欄へ移動します。</li><li>結果ファイルと全出場者の個人成績を入力します。</li><li>「結果を保存して公開」を押します。</li></ol></section>
+                </article>
+                <article class="manual-page" id="manual-members" role="tabpanel" data-manual-page="members" hidden>
+                  <header class="manual-page-header"><h4>メンバー管理</h4><span class="manual-updated">最終更新：2026年10月20日</span></header>
+                  <section class="manual-section"><h5>登録・変更申請を承認する</h5><ol><li><a href="/members">メンバー管理</a>を開きます。</li><li>申請内容と現在の登録内容を確認します。</li><li>内容に問題がなければ承認します。不明点がある場合は本人へ確認してから操作します。</li></ol></section>
+                  <section class="manual-section"><h5>登録情報を修正する</h5><p>メンバー一覧の「編集」から、氏名・よみがな・出場級・段位・状態・DM設定を変更できます。Discord IDそのものは管理画面には表示されません。</p></section>
+                  <section class="manual-section"><h5>出場歴を確認する</h5><p>メンバー一覧の「出場歴」を開くと、年度ごとの級別出場回数と大会履歴を確認できます。</p></section>
+                </article>
+                <article class="manual-page" id="manual-troubleshooting" role="tabpanel" data-manual-page="troubleshooting" hidden>
+                  <header class="manual-page-header"><h4>よくあるトラブル</h4><span class="manual-updated">最終更新：2026年10月20日</span></header>
+                  <section class="manual-section"><dl class="manual-troubles"><dt>参加確認DMが届かない</dt><dd>メンバーのDiscord連携、在籍状態、DM送信設定を確認します。本人のDiscord側でサーバーメンバーからのDMが許可されているかも確認してください。</dd><dt>ファイルをブラウザで開けない</dt><dd>変換処理が完了していない可能性があります。少し待って再読み込みし、PDFリンクが生成されているか確認します。</dd><dt>TODOが消えない</dt><dd>申込済み・振込済み・結果公開など、対象作業の完了操作まで行われているか確認します。</dd><dt>通知やバックアップの失敗メッセージが届いた</dt><dd>同じ操作を繰り返さず、メッセージの時刻と対象大会を控えて保守担当者へ連絡します。</dd></dl></section>
+                </article>
+                <article class="manual-page" id="manual-cloudflare" role="tabpanel" data-manual-page="cloudflare" hidden>
+                  <header class="manual-page-header"><h4>Cloudflare保守</h4><span class="manual-updated">最終更新：2026年10月20日</span></header>
+                  <section class="manual-section"><h5>定期的に確認するもの</h5><ul><li>管理画面とメンバーポータルが開けること</li><li>担当者チャンネルにバックアップ失敗通知が出ていないこと</li><li>ファイルのアップロードとPDF変換が正常に完了すること</li></ul></section>
+                  <section class="manual-section"><h5>障害発生時</h5><ol><li>発生時刻、対象大会、行った操作、表示されたメッセージを記録します。</li><li>Cloudflareの対象Workerで直近のログと実行状況を確認します。</li><li>復旧後、失敗した操作だけを再実行し、通知やデータが重複していないか確認します。</li></ol><p class="manual-warning">D1データベースやR2ファイルを管理画面から直接削除しないでください。APIキー、トークン、秘密情報もマニュアルには記載しません。</p></section>
+                </article>
+                <article class="manual-page" id="manual-discord" role="tabpanel" data-manual-page="discord" hidden>
+                  <header class="manual-page-header"><h4>Discord Bot保守</h4><span class="manual-updated">最終更新：2026年10月20日</span></header>
+                  <section class="manual-section"><h5>稼働確認</h5><ol><li>Discord上でBotがサーバーに参加していることを確認します。</li><li><code>/ping</code>を実行し、応答が返ることを確認します。</li><li>大会お知らせ・担当者チャンネルへの送信権限と、ボタン操作権限を確認します。</li></ol></section>
+                  <section class="manual-section"><h5>DMが送れない場合</h5><p>対象者のDiscord連携とDM設定を確認します。Botが正常でも、本人のプライバシー設定によりDMを送れない場合があります。</p></section>
+                  <section class="manual-section"><h5>認証情報の扱い</h5><p>BotトークンやAPIキーはチャット、Discord、マニュアル本文へ貼り付けません。更新が必要な場合は、権限を持つ保守担当者だけで作業します。</p></section>
+                </article>
+              </div>
+            </div>
+          </section>
+        </div>
+      </div>
+    </section>
+    </div>
   </main>
+  <dialog id="status-confirm-dialog">
+    <div class="dialog-form">
+      <h2>大会ステータスを変更しますか？</h2>
+      <p id="status-confirm-message" class="status-confirm-message"></p>
+      <p id="status-confirm-note" class="status-confirm-note">「はい」を押すと状態を更新し、設定されている関連通知を送信します。</p>
+      <div class="dialog-actions"><button id="status-confirm-no" type="button" class="secondary">いいえ</button><button id="status-confirm-yes" type="button">はい</button></div>
+    </div>
+  </dialog>
   <dialog id="edit-tournament-dialog">
     <form id="edit-tournament-form" class="dialog-form">
       <h2>大会情報を編集</h2>
@@ -2871,6 +3168,32 @@ function adminHtml(page: AdminPage): string {
   </dialog>
   <script>
     const currentPage = document.body.dataset.page;
+    const settingsMenuItems = [...document.querySelectorAll('[data-settings-view]')];
+    const settingsPanels = {
+      messages: document.querySelector('#message-settings'),
+      deadlines: document.querySelector('#deadline-settings'),
+      manuals: document.querySelector('#manual-settings'),
+    };
+    const manualMenuItems = [...document.querySelectorAll('.manual-menu-item')];
+    const manualPages = [...document.querySelectorAll('.manual-page')];
+    function selectManualView(name) {
+      const selected = manualPages.some((manualPage) => manualPage.dataset.manualPage === name) ? name : 'overview';
+      manualMenuItems.forEach((item) => item.setAttribute('aria-selected', String(item.dataset.manualView === selected)));
+      manualPages.forEach((manualPage) => { manualPage.hidden = manualPage.dataset.manualPage !== selected; });
+    }
+    manualMenuItems.forEach((item) => item.addEventListener('click', () => selectManualView(item.dataset.manualView)));
+    function selectSettingsView(name, updateHash = true) {
+      const selected = Object.hasOwn(settingsPanels, name) ? name : 'messages';
+      settingsMenuItems.forEach((item) => item.setAttribute('aria-selected', String(item.dataset.settingsView === selected)));
+      Object.entries(settingsPanels).forEach(([key, panel]) => { panel.hidden = key !== selected; });
+      if (updateHash) history.replaceState(null, '', '#settings-' + selected);
+    }
+    settingsMenuItems.forEach((item) => item.addEventListener('click', () => selectSettingsView(item.dataset.settingsView)));
+    if (currentPage === 'settings') {
+      const settingsHash = location.hash.startsWith('#settings-') ? location.hash.slice(10) : 'messages';
+      selectSettingsView(settingsHash, false);
+      window.addEventListener('hashchange', () => selectSettingsView(location.hash.slice(10), false));
+    }
     const todoList = document.querySelector('#todo-list');
     const todoStatus = document.querySelector('#todo-status');
     const todoActionStatus = document.querySelector('#todo-action-status');
@@ -2885,6 +3208,11 @@ function adminHtml(page: AdminPage): string {
     const refreshList = document.querySelector('#refresh-list');
     const tournamentSort = document.querySelector('#tournament-sort');
     const tournamentStatusFilter = document.querySelector('#tournament-status-filter');
+    const statusConfirmDialog = document.querySelector('#status-confirm-dialog');
+    const statusConfirmMessage = document.querySelector('#status-confirm-message');
+    const statusConfirmNote = document.querySelector('#status-confirm-note');
+    const statusConfirmNo = document.querySelector('#status-confirm-no');
+    const statusConfirmYes = document.querySelector('#status-confirm-yes');
     const editTournamentDialog = document.querySelector('#edit-tournament-dialog');
     const editTournamentForm = document.querySelector('#edit-tournament-form');
     const editTournamentGrade = document.querySelector('#edit-tournament-grade');
@@ -2908,6 +3236,23 @@ function adminHtml(page: AdminPage): string {
     const applicationFormUrlField = document.querySelector('#application-form-url-field');
     const applicationEmailField = document.querySelector('#application-email-field');
     const applicationRosterCustomName = document.querySelector('#application-roster-custom-name');
+    const messageSettingStatus = document.querySelector('#message-setting-status');
+    const messageTemplateList = document.querySelector('#message-template-list');
+    const messageTemplateEditor = document.querySelector('#message-template-editor');
+    const messageTemplateTitle = document.querySelector('#message-template-title');
+    const messageTemplateRecipient = document.querySelector('#message-template-recipient');
+    const messageTemplateCustomized = document.querySelector('#message-template-customized');
+    const messageTemplateContent = document.querySelector('#message-template-content');
+    const messageTemplatePreview = document.querySelector('#message-template-preview');
+    const messageTemplateResult = document.querySelector('#message-template-result');
+    const saveMessageTemplate = document.querySelector('#save-message-template');
+    const resetMessageTemplate = document.querySelector('#reset-message-template');
+    const deadlineSettingsForm = document.querySelector('#deadline-settings-form');
+    const deadlineSettingStatus = document.querySelector('#deadline-setting-status');
+    const deadlineSettingsCustomized = document.querySelector('#deadline-settings-customized');
+    const deadlineSettingsResult = document.querySelector('#deadline-settings-result');
+    const saveDeadlineSettings = document.querySelector('#save-deadline-settings');
+    const resetDeadlineSettings = document.querySelector('#reset-deadline-settings');
     const statusLabels = {
       draft: '下書き',
       active: '回答受付中',
@@ -2928,9 +3273,46 @@ function adminHtml(page: AdminPage): string {
       no: '不参加',
       pending: '未回答',
     };
+    function confirmTournamentStatusChange(message, sendsNotification) {
+      statusConfirmMessage.textContent = message;
+      statusConfirmNote.hidden = !sendsNotification;
+      return new Promise((resolve) => {
+        const finish = (confirmed) => {
+          statusConfirmYes.onclick = null;
+          statusConfirmNo.onclick = null;
+          statusConfirmDialog.oncancel = null;
+          if (statusConfirmDialog.open) statusConfirmDialog.close();
+          resolve(confirmed);
+        };
+        statusConfirmYes.onclick = () => finish(true);
+        statusConfirmNo.onclick = () => finish(false);
+        statusConfirmDialog.oncancel = (event) => {
+          event.preventDefault();
+          finish(false);
+        };
+        statusConfirmDialog.showModal();
+      });
+    }
     let loadedTournaments = [];
     let editingTournaments = [];
     let tournamentFocusHandled = false;
+    let loadedMessageTemplates = [];
+    let selectedMessageTemplateKey = '';
+    let deadlineAutomationSettings = {
+      internalDeadlineDaysBefore: 3,
+      internalDeadlineTimeMode: 'custom',
+      internalDeadlineTime: '23:59',
+      organizerPaymentDaysBefore: 2,
+      organizerPaymentTimeMode: 'custom',
+      organizerPaymentTime: '23:59',
+      paymentDeadlineDaysBefore: 1,
+      paymentDeadlineTimeMode: 'custom',
+      paymentDeadlineTime: '23:59',
+      responseReminderDaysBefore: 2,
+      responseReminderTimeMode: 'custom',
+      responseReminderTime: '00:00',
+      customized: false,
+    };
     const memberStatusLabels = {
       active: '有効',
       inactive: '無効',
@@ -2944,6 +3326,244 @@ function adminHtml(page: AdminPage): string {
       if (text !== undefined) node.textContent = text;
       return node;
     }
+
+    function selectedMessageTemplate() {
+      return loadedMessageTemplates.find((template) => template.key === selectedMessageTemplateKey);
+    }
+
+    function showMessageTemplate(key) {
+      const template = loadedMessageTemplates.find((item) => item.key === key);
+      if (!template) return;
+      selectedMessageTemplateKey = key;
+      messageTemplateList.querySelectorAll('.message-template-button').forEach((button) => {
+        button.setAttribute('aria-selected', String(button.dataset.messageKey === key));
+      });
+      messageTemplateTitle.textContent = template.label;
+      messageTemplateRecipient.textContent = '送信先：' + template.recipient;
+      messageTemplateCustomized.textContent = template.customized ? '変更済み' : '初期文面';
+      messageTemplateContent.value = template.content;
+      messageTemplatePreview.textContent = template.content;
+      messageTemplateResult.textContent = '';
+      resetMessageTemplate.disabled = !template.customized;
+      messageTemplateEditor.hidden = false;
+    }
+
+    function renderMessageTemplates() {
+      messageTemplateList.replaceChildren();
+      const nextKey = loadedMessageTemplates.some((template) => template.key === selectedMessageTemplateKey)
+        ? selectedMessageTemplateKey
+        : loadedMessageTemplates[0]?.key;
+      const groupedTemplates = new Map();
+      loadedMessageTemplates.forEach((template) => {
+        const templates = groupedTemplates.get(template.category) || [];
+        templates.push(template);
+        groupedTemplates.set(template.category, templates);
+      });
+      groupedTemplates.forEach((templates, category) => {
+        const group = element('details', 'message-template-category');
+        group.open = templates.some((template) => template.key === nextKey);
+        const summary = element('summary', 'message-template-group', category);
+        const buttons = element('div', 'message-template-category-buttons');
+        templates.forEach((template) => {
+          const button = element('button', 'message-template-button', template.label);
+          button.type = 'button';
+          button.dataset.messageKey = template.key;
+          button.setAttribute('aria-selected', 'false');
+          button.addEventListener('click', () => showMessageTemplate(template.key));
+          buttons.append(button);
+        });
+        group.append(summary, buttons);
+        messageTemplateList.append(group);
+      });
+      if (nextKey) showMessageTemplate(nextKey);
+    }
+
+    async function loadMessageTemplates() {
+      messageSettingStatus.className = 'status-message';
+      messageSettingStatus.textContent = '読み込み中…';
+      try {
+        const response = await fetch('/api/settings/messages');
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.error || 'メッセージ設定を取得できませんでした。');
+        loadedMessageTemplates = body.messages || [];
+        renderMessageTemplates();
+        messageSettingStatus.textContent = loadedMessageTemplates.length + '種類の本文を編集できます。';
+      } catch (error) {
+        messageSettingStatus.className = 'status-message error';
+        messageSettingStatus.textContent = error instanceof Error ? error.message : 'メッセージ設定を取得できませんでした。';
+      }
+    }
+
+    function replaceLoadedMessageTemplate(updated) {
+      loadedMessageTemplates = loadedMessageTemplates.map((template) => template.key === updated.key ? updated : template);
+      renderMessageTemplates();
+    }
+
+    messageTemplateContent?.addEventListener('input', () => {
+      messageTemplatePreview.textContent = messageTemplateContent.value || '本文を入力してください。';
+    });
+
+    messageTemplateEditor?.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const template = selectedMessageTemplate();
+      if (!template) return;
+      saveMessageTemplate.disabled = true;
+      resetMessageTemplate.disabled = true;
+      messageTemplateResult.className = 'status-message';
+      messageTemplateResult.textContent = '保存中…';
+      try {
+        const response = await fetch('/api/settings/messages/' + encodeURIComponent(template.key), {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ content: messageTemplateContent.value }),
+        });
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.error || '本文を保存できませんでした。');
+        replaceLoadedMessageTemplate(body.message);
+        messageTemplateResult.textContent = '保存しました。次回以降の通知に反映されます。';
+      } catch (error) {
+        messageTemplateResult.className = 'status-message error';
+        messageTemplateResult.textContent = error instanceof Error ? error.message : '本文を保存できませんでした。';
+      } finally {
+        saveMessageTemplate.disabled = false;
+        resetMessageTemplate.disabled = !selectedMessageTemplate()?.customized;
+      }
+    });
+
+    resetMessageTemplate?.addEventListener('click', async () => {
+      const template = selectedMessageTemplate();
+      if (!template || !confirm('この本文を初期文面に戻しますか？')) return;
+      saveMessageTemplate.disabled = true;
+      resetMessageTemplate.disabled = true;
+      messageTemplateResult.className = 'status-message';
+      messageTemplateResult.textContent = '初期文面へ戻しています…';
+      try {
+        const response = await fetch('/api/settings/messages/' + encodeURIComponent(template.key), { method: 'DELETE' });
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.error || '初期文面へ戻せませんでした。');
+        replaceLoadedMessageTemplate(body.message);
+        messageTemplateResult.textContent = '初期文面へ戻しました。';
+      } catch (error) {
+        messageTemplateResult.className = 'status-message error';
+        messageTemplateResult.textContent = error instanceof Error ? error.message : '初期文面へ戻せませんでした。';
+      } finally {
+        saveMessageTemplate.disabled = false;
+        resetMessageTemplate.disabled = !selectedMessageTemplate()?.customized;
+      }
+    });
+
+    function renderDeadlineAutomationSettings(settings) {
+      deadlineAutomationSettings = { ...deadlineAutomationSettings, ...settings };
+      if (deadlineSettingsForm) {
+        deadlineSettingsForm.elements.internalDeadlineDaysBefore.value = String(deadlineAutomationSettings.internalDeadlineDaysBefore);
+        deadlineSettingsForm.elements.internalDeadlineTimeMode.value = deadlineAutomationSettings.internalDeadlineTimeMode;
+        deadlineSettingsForm.elements.internalDeadlineTime.value = deadlineAutomationSettings.internalDeadlineTime;
+        deadlineSettingsForm.elements.organizerPaymentDaysBefore.value = String(deadlineAutomationSettings.organizerPaymentDaysBefore);
+        deadlineSettingsForm.elements.organizerPaymentTimeMode.value = deadlineAutomationSettings.organizerPaymentTimeMode;
+        deadlineSettingsForm.elements.organizerPaymentTime.value = deadlineAutomationSettings.organizerPaymentTime;
+        deadlineSettingsForm.elements.paymentDeadlineDaysBefore.value = String(deadlineAutomationSettings.paymentDeadlineDaysBefore);
+        deadlineSettingsForm.elements.paymentDeadlineTimeMode.value = deadlineAutomationSettings.paymentDeadlineTimeMode;
+        deadlineSettingsForm.elements.paymentDeadlineTime.value = deadlineAutomationSettings.paymentDeadlineTime;
+        deadlineSettingsForm.elements.responseReminderDaysBefore.value = String(deadlineAutomationSettings.responseReminderDaysBefore);
+        deadlineSettingsForm.elements.responseReminderTimeMode.value = deadlineAutomationSettings.responseReminderTimeMode;
+        deadlineSettingsForm.elements.responseReminderTime.value = deadlineAutomationSettings.responseReminderTime;
+        refreshDeadlineTimeInputs();
+      }
+      if (deadlineSettingsCustomized) deadlineSettingsCustomized.textContent = deadlineAutomationSettings.customized ? '変更済み' : '初期設定';
+      if (resetDeadlineSettings) resetDeadlineSettings.disabled = !deadlineAutomationSettings.customized;
+    }
+
+    function refreshDeadlineTimeInputs() {
+      deadlineSettingsForm?.querySelectorAll('[data-time-target]').forEach((modeSelect) => {
+        const timeInput = deadlineSettingsForm.elements[modeSelect.dataset.timeTarget];
+        timeInput.hidden = modeSelect.value !== 'custom';
+        timeInput.required = modeSelect.value === 'custom';
+      });
+    }
+
+    deadlineSettingsForm?.querySelectorAll('[data-time-target]').forEach((modeSelect) => {
+      modeSelect.addEventListener('change', refreshDeadlineTimeInputs);
+    });
+
+    async function loadDeadlineAutomationSettings() {
+      if (deadlineSettingStatus) {
+        deadlineSettingStatus.className = 'status-message';
+        deadlineSettingStatus.textContent = '読み込み中…';
+      }
+      try {
+        const response = await fetch('/api/settings/deadlines');
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.error || '期限設定を取得できませんでした。');
+        renderDeadlineAutomationSettings(body.settings || {});
+        if (deadlineSettingStatus) deadlineSettingStatus.textContent = '';
+        return deadlineAutomationSettings;
+      } catch (error) {
+        if (deadlineSettingStatus) {
+          deadlineSettingStatus.className = 'status-message error';
+          deadlineSettingStatus.textContent = error instanceof Error ? error.message : '期限設定を取得できませんでした。';
+        }
+        return deadlineAutomationSettings;
+      }
+    }
+
+    deadlineSettingsForm?.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      saveDeadlineSettings.disabled = true;
+      resetDeadlineSettings.disabled = true;
+      deadlineSettingsResult.className = 'status-message';
+      deadlineSettingsResult.textContent = '保存中…';
+      try {
+        const response = await fetch('/api/settings/deadlines', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            internalDeadlineDaysBefore: Number(deadlineSettingsForm.elements.internalDeadlineDaysBefore.value),
+            internalDeadlineTimeMode: deadlineSettingsForm.elements.internalDeadlineTimeMode.value,
+            internalDeadlineTime: deadlineSettingsForm.elements.internalDeadlineTime.value,
+            organizerPaymentDaysBefore: Number(deadlineSettingsForm.elements.organizerPaymentDaysBefore.value),
+            organizerPaymentTimeMode: deadlineSettingsForm.elements.organizerPaymentTimeMode.value,
+            organizerPaymentTime: deadlineSettingsForm.elements.organizerPaymentTime.value,
+            paymentDeadlineDaysBefore: Number(deadlineSettingsForm.elements.paymentDeadlineDaysBefore.value),
+            paymentDeadlineTimeMode: deadlineSettingsForm.elements.paymentDeadlineTimeMode.value,
+            paymentDeadlineTime: deadlineSettingsForm.elements.paymentDeadlineTime.value,
+            responseReminderDaysBefore: Number(deadlineSettingsForm.elements.responseReminderDaysBefore.value),
+            responseReminderTimeMode: deadlineSettingsForm.elements.responseReminderTimeMode.value,
+            responseReminderTime: deadlineSettingsForm.elements.responseReminderTime.value,
+          }),
+        });
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.error || '期限設定を保存できませんでした。');
+        renderDeadlineAutomationSettings(body.settings);
+        deadlineSettingsResult.textContent = '保存しました。次回以降の自動入力とリマインダーに反映されます。';
+      } catch (error) {
+        deadlineSettingsResult.className = 'status-message error';
+        deadlineSettingsResult.textContent = error instanceof Error ? error.message : '期限設定を保存できませんでした。';
+      } finally {
+        saveDeadlineSettings.disabled = false;
+        resetDeadlineSettings.disabled = !deadlineAutomationSettings.customized;
+      }
+    });
+
+    resetDeadlineSettings?.addEventListener('click', async () => {
+      if (!confirm('自動入力とリマインダーの期限を初期設定に戻しますか？')) return;
+      saveDeadlineSettings.disabled = true;
+      resetDeadlineSettings.disabled = true;
+      deadlineSettingsResult.className = 'status-message';
+      deadlineSettingsResult.textContent = '初期設定へ戻しています…';
+      try {
+        const response = await fetch('/api/settings/deadlines', { method: 'DELETE' });
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.error || '初期設定へ戻せませんでした。');
+        renderDeadlineAutomationSettings(body.settings);
+        deadlineSettingsResult.textContent = '初期設定へ戻しました。';
+      } catch (error) {
+        deadlineSettingsResult.className = 'status-message error';
+        deadlineSettingsResult.textContent = error instanceof Error ? error.message : '初期設定へ戻せませんでした。';
+      } finally {
+        saveDeadlineSettings.disabled = false;
+        resetDeadlineSettings.disabled = !deadlineAutomationSettings.customized;
+      }
+    });
 
     function acceptsDroppedFile(input, file) {
       const rules = (input.accept || '').split(',').map((rule) => rule.trim().toLowerCase()).filter(Boolean);
@@ -3165,23 +3785,35 @@ function adminHtml(page: AdminPage): string {
       return get('year') + '-' + get('month') + '-' + get('day') + 'T' + get('hour') + ':' + get('minute');
     }
 
-    function defaultDeadlineInput(value, daysBefore) {
+    function defaultDeadlineInput(value, daysBefore, timeMode = 'custom', time = '23:59') {
       const hasExplicitZone = /(?:Z|[+-]\d\d:\d\d)$/.test(value);
-      const sourceDate = hasExplicitZone
-        ? new Date(new Date(value).getTime() + 9 * 60 * 60 * 1000).toISOString().slice(0, 10)
-        : value.slice(0, 10);
+      const sourceDateTime = hasExplicitZone
+        ? new Date(new Date(value).getTime() + 9 * 60 * 60 * 1000).toISOString().slice(0, 16)
+        : value.slice(0, 16);
+      const sourceDate = sourceDateTime.slice(0, 10);
+      const selectedTime = timeMode === 'same' ? sourceDateTime.slice(11, 16) : time;
       const parts = sourceDate.split('-').map(Number);
       const candidate = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2] - daysBefore));
       const pad = (value) => String(value).padStart(2, '0');
-      return candidate.getUTCFullYear() + '-' + pad(candidate.getUTCMonth() + 1) + '-' + pad(candidate.getUTCDate()) + 'T23:59';
+      return candidate.getUTCFullYear() + '-' + pad(candidate.getUTCMonth() + 1) + '-' + pad(candidate.getUTCDate()) + 'T' + selectedTime;
     }
 
     function defaultOrganizerPaymentDeadlineInput(trueDeadline) {
-      return defaultDeadlineInput(trueDeadline, 2);
+      return defaultDeadlineInput(
+        trueDeadline,
+        deadlineAutomationSettings.organizerPaymentDaysBefore,
+        deadlineAutomationSettings.organizerPaymentTimeMode,
+        deadlineAutomationSettings.organizerPaymentTime,
+      );
     }
 
     function defaultPaymentDeadlineInput(organizerDeadline) {
-      return defaultDeadlineInput(organizerDeadline, 1);
+      return defaultDeadlineInput(
+        organizerDeadline,
+        deadlineAutomationSettings.paymentDeadlineDaysBefore,
+        deadlineAutomationSettings.paymentDeadlineTimeMode,
+        deadlineAutomationSettings.paymentDeadlineTime,
+      );
     }
 
     const gradeOrder = new Map(['A', 'B', 'C', 'D', 'E', 'F', 'beginner'].map((grade, index) => [grade, index]));
@@ -3431,10 +4063,7 @@ function adminHtml(page: AdminPage): string {
 
       const confirmation = tournaments[0].confirmation_roster;
       const confirmationBox = element('section', 'stage-box');
-      confirmationBox.append(
-        element('h5', '', '申込確認名簿'),
-        element('p', 'archive-note', '申込者へ名簿をDMします。確認ボタンは設けず、誤りがある場合のみ大会担当者へDMしてもらいます。PDF・Word・Excel、20MBまで登録でき、Word・Excelは検索可能な閲覧用PDFへ自動変換します。抽選なしで全員を受け入れる大会では、この項目を飛ばし、2番で確定名簿を登録して全員を「出場確定」にしてください。'),
-      );
+      confirmationBox.append(element('h5', '', '申込確認名簿'));
       const confirmationFile = document.createElement('input');
       confirmationFile.type = 'file';
       confirmationFile.accept = 'application/pdf,.pdf,application/msword,.doc,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.docx,application/vnd.ms-excel,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,.xlsx';
@@ -3561,10 +4190,13 @@ function adminHtml(page: AdminPage): string {
 
         const refreshEntryState = () => {
           const waitlisted = select.value === 'not_selected';
+          const showsPayment = tracksPayment && select.value === 'selected';
           waitlistField.hidden = !waitlisted;
           waitlistInput.disabled = !waitlisted;
           waitlistInput.required = waitlisted;
-          paymentField.hidden = !tracksPayment || select.value !== 'selected';
+          paymentField.hidden = !showsPayment;
+          row.classList.toggle('has-waitlist', waitlisted);
+          row.classList.toggle('has-payment', showsPayment);
         };
         select.addEventListener('change', refreshEntryState);
         refreshEntryState();
@@ -3592,13 +4224,10 @@ function adminHtml(page: AdminPage): string {
       summary.textContent = '2. 抽選結果・確定名簿・参加費・当日案内';
       const body = element('div', 'archive-management-body');
       section.append(summary, body);
-      body.append(
-        element('p', 'archive-note', '抽選結果と確定名簿は大会お知らせチャンネルへ送信し、参加費と当日案内は出場確定者だけへDMします。キャンセル待ちの選手にはDMしません。'),
-      );
       const documents = tournaments[0].archive_documents || [];
       const currentRosterDocument = documents.find((item) => item.document_type === 'roster');
       const rosterBox = element('div', 'archive-document');
-      rosterBox.append(element('strong', '', '確定名簿（PDF・Excel／Excelは検索可能なPDFへ自動変換）'));
+      rosterBox.append(element('strong', '', '確定名簿'));
       if (currentRosterDocument) {
         const link = element('a', '', currentRosterDocument.file_name || '登録済み確定名簿を開く');
         link.href = currentRosterDocument.document_url;
@@ -3621,10 +4250,7 @@ function adminHtml(page: AdminPage): string {
       const lotteryControls = lotteryManagement?.entryControls || [];
       const guidance = tournaments[0].participant_guidance;
       const guidanceBox = element('section', 'guidance-management');
-      guidanceBox.append(
-        element('h5', '', '参加費・当日案内'),
-        element('p', 'archive-note', '参加者には級別参加費と支払い方法だけを案内します。主催者の振込先情報は大会担当者だけが参照できます。'),
-      );
+      guidanceBox.append(element('h5', '', '参加費・当日案内'));
 
       const feeGrades = [...new Set(tournaments.flatMap((tournament) => tournament.responses
         .filter((person) => person.response === 'yes')
@@ -3633,11 +4259,13 @@ function adminHtml(page: AdminPage): string {
       const existingFees = new Map((tournaments[0].participation_fees || [])
         .map((fee) => [fee.grade, fee.amount_yen]));
       const feeGrid = element('div', 'fee-grid');
-      feeGrid.append(element('h6', '', '級別参加費（参加者DMに表示）'));
+      feeGrid.append(element('h6', '', '級別参加費'));
       const feeInputs = new Map();
       feeGrades.forEach((grade) => {
-        const label = element('label', '', grade === 'beginner' ? '初心者級' : grade + '級');
+        const row = element('div', 'fee-row');
+        const gradeLabel = element('span', 'fee-grade', grade === 'beginner' ? '初心者級' : grade + '級');
         const select = document.createElement('select');
+        select.setAttribute('aria-label', (grade === 'beginner' ? '初心者級' : grade + '級') + 'の参加費');
         const placeholder = document.createElement('option');
         placeholder.value = '';
         placeholder.textContent = '選択してください';
@@ -3649,16 +4277,16 @@ function adminHtml(page: AdminPage): string {
           option.selected = existingFees.get(grade) === amount;
           select.append(option);
         });
-        label.append(select);
+        row.append(gradeLabel, select);
         feeInputs.set(grade, select);
-        feeGrid.append(label);
+        feeGrid.append(row);
       });
 
-      const paymentMethodLabel = element('label', '', '参加費の支払い方法');
+      const paymentMethodLabel = element('label', 'payment-method-label', '参加費の支払い方法');
       const paymentMethod = document.createElement('select');
       [
-        ['advance_manager', '事前集金（参加者 → 大会担当者 → 主催者）'],
-        ['onsite_cash', '当日現金（参加者 → 主催者）'],
+        ['advance_manager', '事前集金'],
+        ['onsite_cash', '当日支払'],
       ].forEach(([value, label]) => {
         const option = document.createElement('option');
         option.value = value;
@@ -3670,14 +4298,26 @@ function adminHtml(page: AdminPage): string {
 
       const guidanceText = document.createElement('textarea');
       guidanceText.maxLength = 3500;
-      guidanceText.placeholder = '参加者への案内本文（任意）';
+      guidanceText.placeholder = '参加者への当日案内を入力';
       guidanceText.value = guidance?.body_text || '';
 
+      const guidanceInputTypeLabel = element('label', 'guidance-input-selector', '当日案内の登録方法');
+      const guidanceInputType = document.createElement('select');
+      const currentGuidanceInputType = guidance?.body_text ? 'text' : guidance?.document_url ? 'file' : 'text';
+      [
+        ['text', 'テキストで登録'],
+        ['file', 'ファイルで登録（PDF・Word）'],
+      ].forEach(([value, label]) => {
+        const option = document.createElement('option');
+        option.value = value;
+        option.textContent = label;
+        option.selected = value === currentGuidanceInputType;
+        guidanceInputType.append(option);
+      });
+      guidanceInputTypeLabel.append(guidanceInputType);
+
       const organizerBox = element('div', 'organizer-payment-box');
-      organizerBox.append(
-        element('h6', '', '主催者への振込情報（大会担当者のみ）'),
-        element('p', 'organizer-payment-note', '参加者DMには表示されません。主催者への一括振込に必要な口座・名義などを保存します。'),
-      );
+      organizerBox.append(element('h6', '', '主催者への振込情報（大会担当者のみ）'));
       const organizerSourceLabel = element('label', 'organizer-payment-selector', '振込情報の登録方法');
       const organizerSource = document.createElement('select');
       [
@@ -3724,7 +4364,7 @@ function adminHtml(page: AdminPage): string {
         ? dateTimeInputValue(guidance.organizer_payment_deadline)
         : defaultOrganizerPaymentDeadlineInput(tournaments[0].true_deadline);
       organizerPaymentDeadline.value = organizerExistingValue.slice(0, 10);
-      organizerPaymentTime.value = organizerExistingValue.slice(11, 16) || '23:59';
+      organizerPaymentTime.value = organizerExistingValue.slice(11, 16) || deadlineAutomationSettings.organizerPaymentTime;
       const organizerDeadlineControl = element('div', 'deadline-control');
       organizerDeadlineControl.append(organizerPaymentDeadline, organizerPaymentTime);
       organizerPaymentDeadlineLabel.append(organizerDeadlineControl);
@@ -3738,18 +4378,20 @@ function adminHtml(page: AdminPage): string {
         ? dateTimeInputValue(guidance.payment_deadline)
         : defaultPaymentDeadlineInput(organizerExistingValue);
       paymentDeadline.value = paymentExistingValue.slice(0, 10);
-      paymentTime.value = paymentExistingValue.slice(11, 16) || '23:59';
+      paymentTime.value = paymentExistingValue.slice(11, 16) || deadlineAutomationSettings.paymentDeadlineTime;
       const paymentDeadlineControl = element('div', 'deadline-control');
       paymentDeadlineControl.append(paymentDeadline, paymentTime);
       paymentDeadlineLabel.append(paymentDeadlineControl);
-      organizerPaymentDeadline.addEventListener('change', () => {
+      const refreshPaymentDeadlineFromOrganizer = () => {
         if (!organizerPaymentDeadline.value) return;
         const defaultValue = defaultPaymentDeadlineInput(
           organizerPaymentDeadline.value + 'T' + organizerPaymentTime.value + ':00+09:00',
         );
         paymentDeadline.value = defaultValue.slice(0, 10);
         paymentTime.value = defaultValue.slice(11, 16);
-      });
+      };
+      organizerPaymentDeadline.addEventListener('change', refreshPaymentDeadlineFromOrganizer);
+      organizerPaymentTime.addEventListener('change', refreshPaymentDeadlineFromOrganizer);
       const organizerFileBox = element('div', 'guidance-file-box');
       organizerFileBox.append(organizerFileLabel, organizerCurrent);
       const organizerGuidanceNote = element('p', 'organizer-payment-note', '上部で登録した当日案内本文または案内ファイルを、主催者への振込情報として参照します。追加の入力は不要です。');
@@ -3840,8 +4482,14 @@ function adminHtml(page: AdminPage): string {
         : '案内を保存すると送信できます。');
       saveGuidance.addEventListener('click', async () => {
         const selected = guidanceFile.files?.[0];
-        if (!guidanceText.value.trim() && !selected && !guidance?.document_url) {
-          guidanceMessage.textContent = '本文または案内ファイルを入力してください。';
+        if (guidanceInputType.value === 'text' && !guidanceText.value.trim()) {
+          guidanceMessage.textContent = '当日案内のテキストを入力してください。';
+          guidanceText.focus();
+          return;
+        }
+        if (guidanceInputType.value === 'file' && !selected && !guidance?.document_url) {
+          guidanceMessage.textContent = '当日案内のPDFまたはWordを選択してください。';
+          guidanceFile.focus();
           return;
         }
         const feesByGrade = {};
@@ -3871,6 +4519,7 @@ function adminHtml(page: AdminPage): string {
         guidanceMessage.textContent = '保存中…';
         const form = new FormData();
         form.append('bodyText', guidanceText.value);
+        form.append('guidanceInputType', guidanceInputType.value);
         form.append('feesByGrade', JSON.stringify(feesByGrade));
         form.append('paymentCollectionMethod', paymentMethod.value);
         form.append('organizerPaymentSource', organizerSource.value);
@@ -3880,7 +4529,7 @@ function adminHtml(page: AdminPage): string {
           form.append('paymentDeadline', localJstToIso(paymentDeadline.value + 'T' + paymentTime.value));
         }
         form.append('tournamentIds', JSON.stringify(tournaments.map((item) => item.tournament_id)));
-        if (selected) form.append('file', selected);
+        if (guidanceInputType.value === 'file' && selected) form.append('file', selected);
         if (organizerFile.files?.[0]) form.append('organizerPaymentFile', organizerFile.files[0]);
         try {
           const response = await fetch('/api/participant-guidance', { method: 'POST', body: form });
@@ -3992,19 +4641,24 @@ function adminHtml(page: AdminPage): string {
       guidanceActions.append(saveGuidance, sendGuidance, guidanceMessage);
 
       const guidanceSection = element('section', 'guidance-subsection');
-      guidanceSection.append(element('h6', '', '当日案内'));
-      const guidanceGuideGrid = element('div', 'guidance-guide-grid');
       const guidanceTextLabel = element('label', '', '当日案内本文');
       guidanceTextLabel.append(guidanceText);
       const guidanceFileBox = element('div', 'guidance-file-box');
       const guidanceFileLabel = element('label', '', '当日案内ファイル（PDF・Word）');
       guidanceFileLabel.append(guidanceFile);
       guidanceFileBox.append(guidanceFileLabel, currentGuidance);
-      guidanceGuideGrid.append(guidanceTextLabel, guidanceFileBox);
-      guidanceSection.append(guidanceGuideGrid);
+      const guidanceInputBranch = element('div', 'guidance-input-branch');
+      guidanceInputBranch.append(guidanceTextLabel, guidanceFileBox);
+      const refreshGuidanceInput = () => {
+        const usesText = guidanceInputType.value === 'text';
+        guidanceTextLabel.hidden = !usesText;
+        guidanceFileBox.hidden = usesText;
+      };
+      guidanceInputType.addEventListener('change', refreshGuidanceInput);
+      refreshGuidanceInput();
+      guidanceSection.append(guidanceInputTypeLabel, guidanceInputBranch);
 
       const paymentSection = element('section', 'guidance-subsection');
-      paymentSection.append(element('h6', '', '参加費・支払い方法'));
       const paymentSetupGrid = element('div', 'payment-setup-grid');
       paymentSetupGrid.append(paymentMethodLabel, feeGrid);
       paymentSection.append(paymentSetupGrid, onsiteNote);
@@ -4042,16 +4696,10 @@ function adminHtml(page: AdminPage): string {
         resultFile,
         element('span', 'entry-result', '選択したファイルは公開時にまとめてアップロードします。'),
       );
-      body.append(
-        element('p', 'archive-note', '結果ファイルと全出場者の個人成績が揃うと、メンバーポータルの「過去の大会結果」へ公開できます。'),
-        resultDocumentUpload,
-      );
+      body.append(resultDocumentUpload);
 
       const resultBox = element('section', 'stage-box result-stage');
-      resultBox.append(
-        element('h5', '', '選手ごとの個人成績'),
-        element('p', 'archive-note', '大会終了後に、出場者ごとの成績を登録します。'),
-      );
+      resultBox.append(element('h5', '', '個人成績の登録'));
       const resultEntries = tournaments.flatMap((tournament) => tournament.responses
         .filter((person) => person.response === 'yes' && (person.entry_status === 'selected' || person.entry_status === 'submitted'))
         .map((person) => ({ ...person, tournament })));
@@ -4208,8 +4856,14 @@ function adminHtml(page: AdminPage): string {
         .join(',');
       const heading = element('div', 'card-heading');
       const statuses = [...new Set(tournaments.map(tournamentDisplayStatus))];
+      const headingTitle = element('div', 'card-title-actions');
+      const editButton = element('button', 'card-edit-button', '編集');
+      editButton.type = 'button';
+      editButton.setAttribute('aria-label', tournament.title + 'の大会情報を編集');
+      editButton.addEventListener('click', () => openTournamentEditor(tournaments));
+      headingTitle.append(element('h3', '', tournament.title), editButton);
       heading.append(
-        element('h3', '', tournament.title),
+        headingTitle,
         element('span', 'badge ' + (statuses.length === 1 ? statuses[0] : 'draft'), statuses.length === 1 ? (statusLabels[statuses[0]] || statuses[0]) : '複数ステータス'),
       );
       card.append(heading);
@@ -4232,42 +4886,42 @@ function adminHtml(page: AdminPage): string {
 
       if (tournament.application_method) {
         const applicationLabels = {
-          excel_email: 'Excel名簿をメール送信',
-          excel_form: 'Excel名簿をフォーム送信',
-          direct_form: 'フォームへ直接入力',
+          excel_email: '名簿ファイルをメール提出',
+          excel_form: '名簿ファイルをフォーム提出',
+          direct_form: 'フォーム提出',
         };
         const applicationSummary = element('div', 'application-summary');
-        applicationSummary.append(
-          element('strong', '', '申込方法'),
-          element('span', '', applicationLabels[tournament.application_method] || tournament.application_method),
-        );
+        const applicationLabel = applicationLabels[tournament.application_method] || tournament.application_method;
+        applicationSummary.append(element('strong', '', '申込方法（' + applicationLabel + '）'));
         if (tournament.application_roster_url) {
-          const rosterLink = element('a', '', tournament.application_roster_file_name || '申込名簿を開く');
+          const rosterLink = element('a', '', '申込名簿ファイル');
           rosterLink.href = tournament.application_roster_url;
           rosterLink.target = '_blank';
           rosterLink.rel = 'noopener noreferrer';
+          if (tournament.application_roster_file_name) {
+            rosterLink.title = tournament.application_roster_file_name;
+          }
           applicationSummary.append(rosterLink);
         }
         if (tournament.application_form_url) {
-          const formLink = element('a', '', '申込フォームを開く');
+          const formLink = element('a', '', '申込フォーム');
           formLink.href = tournament.application_form_url;
           formLink.target = '_blank';
           formLink.rel = 'noopener noreferrer';
           applicationSummary.append(formLink);
         }
         if (tournament.application_email) {
-          const emailLink = element('a', '', tournament.application_email);
+          const emailLink = element('a', '', '申込先メールアドレス');
           emailLink.href = 'mailto:' + tournament.application_email;
+          emailLink.title = tournament.application_email;
           applicationSummary.append(emailLink);
         }
         card.append(applicationSummary);
       }
 
       const cardActions = element('div', 'card-actions');
-      const editButton = element('button', 'secondary', '大会情報を編集');
-      editButton.type = 'button';
-      editButton.addEventListener('click', () => openTournamentEditor(tournaments));
       const rawStatuses = [...new Set(tournaments.map((item) => item.status))];
+      const originalStatus = rawStatuses.length === 1 ? rawStatuses[0] : '';
       const applicationBlocked = tournaments.some((item) => item.status === 'canceled' || tournamentDisplayStatus(item) === 'no_participants');
       const statusSelect = document.createElement('select');
       statusSelect.className = 'card-status-select';
@@ -4287,26 +4941,28 @@ function adminHtml(page: AdminPage): string {
         statusSelect.append(option);
       });
       if (applicationBlocked) statusSelect.title = '申込完了へ戻す場合は、一度ほかのステータスへ変更してください。';
-      const statusButton = element('button', 'secondary', 'ステータスを変更');
-      statusButton.type = 'button';
+      const statusControl = element('label', 'card-status-control');
+      statusControl.append(element('span', 'card-status-label', '大会ステータス'), statusSelect);
       const statusMessage = element('span', 'status-message', '');
-      statusButton.addEventListener('click', async () => {
+      statusSelect.addEventListener('change', async () => {
         if (!statusSelect.value) {
-          statusMessage.textContent = '変更先のステータスを選択してください。';
+          statusSelect.value = originalStatus;
           return;
         }
-        if (rawStatuses.length === 1 && rawStatuses[0] === statusSelect.value) {
-          statusMessage.textContent = '変更はありません。';
-          return;
-        }
+        if (originalStatus === statusSelect.value) return;
+        const nextStatus = statusSelect.value;
         const grades = tournaments.map(tournamentGradeLabel).join('・');
-        const nextLabel = statusLabels[statusSelect.value] || statusSelect.value;
-        const confirmMessage = statusSelect.value === 'applied'
-          ? tournament.title + '（' + grades + '）を「申込完了」へ変更し、告知チャンネルへ通知しますか？'
-          : tournament.title + '（' + grades + '）を「' + nextLabel + '」へ変更しますか？';
-        if (!confirm(confirmMessage)) return;
-        statusButton.disabled = true;
+        const nextLabel = statusLabels[nextStatus] || nextStatus;
+        const sendsNotification = nextStatus === 'applied';
+        const confirmMessage = tournament.title + '（' + grades + '）\n現在の状態から「' + nextLabel + '」へ変更します。よろしいですか？';
         statusSelect.disabled = true;
+        const confirmed = await confirmTournamentStatusChange(confirmMessage, sendsNotification);
+        if (!confirmed) {
+          statusSelect.value = originalStatus;
+          statusSelect.disabled = false;
+          statusMessage.textContent = '';
+          return;
+        }
         statusMessage.className = 'status-message';
         statusMessage.textContent = '変更中…';
         try {
@@ -4315,7 +4971,7 @@ function adminHtml(page: AdminPage): string {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               tournamentIds: tournaments.map((item) => item.tournament_id),
-              status: statusSelect.value,
+              status: nextStatus,
             }),
           });
           const body = await response.json();
@@ -4324,11 +4980,11 @@ function adminHtml(page: AdminPage): string {
         } catch (error) {
           statusMessage.className = 'status-message error';
           statusMessage.textContent = error instanceof Error ? error.message : 'ステータスを変更できませんでした。';
-          statusButton.disabled = false;
+          statusSelect.value = originalStatus;
           statusSelect.disabled = false;
         }
       });
-      cardActions.append(editButton, statusSelect, statusButton, statusMessage);
+      cardActions.append(statusControl, statusMessage);
       card.append(cardActions);
 
       const responseSections = element('div', 'response-sections');
@@ -4816,15 +5472,20 @@ function adminHtml(page: AdminPage): string {
     function setInternalDeadlineFromOrganizer() {
       const organizerDeadline = form.elements.trueDeadline.value;
       if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(organizerDeadline)) return;
-      const threeDaysEarlier = new Date(organizerDeadline + ':00+09:00');
-      threeDaysEarlier.setTime(threeDaysEarlier.getTime() - 3 * 86400000);
-      form.elements.internalDeadline.value = dateValue(threeDaysEarlier) + organizerDeadline.slice(10);
+      form.elements.internalDeadline.value = defaultDeadlineInput(
+        organizerDeadline,
+        deadlineAutomationSettings.internalDeadlineDaysBefore,
+        deadlineAutomationSettings.internalDeadlineTimeMode,
+        deadlineAutomationSettings.internalDeadlineTime,
+      );
     }
 
-    const now = Date.now();
-    form.elements.eventDate.value = dateValue(new Date(now + 14 * 86400000));
-    form.elements.trueDeadline.value = dateValue(new Date(now + 10 * 86400000)) + 'T23:59';
-    setInternalDeadlineFromOrganizer();
+    function initializeTournamentFormDefaults() {
+      const now = Date.now();
+      form.elements.eventDate.value = dateValue(new Date(now + 14 * 86400000));
+      form.elements.trueDeadline.value = dateValue(new Date(now + 10 * 86400000)) + 'T23:59';
+      setInternalDeadlineFromOrganizer();
+    }
     form.elements.trueDeadline.addEventListener('input', setInternalDeadlineFromOrganizer);
     function refreshApplicationMethodFields() {
       const method = form.elements.applicationMethod.value;
@@ -5039,11 +5700,18 @@ function adminHtml(page: AdminPage): string {
       refreshList.addEventListener('click', loadTournaments);
       tournamentSort.addEventListener('change', renderTournamentList);
       tournamentStatusFilter.addEventListener('change', renderTournamentList);
-      loadTournaments();
+      loadDeadlineAutomationSettings().then(loadTournaments);
     }
     if (currentPage === 'members') {
       refreshMembers.addEventListener('click', loadMembers);
       loadMembers();
+    }
+    if (currentPage === 'settings') {
+      loadMessageTemplates();
+      loadDeadlineAutomationSettings();
+    }
+    if (currentPage === 'register') {
+      loadDeadlineAutomationSettings().then(initializeTournamentFormDefaults);
     }
   </script>
 </body>
@@ -5070,6 +5738,12 @@ export async function handleAdminRequest(
   memberAppearanceLister: MemberAppearanceLister = listAdminMemberAppearances,
 ): Promise<Response> {
   const url = new URL(request.url);
+  if (request.method === "GET" && url.pathname === "/") {
+    return new Response(null, {
+      status: 302,
+      headers: { ...securityHeaders, Location: "/register" },
+    });
+  }
   const authResponse = await handleAdminAuthRequest(request, env);
   if (authResponse) return authResponse;
 
@@ -5110,18 +5784,12 @@ export async function handleAdminRequest(
   }
   const actor = principal.auditIdentity;
 
-  if (request.method === "GET" && url.pathname === "/") {
-    return new Response(null, {
-      status: 302,
-      headers: { ...securityHeaders, Location: "/register" },
-    });
-  }
-
   const page = {
     "/todo": "todo",
     "/register": "register",
     "/tournaments": "tournaments",
     "/members": "members",
+    "/settings": "settings",
   }[url.pathname] as AdminPage | undefined;
   if (request.method === "GET" && page) {
     return new Response(adminHtml(page), {
@@ -5135,6 +5803,83 @@ export async function handleAdminRequest(
       displayName: principal.displayName,
       provider: principal.provider,
     });
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/settings/messages") {
+    try {
+      return json({ messages: await listBotMessageSettings(env.DB) });
+    } catch (error: unknown) {
+      console.error("Discord Botメッセージ設定の取得エラー", error);
+      return json({ error: "メッセージ設定を取得できませんでした。" }, 500);
+    }
+  }
+
+  const messageSettingPath = url.pathname.match(
+    /^\/api\/settings\/messages\/([a-z_]+)$/,
+  );
+  if ((request.method === "PATCH" || request.method === "DELETE") && messageSettingPath) {
+    if (!isSameOrigin(request)) {
+      return json({ error: "不正な送信元です。" }, 403);
+    }
+    try {
+      if (request.method === "DELETE") {
+        return json({ message: await resetBotMessageSetting(env.DB, messageSettingPath[1]) });
+      }
+      if (!request.headers.get("Content-Type")?.toLowerCase().startsWith("application/json")) {
+        return json({ error: "JSON形式で送信してください。" }, 415);
+      }
+      const body = (await request.json()) as { content?: unknown };
+      return json({
+        message: await saveBotMessageSetting(
+          env.DB,
+          messageSettingPath[1],
+          body.content,
+          actor,
+        ),
+      });
+    } catch (error: unknown) {
+      if (error instanceof BotMessageSettingError) {
+        return json({ error: error.message }, error.statusCode);
+      }
+      console.error("Discord Botメッセージ設定の保存エラー", error);
+      return json({ error: "メッセージ設定を保存できませんでした。" }, 500);
+    }
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/settings/deadlines") {
+    try {
+      return json({ settings: await getDeadlineAutomationSettings(env.DB) });
+    } catch (error: unknown) {
+      console.error("期限自動入力設定の取得エラー", error);
+      return json({ error: "期限設定を取得できませんでした。" }, 500);
+    }
+  }
+
+  if (
+    (request.method === "PATCH" || request.method === "DELETE") &&
+    url.pathname === "/api/settings/deadlines"
+  ) {
+    if (!isSameOrigin(request)) {
+      return json({ error: "不正な送信元です。" }, 403);
+    }
+    try {
+      if (request.method === "DELETE") {
+        return json({ settings: await resetDeadlineAutomationSettings(env.DB) });
+      }
+      if (!request.headers.get("Content-Type")?.toLowerCase().startsWith("application/json")) {
+        return json({ error: "JSON形式で送信してください。" }, 415);
+      }
+      const body = (await request.json()) as Record<string, unknown>;
+      return json({
+        settings: await saveDeadlineAutomationSettings(env.DB, body, actor),
+      });
+    } catch (error: unknown) {
+      if (error instanceof DeadlineAutomationSettingError) {
+        return json({ error: error.message }, error.statusCode);
+      }
+      console.error("期限自動入力設定の保存エラー", error);
+      return json({ error: "期限設定を保存できませんでした。" }, 500);
+    }
   }
 
   if (request.method === "POST" && url.pathname === "/api/documents") {
