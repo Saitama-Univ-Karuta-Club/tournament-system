@@ -1,11 +1,27 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   buildParticipantGuidanceMessage,
+  buildWaitlistResultMessage,
   enqueueParticipantGuidance,
+  enqueueWaitlistPromotionGuidance,
   recordParticipantPaymentResponse,
 } from "../src/participant-guidance";
 
 describe("participant guidance", () => {
+  it("キャンセル待ちの選手に待ち番号と確定名簿を案内する", () => {
+    const message = buildWaitlistResultMessage(
+      "埼玉大会",
+      3,
+      "https://example.com/roster.pdf",
+      "確定名簿.pdf",
+    );
+
+    expect(message.content).toContain("キャンセル待ちとなりました");
+    expect(JSON.stringify(message)).toContain("キャンセル待ち 3番");
+    expect(JSON.stringify(message)).toContain("https://example.com/roster.pdf");
+    expect(message.components).toBeUndefined();
+  });
+
   it("builds a confirmed-player DM from text and an attachment", () => {
     const message = buildParticipantGuidanceMessage({
       tournamentId: "T-11111111-1111-4111-8111-111111111111",
@@ -49,6 +65,97 @@ describe("participant guidance", () => {
     expect(message.components).toBeUndefined();
   });
 
+  it("builds a promoted-player DM with payment buttons before the deadline", () => {
+    const message = buildParticipantGuidanceMessage({
+      tournamentId: "T-11111111-1111-4111-8111-111111111111",
+      tournamentTitle: "埼玉大会",
+      bodyText: "当日の案内です。",
+      documentUrl: null,
+      fileName: null,
+      paymentCollectionMethod: "advance_manager",
+      participationFeeYen: 2000,
+      paymentDeadline: "2026-10-20T14:59:00.000Z",
+      paymentStatus: "unpaid",
+    }, { waitlistPromotion: true });
+
+    expect(message.content).toContain("キャンセル待ちから繰り上がり、出場が確定しました。");
+    expect(message.content).toContain("「支払い完了」ボタンを押してください。");
+    expect(message.components?.[0]?.components.map((button) => button.custom_id)).toEqual([
+      "payment-promotion:T-11111111-1111-4111-8111-111111111111:paid",
+      "payment-promotion:T-11111111-1111-4111-8111-111111111111:unpaid",
+    ]);
+  });
+
+  it("replaces payment buttons with a manager consultation note after the deadline", () => {
+    const message = buildParticipantGuidanceMessage({
+      tournamentId: "T-11111111-1111-4111-8111-111111111111",
+      tournamentTitle: "埼玉大会",
+      bodyText: "当日の案内です。",
+      documentUrl: null,
+      fileName: null,
+      paymentCollectionMethod: "advance_manager",
+      participationFeeYen: 2000,
+      paymentDeadline: "2026-10-20T14:59:00.000Z",
+      paymentStatus: "unpaid",
+    }, { waitlistPromotion: true, afterPaymentDeadline: true });
+
+    expect(message.content).toContain("キャンセル待ちから繰り上がり、出場が確定しました。");
+    expect(message.content).toContain("サークル内支払期限を過ぎているため、支払いに関しては大会担当者に相談してください。");
+    expect(message.components).toBeUndefined();
+  });
+
+  it.each([
+    {
+      name: "before the payment deadline",
+      promotedAt: "2026-10-20T14:58:00.000Z",
+      expectedKeyPrefix: "waitlist_promotion:",
+      afterPaymentDeadline: false,
+    },
+    {
+      name: "after the payment deadline",
+      promotedAt: "2026-10-20T15:00:00.000Z",
+      expectedKeyPrefix: "waitlist_promotion_late:",
+      afterPaymentDeadline: true,
+    },
+  ])("queues a $name waitlist-promotion DM", async ({
+    promotedAt,
+    expectedKeyPrefix,
+    afterPaymentDeadline,
+  }) => {
+    const run = vi.fn().mockResolvedValue({ meta: { changes: 1 } });
+    const prepare = vi.fn((sql: string) => ({
+      bind: vi.fn((...values: unknown[]) => ({
+        first: vi.fn().mockResolvedValue({
+          group_key: "TG-11111111-1111-4111-8111-111111111111",
+          revision: 3,
+          payment_collection_method: "advance_manager",
+          payment_deadline: "2026-10-20T14:59:00.000Z",
+          discord_user_id: "discord-user-1",
+          member_status: "active",
+          dm_enabled: 1,
+        }),
+        run,
+        sql,
+        values,
+      })),
+    }));
+
+    const result = await enqueueWaitlistPromotionGuidance(
+      { DB: { prepare } as unknown as D1Database },
+      "T-11111111-1111-4111-8111-111111111111",
+      "M-11111111-1111-4111-8111-111111111111",
+      new Date(promotedAt),
+    );
+
+    expect(result).toEqual({ queued: 1, unavailable: 0, afterPaymentDeadline });
+    const insertCall = prepare.mock.calls.find(([sql]) =>
+      String(sql).includes("INSERT INTO participant_guidance_deliveries")
+    );
+    expect(insertCall).toBeTruthy();
+    const insertBinding = prepare.mock.results[1].value.bind.mock.calls[0];
+    expect(String(insertBinding[0])).toMatch(new RegExp(`^${expectedKeyPrefix}`));
+  });
+
   it("queues DMs only for confirmed members who can receive them", async () => {
     const prepare = vi.fn((sql: string) => ({
       bind: vi.fn(() => ({
@@ -72,6 +179,10 @@ describe("participant guidance", () => {
 
     expect(result).toEqual({ queued: 1, unavailable: 1, revision: 2 });
     expect(batch).toHaveBeenCalledOnce();
+    expect(prepare.mock.calls.some(([sql]) =>
+      String(sql).includes("WHERE NOT EXISTS") &&
+      String(sql).includes("participant_guidance_deliveries")
+    )).toBe(true);
   });
 
   it("records a participant payment in the shared admin data", async () => {

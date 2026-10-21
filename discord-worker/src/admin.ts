@@ -41,6 +41,8 @@ import {
 } from "./admin-auth";
 import {
   enqueueParticipantGuidance,
+  enqueueWaitlistResultGuidance,
+  enqueueWaitlistPromotionGuidance,
   type GuidanceEnqueueResult,
 } from "./participant-guidance";
 import {
@@ -60,6 +62,7 @@ import {
   resetDeadlineAutomationSettings,
   saveDeadlineAutomationSettings,
 } from "./deadline-settings";
+import { createDatabaseCsvArchive } from "./database-export";
 
 export interface AdminEnv extends TournamentEnv, DocumentEnv, AdminAuthEnv {}
 
@@ -133,6 +136,7 @@ type MemberRegistrationCounter = (env: AdminEnv) => Promise<number>;
 
 interface AdminTournamentRow extends TournamentRow {
   status: string;
+  workflow_stage: TournamentWorkflowStage;
   closure_reason: "no_participants" | null;
   archive_published_at: string | null;
   created_at: string;
@@ -146,6 +150,17 @@ interface AdminTournamentRow extends TournamentRow {
   application_form_url: string | null;
   application_email: string | null;
 }
+
+export type TournamentWorkflowStage =
+  | "draft"
+  | "registration_open"
+  | "application_pending"
+  | "application_complete"
+  | "pre_lottery"
+  | "confirmed"
+  | "archive"
+  | "no_participants"
+  | "canceled";
 
 interface AdminResponseRow {
   tournament_id: string;
@@ -277,6 +292,8 @@ export interface TournamentEditInput {
   title: string;
   eventStartDate: string;
   eventDatesByTournament?: Record<string, string>;
+  eventDatesByGrade?: Record<string, string>;
+  grades?: string[];
   tournamentType: string;
   venue?: string;
   trueDeadline: string;
@@ -297,6 +314,8 @@ export interface TournamentEntryStatusUpdate {
   status: string;
   waitlistNumber: number | null;
   changed: boolean;
+  promotionDmQueued?: number;
+  promotionDmUnavailable?: number;
 }
 
 export interface TournamentEntryResultUpdate {
@@ -348,6 +367,8 @@ export interface LotteryNotificationQueueResult {
   managerPaymentQueued: number;
   dmQueued: number;
   dmUnavailable: number;
+  waitlistDmQueued: number;
+  waitlistDmUnavailable: number;
 }
 
 export interface OrganizerPaymentStatusUpdateResult {
@@ -376,6 +397,8 @@ export interface TournamentEntryBatchInput {
 export interface TournamentEntryBatchUpdateResult {
   entryCount: number;
   changedCount: number;
+  promotionDmQueued: number;
+  promotionDmUnavailable: number;
 }
 
 class AdminRequestError extends Error {
@@ -388,7 +411,6 @@ const MANAGEABLE_STATUSES = new Set([
   "draft",
   "active",
   "applied",
-  "closed",
   "canceled",
 ]);
 const ENTRY_STATUSES = new Set([
@@ -449,6 +471,7 @@ export function defaultPaymentDeadline(
 
 interface EditableTournamentRow extends TournamentRow {
   status: string;
+  workflow_stage?: string;
   closure_reason?: "no_participants" | null;
 }
 
@@ -486,6 +509,7 @@ async function loadEditableTournaments(
       internal_deadline,
       document_url,
       status,
+      workflow_stage,
       closure_reason
      FROM tournaments
      WHERE tournament_id IN (${placeholders})
@@ -549,6 +573,7 @@ export async function listAdminTournaments(
       tournament_application_methods.form_url AS application_form_url,
       tournament_application_methods.application_email,
       tournaments.status,
+      tournaments.workflow_stage,
       tournaments.closure_reason,
       tournaments.archive_published_at,
       tournaments.created_at,
@@ -1000,7 +1025,7 @@ export function buildAdminTodoItems(
     const eventDayStart = new Date(`${lastEventDate}T00:00:00+09:00`);
     const resultRegistrationStartsAt = new Date(eventDayStart.getTime() + 24 * 60 * 60 * 1000);
     const resultsPending = usable && entrants > 0 &&
-      group.some((tournament) => tournament.status === "applied" || tournament.status === "closed") &&
+      group.some((tournament) => tournament.status === "applied") &&
       group.some((tournament) => !tournament.archive_published_at);
     if (resultsPending && now.getTime() >= resultRegistrationStartsAt.getTime()) {
       items.push({
@@ -1083,13 +1108,27 @@ export async function updateTournamentStatuses(
         env.DB.prepare(
           `UPDATE tournaments
            SET status = ?, closure_reason = NULL, updated_at = ?,
-             applied_at = CASE WHEN ? = 'applied' THEN ? ELSE applied_at END
+             applied_at = CASE WHEN ? = 'applied' THEN ? ELSE applied_at END,
+             workflow_stage = CASE
+               WHEN ? = 'active' AND internal_deadline <= ? THEN 'application_pending'
+               WHEN ? = 'active' THEN 'registration_open'
+               WHEN ? = 'applied' THEN 'application_complete'
+               WHEN ? = 'canceled' THEN 'canceled'
+               WHEN ? = 'draft' THEN 'draft'
+               ELSE workflow_stage
+             END
            WHERE tournament_id = ? AND status = ?`,
         ).bind(
           status,
           now,
           status,
           now,
+          status,
+          now,
+          status,
+          status,
+          status,
+          status,
           tournament.tournament_id,
           tournament.status,
         ),
@@ -1184,7 +1223,7 @@ export async function updateTournamentEntryStatus(
        ON tournament_entries.tournament_id = tournaments.tournament_id
       AND tournament_entries.member_id = responses.member_id
      WHERE tournaments.tournament_id = ?
-       AND tournaments.status IN ('applied', 'closed')
+       AND tournaments.status = 'applied'
      LIMIT 1`,
   ).bind(memberId, tournamentId).first<{
     entry_status: string | null;
@@ -1240,6 +1279,9 @@ export async function updateTournamentEntryStatus(
       now,
     ),
   ]);
+  const promotionDm = previousStatus === "not_selected" && status === "selected"
+    ? await enqueueWaitlistPromotionGuidance(env, tournamentId, memberId, new Date(now))
+    : null;
   return {
     tournamentId,
     memberId,
@@ -1248,6 +1290,10 @@ export async function updateTournamentEntryStatus(
     status,
     waitlistNumber,
     changed: true,
+    ...(promotionDm ? {
+      promotionDmQueued: promotionDm.queued,
+      promotionDmUnavailable: promotionDm.unavailable,
+    } : {}),
   };
 }
 
@@ -1388,6 +1434,9 @@ export async function saveConfirmationRoster(
     throw new DocumentUploadError("申込確認名簿はPDF・Word・Excel（.xls/.xlsx）のみ登録できます。");
   }
   const tournaments = await tournamentIdsFromForm(form, env);
+  if (tournaments.some((tournament) => tournament.status !== "applied")) {
+    throw new DocumentUploadError("申込完了にしてから申込確認名簿を登録してください。");
+  }
   const groupKey = archiveGroupKey(tournaments);
   const current = await env.DB.prepare(
     `SELECT revision FROM tournament_confirmation_rosters WHERE group_key = ?`,
@@ -1405,32 +1454,41 @@ export async function saveConfirmationRoster(
   const stored = await storeParticipantGuidanceDocument(file, env, uploadedBy, fileName);
   const revision = Number(current?.revision ?? 0) + 1;
   const uploadedAt = new Date().toISOString();
-  await env.DB.prepare(
-    `INSERT INTO tournament_confirmation_rosters (
-      group_key, representative_tournament_id, document_url,
-      file_name, file_size, content_type, revision,
-      uploaded_by_email, uploaded_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(group_key) DO UPDATE SET
-      representative_tournament_id = excluded.representative_tournament_id,
-      document_url = excluded.document_url,
-      file_name = excluded.file_name,
-      file_size = excluded.file_size,
-      content_type = excluded.content_type,
-      revision = excluded.revision,
-      uploaded_by_email = excluded.uploaded_by_email,
-      uploaded_at = excluded.uploaded_at`,
-  ).bind(
-    groupKey,
-    tournaments[0].tournament_id,
-    stored.url,
-    stored.fileName,
-    stored.size,
-    stored.contentType,
-    revision,
-    uploadedBy,
-    uploadedAt,
-  ).run();
+  await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO tournament_confirmation_rosters (
+        group_key, representative_tournament_id, document_url,
+        file_name, file_size, content_type, revision,
+        uploaded_by_email, uploaded_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(group_key) DO UPDATE SET
+        representative_tournament_id = excluded.representative_tournament_id,
+        document_url = excluded.document_url,
+        file_name = excluded.file_name,
+        file_size = excluded.file_size,
+        content_type = excluded.content_type,
+        revision = excluded.revision,
+        uploaded_by_email = excluded.uploaded_by_email,
+        uploaded_at = excluded.uploaded_at`,
+    ).bind(
+      groupKey,
+      tournaments[0].tournament_id,
+      stored.url,
+      stored.fileName,
+      stored.size,
+      stored.contentType,
+      revision,
+      uploadedBy,
+      uploadedAt,
+    ),
+    env.DB.prepare(
+      `UPDATE tournaments
+       SET workflow_stage = 'pre_lottery', updated_at = ?
+       WHERE COALESCE(registration_group_id, tournament_id) = ?
+         AND status = 'applied'
+         AND workflow_stage IN ('application_complete', 'pre_lottery')`,
+    ).bind(uploadedAt, groupKey),
+  ]);
   return {
     group_key: groupKey,
     document_url: stored.url,
@@ -1942,15 +2000,18 @@ export async function queueLotteryResultsAndGuidance(
     tournaments[0].tournament_id,
     Number(guidance.revision),
   );
-  const managerPaymentQueued = guidance.payment_collection_method === "advance_manager"
-    ? await enqueueOrganizerPaymentInfo(
-      env,
-      groupKey,
-      tournaments[0].tournament_id,
-      Number(guidance.revision),
-    )
-    : 0;
+  const managerPaymentQueued = await enqueueOrganizerPaymentInfo(
+    env,
+    groupKey,
+    tournaments[0].tournament_id,
+    Number(guidance.revision),
+  );
   const dms = await enqueueParticipantGuidance(
+    env,
+    groupKey,
+    tournaments.map((tournament) => tournament.tournament_id),
+  );
+  const waitlistDms = await enqueueWaitlistResultGuidance(
     env,
     groupKey,
     tournaments.map((tournament) => tournament.tournament_id),
@@ -1960,6 +2021,8 @@ export async function queueLotteryResultsAndGuidance(
     managerPaymentQueued,
     dmQueued: dms.queued,
     dmUnavailable: dms.unavailable,
+    waitlistDmQueued: waitlistDms.queued,
+    waitlistDmUnavailable: waitlistDms.unavailable,
   };
 }
 
@@ -2116,13 +2179,14 @@ export async function updateTournamentEntriesBatch(
   const targets = await env.DB.prepare(
     `WITH requested(tournament_id, member_id) AS (VALUES ${requestedValues})
      SELECT requested.tournament_id, requested.member_id,
+       COALESCE(tournaments.registration_group_id, tournaments.tournament_id) AS group_key,
        tournament_entries.status AS entry_status,
        tournament_entries.waitlist_number,
        tournament_entry_payments.status AS payment_status
      FROM requested
      INNER JOIN tournaments
        ON tournaments.tournament_id = requested.tournament_id
-      AND tournaments.status IN ('applied', 'closed')
+      AND tournaments.status = 'applied'
      INNER JOIN responses
        ON responses.tournament_id = requested.tournament_id
       AND responses.member_id = requested.member_id
@@ -2137,6 +2201,7 @@ export async function updateTournamentEntriesBatch(
   ).bind(...entries.flatMap((entry) => [entry.tournamentId, entry.memberId])).all<{
     tournament_id: string;
     member_id: string;
+    group_key: string;
     entry_status: string | null;
     waitlist_number: number | null;
     payment_status: "unpaid" | "paid" | null;
@@ -2150,6 +2215,7 @@ export async function updateTournamentEntriesBatch(
   const now = new Date().toISOString();
   const statements: D1PreparedStatement[] = [];
   let changedCount = 0;
+  const promotions: Array<{ tournamentId: string; memberId: string }> = [];
   for (const entry of entries) {
     const target = targetByKey.get(`${entry.tournamentId}:${entry.memberId}`)!;
     let changed = false;
@@ -2195,6 +2261,12 @@ export async function updateTournamentEntriesBatch(
         ),
       );
       changed = true;
+      if (target.entry_status === "not_selected" && entry.status === "selected") {
+        promotions.push({
+          tournamentId: entry.tournamentId,
+          memberId: entry.memberId,
+        });
+      }
     }
     if (entry.status === "selected" && target.payment_status !== entry.paymentStatus) {
       statements.push(
@@ -2234,7 +2306,69 @@ export async function updateTournamentEntriesBatch(
     if (changed) changedCount += 1;
   }
   if (statements.length > 0) await env.DB.batch(statements);
-  return { entryCount: entries.length, changedCount };
+  const groupKeys = [...new Set(targets.results.map((target) => target.group_key))];
+  if (groupKeys.length > 0) {
+    await env.DB.batch(groupKeys.map((groupKey) => env.DB.prepare(
+      `UPDATE tournaments
+       SET workflow_stage = 'confirmed', updated_at = ?
+       WHERE COALESCE(registration_group_id, tournament_id) = ?
+         AND status = 'applied'
+         AND EXISTS (
+           SELECT 1 FROM tournament_archive_documents
+           WHERE tournament_archive_documents.group_key = ?
+             AND tournament_archive_documents.document_type = 'roster'
+         )
+         AND EXISTS (
+           SELECT 1
+           FROM responses
+           INNER JOIN tournaments AS response_tournaments
+             ON response_tournaments.tournament_id = responses.tournament_id
+           WHERE COALESCE(
+             response_tournaments.registration_group_id,
+             response_tournaments.tournament_id
+           ) = ?
+             AND responses.response = 'yes'
+             AND responses.is_valid = 1
+         )
+         AND NOT EXISTS (
+           SELECT 1
+           FROM responses
+           INNER JOIN tournaments AS response_tournaments
+             ON response_tournaments.tournament_id = responses.tournament_id
+           LEFT JOIN tournament_entries
+             ON tournament_entries.tournament_id = responses.tournament_id
+            AND tournament_entries.member_id = responses.member_id
+           WHERE COALESCE(
+             response_tournaments.registration_group_id,
+             response_tournaments.tournament_id
+           ) = ?
+             AND responses.response = 'yes'
+             AND responses.is_valid = 1
+             AND (
+               tournament_entries.status IS NULL
+               OR tournament_entries.status = 'submitted'
+             )
+         )`,
+    ).bind(now, groupKey, groupKey, groupKey, groupKey)));
+  }
+  let promotionDmQueued = 0;
+  let promotionDmUnavailable = 0;
+  for (const promotion of promotions) {
+    const result = await enqueueWaitlistPromotionGuidance(
+      env,
+      promotion.tournamentId,
+      promotion.memberId,
+      new Date(now),
+    );
+    promotionDmQueued += result.queued;
+    promotionDmUnavailable += result.unavailable;
+  }
+  return {
+    entryCount: entries.length,
+    changedCount,
+    promotionDmQueued,
+    promotionDmUnavailable,
+  };
 }
 
 export async function setTournamentArchivePublished(
@@ -2310,11 +2444,13 @@ export async function setTournamentArchivePublished(
       ).bind(tournament.tournament_id)] : []),
       env.DB.prepare(
         `UPDATE tournaments
-         SET archive_published_at = ?, archive_published_by_email = ?, updated_at = ?
+         SET archive_published_at = ?, archive_published_by_email = ?,
+           workflow_stage = ?, updated_at = ?
          WHERE tournament_id = ? AND status <> 'deleted'`,
       ).bind(
         publishedAt,
         published ? changedByEmail : null,
+        published ? "archive" : "confirmed",
         new Date().toISOString(),
         tournament.tournament_id,
       ),
@@ -2338,6 +2474,36 @@ export async function editTournaments(
     rawTournamentIds,
     rawTournamentIds.length > 1,
   );
+  const gradeOrder = ["A", "B", "C", "D", "E", "F", "beginner"];
+  const tournamentGrade = (tournament: EditableTournamentRow) =>
+    tournament.all_grades === 1 ? "all" : tournament.grade;
+  const sortGrades = (grades: string[]) => [...grades].sort((left, right) => {
+    if (left === "all") return -1;
+    if (right === "all") return 1;
+    return gradeOrder.indexOf(left) - gradeOrder.indexOf(right);
+  });
+  const currentGrades = sortGrades(tournaments.map(tournamentGrade));
+  const requestedGrades = sortGrades(
+    rawInput.grades === undefined
+      ? currentGrades
+      : normalizeTournamentGrades(rawInput.grades),
+  );
+  const gradeChanged = JSON.stringify(currentGrades) !== JSON.stringify(requestedGrades);
+  if (
+    gradeChanged &&
+    (currentGrades.includes("all") || requestedGrades.includes("all"))
+  ) {
+    throw new AdminRequestError(
+      "「すべて」と個別級の切り替えはできません。必要な場合は大会を登録し直してください。",
+      400,
+    );
+  }
+  if (
+    gradeChanged &&
+    tournaments.some((tournament) => !["draft", "active"].includes(tournament.status))
+  ) {
+    throw new AdminRequestError("開催級は回答受付中の大会だけ変更できます。", 409);
+  }
   const suppliedDates = rawInput.eventDatesByTournament;
   if (
     suppliedDates !== undefined &&
@@ -2352,17 +2518,40 @@ export async function editTournaments(
   ) {
     throw new AdminRequestError("対象外の大会の開催日は変更できません。", 400);
   }
-  const eventDatesByTournament = Object.fromEntries(
-    tournaments.map((tournament) => [
-      tournament.tournament_id,
-      suppliedDates?.[tournament.tournament_id] ?? rawInput.eventStartDate,
-    ]),
+  const suppliedGradeDates = rawInput.eventDatesByGrade;
+  if (
+    suppliedGradeDates !== undefined &&
+    (
+      typeof suppliedGradeDates !== "object" ||
+      suppliedGradeDates === null ||
+      Array.isArray(suppliedGradeDates)
+    )
+  ) {
+    throw new AdminRequestError("級別の開催日が不正です。", 400);
+  }
+  if (
+    suppliedGradeDates &&
+    Object.keys(suppliedGradeDates).some((grade) => !requestedGrades.includes(grade))
+  ) {
+    throw new AdminRequestError("対象外の級の開催日は変更できません。", 400);
+  }
+  const currentByGrade = new Map(
+    tournaments.map((tournament) => [tournamentGrade(tournament), tournament]),
   );
+  const rawEventDatesByGrade = Object.fromEntries(requestedGrades.map((grade) => {
+    const current = currentByGrade.get(grade);
+    return [
+      grade,
+      suppliedGradeDates?.[grade] ??
+        (current ? suppliedDates?.[current.tournament_id] : undefined) ??
+        rawInput.eventStartDate,
+    ];
+  }));
   const normalized = normalizeTournamentInput({
     ...rawInput,
-    eventStartDate: eventDatesByTournament[tournaments[0].tournament_id],
-    eventEndDate: eventDatesByTournament[tournaments[0].tournament_id],
-    grade: tournaments[0].all_grades === 1 ? "all" : tournaments[0].grade,
+    eventStartDate: rawEventDatesByGrade[requestedGrades[0]],
+    eventEndDate: rawEventDatesByGrade[requestedGrades[0]],
+    grade: requestedGrades[0],
     createdByEmail: changedByEmail,
   });
   const editableData = {
@@ -2374,51 +2563,84 @@ export async function editTournaments(
     documentUrl: normalized.documentUrl || "",
   };
   const normalizedEventDates = Object.fromEntries(
-    tournaments.map((tournament) => {
-      const date = eventDatesByTournament[tournament.tournament_id];
+    requestedGrades.map((grade) => {
+      const date = rawEventDatesByGrade[grade];
       const normalizedDate = normalizeTournamentInput({
         ...normalized,
-        grade: tournament.all_grades === 1 ? "all" : tournament.grade,
+        grade,
         eventStartDate: date,
         eventEndDate: date,
       }).eventStartDate;
-      return [tournament.tournament_id, normalizedDate];
+      return [grade, normalizedDate];
     }),
   );
-  const changed = tournaments.filter((tournament) =>
+  const commonChanged = tournaments.some((tournament) =>
     tournament.title !== editableData.title ||
-    tournament.event_start_date !== normalizedEventDates[tournament.tournament_id] ||
-    tournament.event_end_date !== normalizedEventDates[tournament.tournament_id] ||
+    (
+      requestedGrades.includes(tournamentGrade(tournament)) &&
+      (
+        tournament.event_start_date !== normalizedEventDates[tournamentGrade(tournament)] ||
+        tournament.event_end_date !== normalizedEventDates[tournamentGrade(tournament)]
+      )
+    ) ||
     tournament.tournament_type !== editableData.tournamentType ||
     (tournament.venue ?? "") !== editableData.venue ||
     tournament.true_deadline !== editableData.trueDeadline ||
     tournament.internal_deadline !== editableData.internalDeadline ||
     (tournament.document_url ?? "") !== editableData.documentUrl
   );
-  if (changed.length === 0) {
+  if (!commonChanged && !gradeChanged) {
     return { tournaments, notificationsQueued: 0 };
   }
 
   const now = new Date().toISOString();
-  await env.DB.batch(
-    changed.flatMap((tournament) => {
-      const eventStartDate = normalizedEventDates[tournament.tournament_id];
+  const existingGroupId = tournaments[0].registration_group_id ?? null;
+  const groupId = existingGroupId ?? (gradeChanged ? `TG-${crypto.randomUUID()}` : null);
+  const retained = tournaments.filter((tournament) =>
+    requestedGrades.includes(tournamentGrade(tournament))
+  );
+  const removed = tournaments.filter((tournament) =>
+    !requestedGrades.includes(tournamentGrade(tournament))
+  );
+  const addedGrades = requestedGrades.filter((grade) => !currentByGrade.has(grade));
+  const retainedToUpdate = retained.filter((tournament) => {
+    const grade = tournamentGrade(tournament);
+    return tournament.title !== editableData.title ||
+      tournament.event_start_date !== normalizedEventDates[grade] ||
+      tournament.event_end_date !== normalizedEventDates[grade] ||
+      tournament.tournament_type !== editableData.tournamentType ||
+      (tournament.venue ?? "") !== editableData.venue ||
+      tournament.true_deadline !== editableData.trueDeadline ||
+      tournament.internal_deadline !== editableData.internalDeadline ||
+      (tournament.document_url ?? "") !== editableData.documentUrl ||
+      (tournament.registration_group_id ?? null) !== groupId;
+  });
+  const statements = retainedToUpdate.flatMap((tournament) => {
+      const grade = tournamentGrade(tournament);
+      const eventStartDate = normalizedEventDates[grade];
       const previousData = {
         title: tournament.title,
         eventStartDate: tournament.event_start_date,
+        grades: currentGrades,
         tournamentType: tournament.tournament_type,
         venue: tournament.venue ?? "",
         trueDeadline: tournament.true_deadline,
         internalDeadline: tournament.internal_deadline,
         documentUrl: tournament.document_url ?? "",
       };
-      const newData = { ...editableData, eventStartDate };
+      const newData = { ...editableData, eventStartDate, grades: requestedGrades };
       return [
         env.DB.prepare(
           `UPDATE tournaments
            SET title = ?, event_start_date = ?, event_end_date = ?,
              tournament_type = ?, is_official = ?, venue = ?,
              true_deadline = ?, internal_deadline = ?, document_url = ?,
+             registration_group_id = ?,
+             workflow_stage = CASE
+               WHEN status = 'active' AND ? <= ? THEN 'application_pending'
+               WHEN status = 'active' THEN 'registration_open'
+               ELSE workflow_stage
+             END,
              updated_at = ?
            WHERE tournament_id = ? AND status <> 'deleted'`,
         ).bind(
@@ -2431,6 +2653,9 @@ export async function editTournaments(
           editableData.trueDeadline,
           editableData.internalDeadline,
           editableData.documentUrl || null,
+          groupId,
+          editableData.internalDeadline,
+          now,
           now,
           tournament.tournament_id,
         ),
@@ -2446,30 +2671,176 @@ export async function editTournaments(
           now,
         ),
       ];
-    }),
-  );
-
-  const updated = tournaments.map((tournament) => ({
-    ...tournament,
+    });
+  for (const tournament of removed) {
+    statements.push(
+      env.DB.prepare(
+        `UPDATE responses
+         SET is_valid = 0, invalidated_at = ?,
+           invalidated_reason = 'tournament_grade_removed'
+         WHERE tournament_id = ? AND is_valid = 1`,
+      ).bind(now, tournament.tournament_id),
+      env.DB.prepare(
+        `UPDATE tournaments
+         SET status = 'deleted', deleted_at = ?, registration_group_id = ?, updated_at = ?
+         WHERE tournament_id = ? AND status IN ('draft', 'active')`,
+      ).bind(now, groupId, now, tournament.tournament_id),
+      env.DB.prepare(
+        `INSERT INTO tournament_change_history (
+          tournament_id, previous_data, new_data, changed_by_email, changed_at
+        ) VALUES (?, ?, ?, ?, ?)`,
+      ).bind(
+        tournament.tournament_id,
+        JSON.stringify({ grade: tournamentGrade(tournament), status: tournament.status }),
+        JSON.stringify({ grade: tournamentGrade(tournament), status: "deleted" }),
+        changedByEmail,
+        now,
+      ),
+    );
+  }
+  const template = tournaments[0];
+  const added: EditableTournamentRow[] = addedGrades.map((grade) => ({
+    ...template,
+    tournament_id: `T-${crypto.randomUUID()}`,
+    registration_group_id: groupId,
     title: editableData.title,
-    event_start_date: normalizedEventDates[tournament.tournament_id],
-    event_end_date: normalizedEventDates[tournament.tournament_id],
+    event_start_date: normalizedEventDates[grade],
+    event_end_date: normalizedEventDates[grade],
+    grade,
+    all_grades: 0,
     tournament_type: editableData.tournamentType,
     venue: editableData.venue || null,
     true_deadline: editableData.trueDeadline,
     internal_deadline: editableData.internalDeadline,
     document_url: editableData.documentUrl || null,
+    closure_reason: null,
   }));
-  const revision = await editFingerprint({ editableData, normalizedEventDates });
-  let notificationsQueued = 0;
-  for (const tournament of updated) {
-    if (tournament.status === "active") {
-      notificationsQueued += await enqueueTournamentUpdateNotifications(
-        env,
-        tournament,
-        revision,
+  for (const tournament of added) {
+    statements.push(env.DB.prepare(
+      `INSERT INTO tournaments (
+        tournament_id, registration_group_id, title, event_start_date,
+        event_end_date, grade, all_grades, tournament_type, is_official,
+        true_deadline, internal_deadline, venue, document_url, status,
+        workflow_stage, created_by_email, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(
+      tournament.tournament_id,
+      tournament.registration_group_id,
+      tournament.title,
+      tournament.event_start_date,
+      tournament.event_end_date,
+      tournament.grade,
+      tournament.tournament_type,
+      tournament.tournament_type === "official" ? 1 : 0,
+      tournament.true_deadline,
+      tournament.internal_deadline,
+      tournament.venue,
+      tournament.document_url,
+      tournament.status,
+      tournament.status === "draft"
+        ? "draft"
+        : Date.parse(tournament.internal_deadline) <= Date.parse(now)
+        ? "application_pending"
+        : "registration_open",
+      changedByEmail,
+      now,
+      now,
+    ));
+  }
+  if (!existingGroupId && groupId) {
+    statements.push(env.DB.prepare(
+      `UPDATE tournament_application_methods SET group_key = ?, updated_at = ?
+       WHERE group_key = ?`,
+    ).bind(groupId, now, tournaments[0].tournament_id));
+  }
+  if (groupId) {
+    for (const tournament of added.filter((item) => item.status === "active")) {
+      statements.push(env.DB.prepare(
+        `INSERT INTO notification_deliveries (
+          idempotency_key, tournament_id, member_id, notification_type,
+          destination_type, destination_id, delivery_context, status,
+          error_message, created_at
+        )
+        SELECT 'invitation_dm:' || ? || ':' || members.member_id,
+          ?, members.member_id, 'invitation_dm', 'dm', members.discord_user_id,
+          'initial', 'skipped', '大会情報編集で追加された級のためDMを送信しません。', ?
+        FROM members
+        WHERE members.status = 'active'
+          AND members.dm_enabled = 1
+          AND members.discord_user_id IS NOT NULL
+          AND members.grade = ?
+        ON CONFLICT(idempotency_key) DO NOTHING`,
+      ).bind(groupId, tournament.tournament_id, now, tournament.grade));
+    }
+  }
+  await env.DB.batch(statements);
+
+  const updated = [
+    ...retained.map((tournament) => ({
+      ...tournament,
+      registration_group_id: groupId,
+      title: editableData.title,
+      event_start_date: normalizedEventDates[tournamentGrade(tournament)],
+      event_end_date: normalizedEventDates[tournamentGrade(tournament)],
+      tournament_type: editableData.tournamentType,
+      venue: editableData.venue || null,
+      true_deadline: editableData.trueDeadline,
+      internal_deadline: editableData.internalDeadline,
+      document_url: editableData.documentUrl || null,
+    })),
+    ...added,
+  ].sort((left, right) => gradeOrder.indexOf(left.grade) - gradeOrder.indexOf(right.grade));
+
+  const gradeSummary = (grades: string[]) => grades
+    .map((grade) => grade === "beginner" ? "初心者" : grade === "all" ? "すべて" : grade)
+    .join("");
+  const changeDetails: string[] = [];
+  if (gradeChanged) {
+    changeDetails.push(`開催級: ${gradeSummary(currentGrades)} → ${gradeSummary(requestedGrades)}`);
+  }
+  const commonDateBefore = new Set(tournaments.map((item) => item.event_start_date));
+  const commonDateAfter = new Set(updated.map((item) => item.event_start_date));
+  const sharedGrades = requestedGrades.filter((grade) => currentByGrade.has(grade));
+  const changedSharedDates = sharedGrades.filter((grade) =>
+    currentByGrade.get(grade)!.event_start_date !== normalizedEventDates[grade]
+  );
+  if (
+    changedSharedDates.length > 0 &&
+    commonDateBefore.size === 1 &&
+    commonDateAfter.size === 1
+  ) {
+    changeDetails.push(
+      `開催日: ${[...commonDateBefore][0]} → ${[...commonDateAfter][0]}`,
+    );
+  } else {
+    for (const grade of changedSharedDates) {
+      changeDetails.push(
+        `開催日（${gradeSummary([grade])}）: ${currentByGrade.get(grade)!.event_start_date} → ${normalizedEventDates[grade]}`,
       );
     }
+  }
+  const previousDocumentUrl = tournaments[0].document_url ?? "";
+  if (previousDocumentUrl !== editableData.documentUrl) {
+    changeDetails.push(
+      !previousDocumentUrl
+        ? "要項ファイルを登録しました。"
+        : !editableData.documentUrl
+          ? "要項ファイルを削除しました。"
+          : "要項ファイルを差し替えました。",
+    );
+  }
+  const revision = await editFingerprint({ editableData, normalizedEventDates, requestedGrades });
+  let notificationsQueued = 0;
+  const notifiable = updated.filter((tournament) =>
+    !["draft", "canceled", "deleted"].includes(tournament.status)
+  );
+  if (notifiable.length > 0 && changeDetails.length > 0) {
+    notificationsQueued = await enqueueTournamentUpdateNotifications(
+      env,
+      notifiable,
+      revision,
+      changeDetails,
+    );
   }
   return { tournaments: updated, notificationsQueued };
 }
@@ -2562,11 +2933,12 @@ function adminHtml(page: AdminPage): string {
     .subtab-bar { position: sticky; top: 16px; background: transparent; border: 0; }
     .subtab-bar[hidden] { display: none; }
     .subtabs { display: grid; gap: 2px; padding: 2px 18px 2px 0; border-right: 1px solid #dce1eb; }
-    .subtab { display: block; width: 100%; color: #596579; text-decoration: none; font-size: var(--font-size-body); font-weight: 750; white-space: nowrap; padding: 8px 10px; border: 0; border-left: 3px solid transparent; border-radius: 0; text-align: left; transition: color .15s ease, background .15s ease, border-color .15s ease; }
+    .subtab { position: relative; display: block; width: 100%; color: #596579; text-decoration: none; font-size: var(--font-size-body); font-weight: 750; white-space: nowrap; padding: 8px 36px 8px 10px; border: 0; border-left: 3px solid transparent; border-radius: 0; text-align: left; transition: color .15s ease, background .15s ease, border-color .15s ease; }
     .subtab:hover { color: #294796; background: #f4f6fb; }
     .subtab.active { color: #294796; background: #eef2fb; border-left-color: #3658b2; }
     .tab.active { color: #294796; border-bottom-color: #3658b2; }
     .request-badge { position: absolute; top: 2px; right: 1px; min-width: 20px; height: 20px; padding: 0 5px; border-radius: 999px; display: inline-flex; align-items: center; justify-content: center; color: white; background: #d92d20; box-shadow: 0 0 0 2px white; font-size: var(--font-size-meta); font-weight: 800; line-height: 1; }
+    .subtab .request-badge { top: 50%; right: 9px; transform: translateY(-50%); min-width: 18px; height: 18px; box-shadow: none; }
     main { max-width: 1080px; margin: 24px auto; padding: 0 18px 48px; }
     main.tournament-workspace { display: grid; grid-template-columns: 180px minmax(0, 1fr); gap: 28px; align-items: start; }
     .admin-page-content { min-width: 0; }
@@ -2635,11 +3007,22 @@ function adminHtml(page: AdminPage): string {
     .application-summary a { color: #294796; font-weight: 700; }
     .badge { display: inline-flex; align-items: center; border-radius: 999px; padding: 4px 8px; font-size: var(--font-size-meta); font-weight: 750; white-space: nowrap; }
     .badge.active { color: #17643a; background: #e4f7ec; }
+    .badge.registration_open { color: #17643a; background: #e4f7ec; }
+    .badge.application_pending { color: #875c12; background: #fff2d8; }
     .badge.applied { color: #2452a4; background: #e7efff; }
-    .badge.closed { color: #596579; background: #edf0f5; }
+    .badge.application_complete { color: #2452a4; background: #e7efff; }
+    .badge.pre_lottery { color: #5b3da1; background: #eee8ff; }
+    .badge.confirmed { color: #17643a; background: #e4f7ec; }
+    .badge.archive { color: #17643a; background: #e4f7ec; }
     .badge.no_participants { color: #6f4b12; background: #fff1d6; }
     .badge.canceled { color: #a12822; background: #fdecea; }
     .badge.draft { color: #875c12; background: #fff2d8; }
+    .workflow-progress { display: flex; align-items: center; gap: 5px; margin: 8px 0 12px; overflow-x: auto; color: #8992a3; font-size: var(--font-size-meta); white-space: nowrap; }
+    .workflow-step { display: inline-flex; align-items: center; gap: 5px; }
+    .workflow-step:not(:last-child)::after { content: "›"; color: #aab1bf; }
+    .workflow-step.completed { color: #596579; }
+    .workflow-step.current { color: #294796; font-weight: 800; }
+    .workflow-step.terminal { color: #a12822; font-weight: 800; }
     .response-sections { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 14px 0; }
     .response-section { min-width: 0; border-radius: 8px; padding: 9px 10px; background: #f5f7fb; }
     .response-section h4 { margin: 0 0 7px; font-size: var(--font-size-body); }
@@ -2828,6 +3211,10 @@ function adminHtml(page: AdminPage): string {
     .settings-panel li { padding: 10px 0; border-top: 1px solid #e7eaf0; }
     .settings-panel li:first-child { border-top: 0; }
     .settings-status { flex: 0 0 auto; padding: 2px 0; color: #7a8497; background: transparent; font-size: var(--font-size-meta); font-weight: 750; white-space: nowrap; }
+    .database-export-actions { display: flex; align-items: center; gap: 12px; margin-top: 16px; flex-wrap: wrap; }
+    .database-download { display: inline-flex; align-items: center; justify-content: center; border-radius: var(--control-radius); padding: var(--button-padding-block) var(--button-padding-inline); color: white; background: #3658b2; font-size: var(--font-size-control); font-weight: 700; text-decoration: none; }
+    .database-download:hover { background: #294796; }
+    .database-export-warning { max-width: 720px; margin-top: 16px !important; padding: 10px 12px; border-left: 4px solid #da8c10; color: #6f4b12 !important; background: #fff7e8; font-size: var(--font-size-note) !important; }
     .message-settings-workspace { display: grid; grid-template-columns: 230px minmax(0, 1fr); min-width: 0; border-top: 1px solid #dce1eb; }
     .message-template-list { min-width: 0; padding: 8px 16px 8px 0; border-right: 1px solid #dce1eb; }
     .message-template-category { border-bottom: 1px solid #e7eaf0; }
@@ -2940,7 +3327,7 @@ function adminHtml(page: AdminPage): string {
       .subtabs { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0; padding: 0 0 10px; border-right: 0; border-bottom: 1px solid #dce1eb; }
       .subtab { min-width: 0; padding: 9px 5px; border-left: 0; border-bottom: 3px solid transparent; font-size: var(--font-size-meta); text-align: center; }
       .subtab.active { border-bottom-color: #3658b2; background: transparent; }
-      .settings-menu { position: static; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0; padding: 0 0 10px; border-right: 0; border-bottom: 1px solid #dce1eb; }
+      .settings-menu { position: static; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0; padding: 0 0 10px; border-right: 0; border-bottom: 1px solid #dce1eb; }
       .settings-menu-item { padding: 9px 5px; border-left: 0; border-bottom: 3px solid transparent; font-size: var(--font-size-meta); text-align: center; }
       .settings-menu-item[aria-selected="true"] { border-bottom-color: #3658b2; background: transparent; }
       .message-template-list { padding: 8px 0 10px; border-right: 0; border-bottom: 1px solid #dce1eb; }
@@ -2960,7 +3347,7 @@ function adminHtml(page: AdminPage): string {
   <header><div class="header-inner"><div class="admin-brand"><span class="admin-brand-name">埼玉大学かるた会</span><h1>運営管理ポータル</h1></div><span class="identity-wrap"><span id="identity">認証情報を確認中…</span><a id="logout" href="/auth/logout" hidden>ログアウト</a></span></div></header>
   <div class="tab-bar">
     <nav class="tabs" aria-label="管理画面メニュー">
-      <a class="${tabClass("tournament-management")}" href="/register"${section === "tournament-management" ? ' aria-current="true"' : ""}>大会管理<span id="todo-count-badge" class="request-badge" role="status" aria-live="polite" hidden>0</span></a>
+      <a class="${tabClass("tournament-management")}" href="/register"${section === "tournament-management" ? ' aria-current="true"' : ""}>大会管理</a>
       <a class="${tabClass("members")}" href="/members"${currentPage("members")}>メンバー管理<span id="pending-request-badge" class="request-badge" role="status" aria-live="polite" hidden>0</span></a>
       <a class="${tabClass("settings")}" href="/settings"${currentPage("settings")}>設定</a>
     </nav>
@@ -2969,7 +3356,7 @@ function adminHtml(page: AdminPage): string {
     <div class="subtab-bar"${section === "tournament-management" ? "" : " hidden"}>
       <nav class="subtabs" aria-label="大会管理メニュー">
         <a class="${subtabClass("register")}" href="/register"${currentPage("register")}>大会新規登録</a>
-        <a class="${subtabClass("todo")}" href="/todo"${currentPage("todo")}>TODO</a>
+        <a class="${subtabClass("todo")}" href="/todo"${currentPage("todo")}>TODO<span id="todo-count-badge" class="request-badge" role="status" aria-live="polite" hidden>0</span></a>
         <a class="${subtabClass("tournaments")}" href="/tournaments"${currentPage("tournaments")}>一覧</a>
       </nav>
     </div>
@@ -3013,7 +3400,6 @@ function adminHtml(page: AdminPage): string {
         <label class="wide">大会要項（PDF・Word） <span class="file-note">任意・20MBまで。Wordは原本を保存し、ブラウザ閲覧用PDFを自動生成します</span><input type="file" name="documentFile" accept="application/pdf,.pdf,application/msword,.doc,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.docx"></label>
       </div>
       <div class="actions"><button id="submit" type="submit">登録して通知を開始</button><span id="result" role="status" aria-live="polite"></span></div>
-      <div class="footnote">複数級を選ぶと、共通の申込フロー・締切を持つ同一大会として登録します。級ごとに開催日を変えることもできます。「すべて」は1件の大会として登録し、全級のメンバーへDMを送ります。</div>
     </form>
     <section class="panel" aria-labelledby="tournament-list-title"${hiddenPage("tournaments")}>
       <div class="list-heading">
@@ -3022,7 +3408,7 @@ function adminHtml(page: AdminPage): string {
       </div>
       <div class="list-controls">
         <label>並び順<select id="tournament-sort"><option value="deadline_asc">締切日が近い順</option><option value="event_asc">開催日が近い順</option><option value="created_desc">登録日が新しい順</option><option value="created_asc">登録日が古い順</option></select></label>
-        <label>ステータス<select id="tournament-status-filter"><option value="default" selected>通常表示（中止・参加者なしを除く）</option><option value="all">すべて</option><option value="active">回答受付中</option><option value="applied">申込完了</option><option value="no_participants">参加者なし終了</option><option value="closed">締切済み</option><option value="canceled">中止</option><option value="draft">下書き</option></select></label>
+        <label>ステータス<select id="tournament-status-filter"><option value="default" selected>通常表示（中止・参加者なしを除く）</option><option value="all">すべて</option><option value="registration_open">回答受付中</option><option value="application_pending">申込対応中</option><option value="application_complete">申込完了</option><option value="pre_lottery">抽選前</option><option value="confirmed">参加者確定</option><option value="archive">大会記録</option><option value="no_participants">参加者なし終了</option><option value="canceled">中止</option><option value="draft">下書き</option></select></label>
       </div>
       <div id="list-status" role="status" aria-live="polite">読み込み中…</div>
       <div id="tournament-list"></div>
@@ -3047,6 +3433,7 @@ function adminHtml(page: AdminPage): string {
         <nav class="settings-menu" role="tablist" aria-label="設定項目">
           <button class="settings-menu-item" type="button" role="tab" aria-selected="true" aria-controls="message-settings" data-settings-view="messages">Discord Botメッセージ</button>
           <button class="settings-menu-item" type="button" role="tab" aria-selected="false" aria-controls="deadline-settings" data-settings-view="deadlines">自動入力・期限</button>
+          <button class="settings-menu-item" type="button" role="tab" aria-selected="false" aria-controls="database-settings" data-settings-view="database">データ管理</button>
           <button class="settings-menu-item" type="button" role="tab" aria-selected="false" aria-controls="manual-settings" data-settings-view="manuals">運用マニュアル</button>
         </nav>
         <div class="settings-content">
@@ -3084,6 +3471,12 @@ function adminHtml(page: AdminPage): string {
               <div class="deadline-settings-actions"><button id="save-deadline-settings" type="submit">設定を保存</button><button id="reset-deadline-settings" type="button" class="secondary">初期値に戻す</button><span id="deadline-settings-result" class="status-message" role="status" aria-live="polite"></span></div>
             </form>
           </section>
+          <section class="settings-panel" id="database-settings" role="tabpanel" hidden>
+            <div class="settings-panel-head"><h3>データ管理</h3><span class="settings-status">管理者限定</span></div>
+            <p>D1データベースの全データを、1テーブルにつき1つのCSVファイルとしてZIPにまとめてダウンロードします。</p>
+            <div class="database-export-actions"><a class="database-download" href="/api/settings/database-export" download>CSVを一括ダウンロード</a></div>
+            <p class="database-export-warning">氏名・よみがな・Discord IDなどの個人情報を含みます。ダウンロードしたファイルは共有せず、安全な場所で管理してください。</p>
+          </section>
           <section class="settings-panel" id="manual-settings" role="tabpanel" hidden>
             <div class="settings-panel-head"><h3>運用マニュアル</h3><span class="settings-status">草案</span></div>
             <div class="manual-workspace">
@@ -3101,7 +3494,7 @@ function adminHtml(page: AdminPage): string {
                 <article class="manual-page" id="manual-tournaments" role="tabpanel" data-manual-page="tournaments" hidden>
                   <header class="manual-page-header"><h4>大会管理</h4><span class="manual-updated">最終更新：2026年10月20日</span></header>
                   <section class="manual-section"><h5>1. 大会を登録する</h5><ol><li><a href="/register">大会新規登録</a>を開きます。</li><li>大会名、開催級、開催日、締切、要項、申込方法を入力します。</li><li>登録後、対象メンバーへ参加確認DMが届いたことを確認します。</li></ol></section>
-                  <section class="manual-section"><h5>2. 主催者へ申し込む</h5><ol><li><a href="/todo">TODO</a>で参加希望者と申込情報を確認します。</li><li>名簿ファイルまたはフォームを使って主催者へ申し込みます。</li><li>完了後、「申込済みにする」を押します。</li></ol></section>
+                  <section class="manual-section"><h5>2. 主催者へ申し込む</h5><ol><li><a href="/todo">TODO</a>で参加希望者と申込情報を確認します。</li><li>名簿ファイルまたはフォームを使って主催者へ申し込みます。</li><li>完了後、「申込完了にする」を押します。</li></ol></section>
                   <section class="manual-section"><h5>3. 抽選後の案内を送る</h5><ol><li><a href="/tournaments">大会一覧</a>から対象大会を開きます。</li><li>確定名簿、選手ごとの当落、参加費、当日案内を入力します。</li><li>送信ボタンを押し、保存と案内送信をまとめて完了します。</li></ol></section>
                   <section class="manual-section"><h5>4. 大会結果を公開する</h5><ol><li>大会翌日以降に表示されるTODOから入力欄へ移動します。</li><li>結果ファイルと全出場者の個人成績を入力します。</li><li>「結果を保存して公開」を押します。</li></ol></section>
                 </article>
@@ -3145,9 +3538,9 @@ function adminHtml(page: AdminPage): string {
   <dialog id="edit-tournament-dialog">
     <form id="edit-tournament-form" class="dialog-form">
       <h2>大会情報を編集</h2>
-      <p id="edit-tournament-grade" class="dialog-note"></p>
       <div class="grid">
         <label class="wide">大会名<input name="title" required maxlength="100" autocomplete="off"></label>
+        <fieldset id="edit-tournament-grades" class="grade-picker wide"><legend>開催級 <span class="optional">複数選択可・回答受付中のみ変更可</span></legend><div class="grade-options"><label class="grade-option"><input type="checkbox" name="editGrades" value="all">すべて</label><label class="grade-option"><input type="checkbox" name="editGrades" value="A">A級</label><label class="grade-option"><input type="checkbox" name="editGrades" value="B">B級</label><label class="grade-option"><input type="checkbox" name="editGrades" value="C">C級</label><label class="grade-option"><input type="checkbox" name="editGrades" value="D">D級</label><label class="grade-option"><input type="checkbox" name="editGrades" value="E">E級</label><label class="grade-option"><input type="checkbox" name="editGrades" value="F">F級</label><label class="grade-option"><input type="checkbox" name="editGrades" value="beginner">初心者</label></div></fieldset>
         <div id="edit-event-dates" class="grade-date-settings wide"><strong>開催日</strong><div id="edit-event-date-grid" class="grade-date-grid"></div></div>
         <label>大会種別<select name="tournamentType" required><option value="official">公認大会</option><option value="support">後援大会</option><option value="event">その他イベント</option></select></label>
         <label>主催締切日<input type="datetime-local" name="trueDeadline" required></label>
@@ -3172,6 +3565,7 @@ function adminHtml(page: AdminPage): string {
     const settingsPanels = {
       messages: document.querySelector('#message-settings'),
       deadlines: document.querySelector('#deadline-settings'),
+      database: document.querySelector('#database-settings'),
       manuals: document.querySelector('#manual-settings'),
     };
     const manualMenuItems = [...document.querySelectorAll('.manual-menu-item')];
@@ -3215,8 +3609,10 @@ function adminHtml(page: AdminPage): string {
     const statusConfirmYes = document.querySelector('#status-confirm-yes');
     const editTournamentDialog = document.querySelector('#edit-tournament-dialog');
     const editTournamentForm = document.querySelector('#edit-tournament-form');
-    const editTournamentGrade = document.querySelector('#edit-tournament-grade');
     const editEventDateGrid = document.querySelector('#edit-event-date-grid');
+    const editGradeCheckboxes = Array.from(editTournamentForm.querySelectorAll('input[name="editGrades"]'));
+    const editAllGradesCheckbox = editGradeCheckboxes.find((checkbox) => checkbox.value === 'all');
+    const editIndividualGradeCheckboxes = editGradeCheckboxes.filter((checkbox) => checkbox.value !== 'all');
     const editTournamentResult = document.querySelector('#edit-tournament-result');
     const saveTournamentEdit = document.querySelector('#save-tournament-edit');
     const cancelTournamentEdit = document.querySelector('#cancel-tournament-edit');
@@ -3253,14 +3649,24 @@ function adminHtml(page: AdminPage): string {
     const deadlineSettingsResult = document.querySelector('#deadline-settings-result');
     const saveDeadlineSettings = document.querySelector('#save-deadline-settings');
     const resetDeadlineSettings = document.querySelector('#reset-deadline-settings');
-    const statusLabels = {
+    const workflowStatusLabels = {
       draft: '下書き',
-      active: '回答受付中',
-      applied: '申込完了',
-      closed: '締切済み',
+      registration_open: '回答受付中',
+      application_pending: '申込対応中',
+      application_complete: '申込完了',
+      pre_lottery: '抽選前',
+      confirmed: '参加者確定',
+      archive: '大会記録',
       canceled: '中止',
       no_participants: '参加者なし終了',
     };
+    const manageableStatusLabels = {
+      draft: '下書きに戻す',
+      active: '回答受付中に戻す',
+      applied: '申込完了にする',
+      canceled: '中止にする',
+    };
+    const workflowOrder = ['registration_open', 'application_pending', 'application_complete', 'pre_lottery', 'confirmed', 'archive'];
     const entryStatusLabels = {
       submitted: '申込済み（結果待ち）',
       selected: '出場確定',
@@ -3703,9 +4109,36 @@ function adminHtml(page: AdminPage): string {
     }
 
     function tournamentDisplayStatus(tournament) {
-      return tournament.status === 'closed' && tournament.closure_reason === 'no_participants'
-        ? 'no_participants'
-        : tournament.status;
+      if (tournament.workflow_stage) return tournament.workflow_stage;
+      if (tournament.archive_published_at) return 'archive';
+      if (tournament.status === 'closed' && tournament.closure_reason === 'no_participants') return 'no_participants';
+      if (tournament.status === 'canceled') return 'canceled';
+      if (tournament.status === 'draft') return 'draft';
+      if (tournament.status === 'active') {
+        return Date.now() >= Date.parse(tournament.internal_deadline) ? 'application_pending' : 'registration_open';
+      }
+      return 'application_complete';
+    }
+
+    function renderWorkflowProgress(stage) {
+      const progress = element('div', 'workflow-progress');
+      progress.setAttribute('aria-label', '大会状態の流れ');
+      const currentIndex = workflowOrder.indexOf(stage);
+      workflowOrder.forEach((value, index) => {
+        const step = element('span', 'workflow-step', workflowStatusLabels[value]);
+        if (currentIndex >= 0 && index < currentIndex) step.classList.add('completed');
+        if (value === stage) {
+          step.classList.add('current');
+          step.setAttribute('aria-current', 'step');
+        }
+        progress.append(step);
+      });
+      if (stage === 'canceled' || stage === 'no_participants') {
+        const terminal = element('span', 'workflow-step terminal', workflowStatusLabels[stage]);
+        terminal.setAttribute('aria-current', 'step');
+        progress.append(terminal);
+      }
+      return progress;
     }
 
     function selectedRegistrationGrades() {
@@ -3983,22 +4416,62 @@ function adminHtml(page: AdminPage): string {
       }
     }
 
-    function openTournamentEditor(tournaments) {
-      const tournament = tournaments[0];
-      editingTournaments = tournaments;
-      editTournamentGrade.textContent = '開催級：' + tournaments.map(tournamentGradeLabel).join('・') + '（開催級はこの画面では変更できません）';
-      editTournamentForm.elements.title.value = tournament.title;
+    let editDateDrafts = new Map();
+
+    function selectedEditGrades() {
+      if (editAllGradesCheckbox?.checked) return ['all'];
+      return editIndividualGradeCheckboxes
+        .filter((checkbox) => checkbox.checked)
+        .map((checkbox) => checkbox.value);
+    }
+
+    function refreshEditEventDates() {
+      editEventDateGrid.querySelectorAll('input[data-grade]').forEach((input) => {
+        editDateDrafts.set(input.dataset.grade, input.value);
+      });
+      const grades = selectedEditGrades();
+      const fallbackDate = editingTournaments[0]?.event_start_date || '';
       editEventDateGrid.replaceChildren();
-      tournaments.forEach((item) => {
-        const label = element('label', '', tournamentGradeLabel(item) + (tournaments.length > 1 ? 'の開催日' : ''));
+      grades.forEach((grade) => {
+        const label = element('label', '', (grade === 'all' ? 'すべて' : gradeLabel(grade)) + (grades.length > 1 ? 'の開催日' : ''));
         const input = document.createElement('input');
         input.type = 'date';
         input.required = true;
-        input.dataset.tournamentId = item.tournament_id;
-        input.value = item.event_start_date;
+        input.dataset.grade = grade;
+        input.value = editDateDrafts.get(grade) || fallbackDate;
         label.append(input);
         editEventDateGrid.append(label);
       });
+    }
+
+    editAllGradesCheckbox?.addEventListener('change', () => {
+      if (editAllGradesCheckbox.checked) {
+        editIndividualGradeCheckboxes.forEach((checkbox) => { checkbox.checked = false; });
+      }
+      refreshEditEventDates();
+    });
+    editIndividualGradeCheckboxes.forEach((checkbox) => {
+      checkbox.addEventListener('change', () => {
+        if (checkbox.checked && editAllGradesCheckbox) editAllGradesCheckbox.checked = false;
+        refreshEditEventDates();
+      });
+    });
+
+    function openTournamentEditor(tournaments) {
+      const tournament = tournaments[0];
+      editingTournaments = tournaments;
+      editTournamentForm.elements.title.value = tournament.title;
+      const currentGrades = tournaments.map((item) => item.all_grades === 1 ? 'all' : item.grade);
+      const gradeEditingAllowed = tournaments.every((item) => item.status === 'draft' || item.status === 'active') && !currentGrades.includes('all');
+      editGradeCheckboxes.forEach((checkbox) => {
+        checkbox.checked = currentGrades.includes(checkbox.value);
+        checkbox.disabled = !gradeEditingAllowed;
+      });
+      editDateDrafts = new Map();
+      tournaments.forEach((item) => {
+        editDateDrafts.set(item.all_grades === 1 ? 'all' : item.grade, item.event_start_date);
+      });
+      refreshEditEventDates();
       editTournamentForm.elements.tournamentType.value = tournament.tournament_type;
       editTournamentForm.elements.trueDeadline.value = dateTimeInputValue(tournament.true_deadline);
       editTournamentForm.elements.internalDeadline.value = dateTimeInputValue(tournament.internal_deadline);
@@ -4049,7 +4522,7 @@ function adminHtml(page: AdminPage): string {
 
 
     function renderEntryManagement(tournaments) {
-      if (!tournaments.some((item) => item.status === 'applied' || item.status === 'closed')) return null;
+      if (!tournaments.some((item) => item.status === 'applied')) return null;
       const entries = tournaments.flatMap((tournament) => tournament.responses
         .filter((person) => person.response === 'yes')
         .map((person) => ({ ...person, tournament })));
@@ -4131,7 +4604,7 @@ function adminHtml(page: AdminPage): string {
     }
 
     function renderLotteryManagement(tournaments) {
-      if (!tournaments.some((item) => item.status === 'applied' || item.status === 'closed')) return null;
+      if (!tournaments.some((item) => item.status === 'applied')) return null;
       const entries = tournaments.flatMap((tournament) => tournament.responses
         .filter((person) => person.response === 'yes')
         .map((person) => ({ ...person, tournament })));
@@ -4204,6 +4677,7 @@ function adminHtml(page: AdminPage): string {
           tournamentId: tournament.tournament_id,
           memberId: person.member_id,
           displayName: person.display_name,
+          initialStatus: person.entry_status || 'submitted',
           select,
           waitlistInput,
           paymentSelect,
@@ -4217,7 +4691,7 @@ function adminHtml(page: AdminPage): string {
     }
 
     function renderPostLotteryManagement(tournaments) {
-      if (!tournaments.some((item) => item.status === 'applied' || item.status === 'closed')) return null;
+      if (!tournaments.some((item) => item.status === 'applied')) return null;
       const section = document.createElement('details');
       section.className = 'archive-management';
       const summary = document.createElement('summary');
@@ -4248,7 +4722,7 @@ function adminHtml(page: AdminPage): string {
       const lotteryManagement = renderLotteryManagement(tournaments);
       if (lotteryManagement) body.append(lotteryManagement);
       const lotteryControls = lotteryManagement?.entryControls || [];
-      const guidance = tournaments[0].participant_guidance;
+      let guidance = tournaments[0].participant_guidance;
       const guidanceBox = element('section', 'guidance-management');
       guidanceBox.append(element('h5', '', '参加費・当日案内'));
 
@@ -4474,49 +4948,44 @@ function adminHtml(page: AdminPage): string {
       const guidanceActions = element('div', 'guidance-actions');
       const saveGuidance = element('button', 'secondary', guidance ? '参加費・案内を更新' : '参加費・案内を保存');
       saveGuidance.type = 'button';
-      const sendGuidance = element('button', 'success', '抽選結果・確定名簿・当日案内を送信');
+      const sendGuidance = element('button', 'success', '抽選結果・確定名簿・参加費・当日案内を保存して送信');
       sendGuidance.type = 'button';
-      sendGuidance.disabled = !guidance || !tournaments[0].participation_fees?.length;
+      sendGuidance.disabled = false;
       const guidanceMessage = element('span', 'entry-result', guidance
         ? '現在版: ' + guidance.sent_count + '件送信済み、' + guidance.pending_count + '件送信待ち' + (guidance.failed_count ? '、' + guidance.failed_count + '件失敗' : '')
-        : '案内を保存すると送信できます。');
-      saveGuidance.addEventListener('click', async () => {
+        : '送信時に入力内容をまとめて保存します。');
+
+      const prepareGuidanceForm = () => {
         const selected = guidanceFile.files?.[0];
         if (guidanceInputType.value === 'text' && !guidanceText.value.trim()) {
-          guidanceMessage.textContent = '当日案内のテキストを入力してください。';
           guidanceText.focus();
-          return;
+          throw new Error('当日案内のテキストを入力してください。');
         }
         if (guidanceInputType.value === 'file' && !selected && !guidance?.document_url) {
-          guidanceMessage.textContent = '当日案内のPDFまたはWordを選択してください。';
           guidanceFile.focus();
-          return;
+          throw new Error('当日案内のPDFまたはWordを選択してください。');
         }
         const feesByGrade = {};
         for (const [grade, input] of feeInputs) {
           const amount = Number(input.value);
           if (!input.value || !Number.isInteger(amount) || amount < 500 || amount > 3000 || amount % 500 !== 0) {
-            guidanceMessage.textContent = (grade === 'beginner' ? '初心者級' : grade + '級') + 'の参加費を500〜3,000円の500円刻みで選択してください。';
             input.focus();
-            return;
+            throw new Error((grade === 'beginner' ? '初心者級' : grade + '級') + 'の参加費を500〜3,000円の500円刻みで選択してください。');
           }
           feesByGrade[grade] = amount;
         }
         const advance = paymentMethod.value === 'advance_manager';
         if (advance && organizerSource.value === 'text' && !organizerDetails.value.trim()) {
-          guidanceMessage.textContent = '主催者への振込先・振込方法を入力してください。';
-          return;
+          organizerDetails.focus();
+          throw new Error('主催者への振込先・振込方法を入力してください。');
         }
         if (advance && organizerSource.value === 'file' && !organizerFile.files?.[0] && !guidance?.organizer_payment_document_url) {
-          guidanceMessage.textContent = '主催者振込情報のPDFまたはWordを選択してください。';
-          return;
+          organizerFile.focus();
+          throw new Error('主催者振込情報のPDFまたはWordを選択してください。');
         }
         if (advance && (!organizerPaymentDeadline.value || !organizerPaymentTime.value || !paymentDeadline.value || !paymentTime.value)) {
-          guidanceMessage.textContent = '担当者の支払日とサークル内支払期限を入力してください。';
-          return;
+          throw new Error('担当者の支払日とサークル内支払期限を入力してください。');
         }
-        saveGuidance.disabled = true;
-        guidanceMessage.textContent = '保存中…';
         const form = new FormData();
         form.append('bodyText', guidanceText.value);
         form.append('guidanceInputType', guidanceInputType.value);
@@ -4531,16 +5000,30 @@ function adminHtml(page: AdminPage): string {
         form.append('tournamentIds', JSON.stringify(tournaments.map((item) => item.tournament_id)));
         if (guidanceInputType.value === 'file' && selected) form.append('file', selected);
         if (organizerFile.files?.[0]) form.append('organizerPaymentFile', organizerFile.files[0]);
+        return form;
+      };
+
+      const persistGuidance = async () => {
+        const form = prepareGuidanceForm();
+        const response = await fetch('/api/participant-guidance', { method: 'POST', body: form });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || '案内を保存できませんでした。');
+        if (result.guidance?.conversionWarnings?.length) {
+          window.alert(result.guidance.conversionWarnings.join('\n'));
+        }
+        guidance = { ...(guidance || {}), ...(result.guidance || {}) };
+        return result;
+      };
+
+      saveGuidance.addEventListener('click', async () => {
+        saveGuidance.disabled = true;
+        guidanceMessage.textContent = '保存中…';
         try {
-          const response = await fetch('/api/participant-guidance', { method: 'POST', body: form });
-          const result = await response.json();
-          if (!response.ok) throw new Error(result.error || '案内を保存できませんでした。');
-          if (result.guidance?.conversionWarnings?.length) {
-            window.alert(result.guidance.conversionWarnings.join('\n'));
-          }
-          await loadTournaments();
+          await persistGuidance();
+          guidanceMessage.textContent = '参加費・当日案内を保存しました。入力中の確定名簿と当落結果はそのままです。';
         } catch (error) {
           guidanceMessage.textContent = error instanceof Error ? error.message : '案内を保存できませんでした。';
+        } finally {
           saveGuidance.disabled = false;
         }
       });
@@ -4586,8 +5069,12 @@ function adminHtml(page: AdminPage): string {
           guidanceMessage.textContent = '出場確定者を1人以上登録してください。';
           return;
         }
+        const promotedControls = lotteryControls.filter((control) =>
+          control.initialStatus === 'not_selected' && control.select.value === 'selected');
+        const promotionOnly = promotedControls.length > 0 &&
+          lotteryControls.every((control) => control.initialStatus !== 'submitted');
         const paymentDescription = paymentMethod.value === 'onsite_cash' ? '当日現金の案内' : '級別参加費と事前支払い案内';
-        if (!confirm('確定名簿のアップロード、全選手の抽選結果保存、チャンネル告知、出場確定者' + selectedCount + '人への当日案内・' + paymentDescription + 'のDM送信をまとめて実行しますか？')) return;
+        if (!confirm('参加費・当日案内の保存、確定名簿のアップロード、全選手の抽選結果保存、チャンネル告知、出場確定者' + selectedCount + '人への当日案内・' + paymentDescription + 'のDM送信をまとめて実行しますか？')) return;
         sendGuidance.disabled = true;
         rosterFile.disabled = true;
         lotteryControls.forEach((control) => {
@@ -4596,8 +5083,10 @@ function adminHtml(page: AdminPage): string {
           control.paymentSelect.disabled = true;
         });
         try {
+          guidanceMessage.textContent = selectedRosterFile ? '1/4 参加費・当日案内を保存中…' : '1/3 参加費・当日案内を保存中…';
+          await persistGuidance();
           if (selectedRosterFile) {
-            guidanceMessage.textContent = '1/3 確定名簿をアップロード中…';
+            guidanceMessage.textContent = '2/4 確定名簿をアップロード中…';
             const rosterForm = new FormData();
             rosterForm.append('file', selectedRosterFile);
             rosterForm.append('documentType', 'roster');
@@ -4609,7 +5098,7 @@ function adminHtml(page: AdminPage): string {
               window.alert('確定名簿の原本は保存しましたが、閲覧用PDFを生成できませんでした。現在は原本のダウンロードリンクを使用します。');
             }
           }
-          guidanceMessage.textContent = selectedRosterFile ? '2/3 抽選結果を保存中…' : '1/2 抽選結果を保存中…';
+          guidanceMessage.textContent = selectedRosterFile ? '3/4 抽選結果を保存中…' : '2/3 抽選結果を保存中…';
           const entriesResponse = await fetch('/api/tournament-entries/batch', {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
@@ -4617,7 +5106,12 @@ function adminHtml(page: AdminPage): string {
           });
           const entriesBody = await entriesResponse.json();
           if (!entriesResponse.ok) throw new Error(entriesBody.error || '全員分の抽選結果を保存できませんでした。');
-          guidanceMessage.textContent = selectedRosterFile ? '3/3 通知を予約中…' : '2/2 通知を予約中…';
+          if (promotionOnly) {
+            guidanceMessage.textContent = '繰り上げ対象者 ' + Number(entriesBody.promotionDmQueued || 0) + '人にだけDMを予約しました。' + (entriesBody.promotionDmUnavailable ? ' DM対象外 ' + entriesBody.promotionDmUnavailable + '件。' : '');
+            await loadTournaments();
+            return;
+          }
+          guidanceMessage.textContent = selectedRosterFile ? '4/4 通知を予約中…' : '3/3 通知を予約中…';
           const response = await fetch('/api/lottery-results/send', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -4625,7 +5119,9 @@ function adminHtml(page: AdminPage): string {
           });
           const result = await response.json();
           if (!response.ok) throw new Error(result.error || '抽選結果と確定者案内を予約できませんでした。');
-          guidanceMessage.textContent = '大会お知らせ ' + result.channelQueued + '件、担当者向け振込情報 ' + result.managerPaymentQueued + '件、確定者DM ' + result.dmQueued + '件を予約しました。' + (result.dmUnavailable ? ' DM対象外 ' + result.dmUnavailable + '件。' : '');
+          const dmQueued = Number(result.dmQueued || 0) + Number(entriesBody.promotionDmQueued || 0);
+          const dmUnavailable = Number(result.dmUnavailable || 0) + Number(entriesBody.promotionDmUnavailable || 0);
+          guidanceMessage.textContent = '大会お知らせ ' + result.channelQueued + '件、担当者向け参加費情報 ' + result.managerPaymentQueued + '件、確定者DM ' + dmQueued + '件、キャンセル待ちDM ' + Number(result.waitlistDmQueued || 0) + '件を予約しました。' + (dmUnavailable || result.waitlistDmUnavailable ? ' DM対象外 ' + (dmUnavailable + Number(result.waitlistDmUnavailable || 0)) + '件。' : '');
         } catch (error) {
           guidanceMessage.textContent = error instanceof Error ? error.message : '抽選結果と確定者案内を予約できませんでした。';
           sendGuidance.disabled = false;
@@ -4669,7 +5165,7 @@ function adminHtml(page: AdminPage): string {
     }
 
     function renderArchiveManagement(tournaments) {
-      if (!tournaments.some((item) => item.status === 'applied' || item.status === 'closed')) return null;
+      if (!tournaments.some((item) => item.status === 'applied')) return null;
       const section = document.createElement('details');
       section.className = 'archive-management';
       const summary = document.createElement('summary');
@@ -4864,9 +5360,10 @@ function adminHtml(page: AdminPage): string {
       headingTitle.append(element('h3', '', tournament.title), editButton);
       heading.append(
         headingTitle,
-        element('span', 'badge ' + (statuses.length === 1 ? statuses[0] : 'draft'), statuses.length === 1 ? (statusLabels[statuses[0]] || statuses[0]) : '複数ステータス'),
+        element('span', 'badge ' + (statuses.length === 1 ? statuses[0] : 'draft'), statuses.length === 1 ? (workflowStatusLabels[statuses[0]] || statuses[0]) : '状態不一致'),
       );
       card.append(heading);
+      if (statuses.length === 1) card.append(renderWorkflowProgress(statuses[0]));
 
       const distinctEventDates = [...new Set(tournaments.map((item) => item.event_start_date))];
       const dateDescription = distinctEventDates.length === 1
@@ -4922,6 +5419,7 @@ function adminHtml(page: AdminPage): string {
       const cardActions = element('div', 'card-actions');
       const rawStatuses = [...new Set(tournaments.map((item) => item.status))];
       const originalStatus = rawStatuses.length === 1 ? rawStatuses[0] : '';
+      const displayedOriginalStatus = originalStatus;
       const applicationBlocked = tournaments.some((item) => item.status === 'canceled' || tournamentDisplayStatus(item) === 'no_participants');
       const statusSelect = document.createElement('select');
       statusSelect.className = 'card-status-select';
@@ -4931,34 +5429,41 @@ function adminHtml(page: AdminPage): string {
         mixed.textContent = '複数ステータス';
         mixed.selected = true;
         statusSelect.append(mixed);
+      } else if (!Object.hasOwn(manageableStatusLabels, originalStatus)) {
+        const current = document.createElement('option');
+        current.value = '';
+        current.textContent = workflowStatusLabels[statuses[0]] || '現在の状態';
+        current.selected = true;
+        current.disabled = true;
+        statusSelect.append(current);
       }
-      Object.entries(statusLabels).filter(([value]) => value !== 'no_participants').forEach(([value, label]) => {
+      Object.entries(manageableStatusLabels).forEach(([value, label]) => {
         const option = document.createElement('option');
         option.value = value;
         option.textContent = label;
-        option.selected = rawStatuses.length === 1 && value === rawStatuses[0];
+        option.selected = value === displayedOriginalStatus;
         option.disabled = value === 'applied' && applicationBlocked;
         statusSelect.append(option);
       });
       if (applicationBlocked) statusSelect.title = '申込完了へ戻す場合は、一度ほかのステータスへ変更してください。';
       const statusControl = element('label', 'card-status-control');
-      statusControl.append(element('span', 'card-status-label', '大会ステータス'), statusSelect);
+      statusControl.append(element('span', 'card-status-label', '状態を修正'), statusSelect);
       const statusMessage = element('span', 'status-message', '');
       statusSelect.addEventListener('change', async () => {
         if (!statusSelect.value) {
-          statusSelect.value = originalStatus;
+          statusSelect.value = displayedOriginalStatus;
           return;
         }
-        if (originalStatus === statusSelect.value) return;
+        if (displayedOriginalStatus === statusSelect.value) return;
         const nextStatus = statusSelect.value;
         const grades = tournaments.map(tournamentGradeLabel).join('・');
-        const nextLabel = statusLabels[nextStatus] || nextStatus;
+        const nextLabel = manageableStatusLabels[nextStatus] || nextStatus;
         const sendsNotification = nextStatus === 'applied';
         const confirmMessage = tournament.title + '（' + grades + '）\n現在の状態から「' + nextLabel + '」へ変更します。よろしいですか？';
         statusSelect.disabled = true;
         const confirmed = await confirmTournamentStatusChange(confirmMessage, sendsNotification);
         if (!confirmed) {
-          statusSelect.value = originalStatus;
+          statusSelect.value = displayedOriginalStatus;
           statusSelect.disabled = false;
           statusMessage.textContent = '';
           return;
@@ -4980,7 +5485,7 @@ function adminHtml(page: AdminPage): string {
         } catch (error) {
           statusMessage.className = 'status-message error';
           statusMessage.textContent = error instanceof Error ? error.message : 'ステータスを変更できませんでした。';
-          statusSelect.value = originalStatus;
+          statusSelect.value = displayedOriginalStatus;
           statusSelect.disabled = false;
         }
       });
@@ -4989,7 +5494,7 @@ function adminHtml(page: AdminPage): string {
 
       const responseSections = element('div', 'response-sections');
       const applicationCompleted = tournaments.every((item) =>
-        item.status === 'applied' || item.status === 'closed'
+        item.status === 'applied'
       );
       responseSections.append(responseSection(tournaments, 'yes'));
       if (!applicationCompleted) {
@@ -5650,22 +6155,25 @@ function adminHtml(page: AdminPage): string {
         let documentConversionWarning = false;
         const payload = Object.fromEntries(new FormData(editTournamentForm).entries());
         delete payload.documentFile;
+        delete payload.editGrades;
         payload.tournamentIds = editingTournaments.map((tournament) => tournament.tournament_id);
-        payload.eventDatesByTournament = Object.fromEntries(
-          Array.from(editEventDateGrid.querySelectorAll('input[data-tournament-id]')).map((input) => [input.dataset.tournamentId, input.value]),
+        payload.grades = selectedEditGrades();
+        if (!payload.grades.length) throw new Error('開催級を1つ以上選択してください。');
+        payload.eventDatesByGrade = Object.fromEntries(
+          Array.from(editEventDateGrid.querySelectorAll('input[data-grade]')).map((input) => [input.dataset.grade, input.value]),
         );
-        payload.eventStartDate = payload.eventDatesByTournament[payload.tournamentIds[0]];
+        payload.eventStartDate = payload.eventDatesByGrade[payload.grades[0]];
         payload.internalDeadline = localJstToIso(payload.internalDeadline);
         payload.trueDeadline = localJstToIso(payload.trueDeadline);
         const documentFile = editTournamentForm.elements.documentFile.files?.[0];
         if (documentFile) {
           editTournamentResult.textContent = '大会要項をアップロード・変換中…';
-          const grades = editingTournaments.map((tournament) => tournament.all_grades === 1 ? 'all' : tournament.grade);
+          const grades = payload.grades;
           const uploadedDocument = await uploadTournamentGuideline(
             documentFile,
             payload.title,
             grades,
-            Object.values(payload.eventDatesByTournament),
+            Object.values(payload.eventDatesByGrade),
           );
           payload.documentUrl = uploadedDocument.url;
           documentConversionWarning = uploadedDocument.conversionStatus === 'failed';
@@ -5879,6 +6387,24 @@ export async function handleAdminRequest(
       }
       console.error("期限自動入力設定の保存エラー", error);
       return json({ error: "期限設定を保存できませんでした。" }, 500);
+    }
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/settings/database-export") {
+    try {
+      const archive = await createDatabaseCsvArchive(env.DB);
+      return new Response(Uint8Array.from(archive.bytes).buffer, {
+        headers: {
+          ...securityHeaders,
+          "Content-Type": "application/zip",
+          "Content-Disposition": `attachment; filename="${archive.filename}"`,
+          "Cache-Control": "private, no-store",
+          "X-Exported-Table-Count": String(archive.tableCount),
+        },
+      });
+    } catch (error: unknown) {
+      console.error("データベースCSV出力エラー", error);
+      return json({ error: "データベースをCSV出力できませんでした。" }, 500);
     }
   }
 

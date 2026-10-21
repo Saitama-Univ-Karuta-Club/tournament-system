@@ -37,8 +37,7 @@ describe("post-deadline workflow", () => {
     expect(fields.some((field) => field.name.includes("期限"))).toBe(true);
     expect(fields.some((field) => field.value.includes("2,000円"))).toBe(true);
     expect(JSON.stringify(message)).toContain("大会担当者へ事前に支払い");
-    expect(JSON.stringify(message)).toContain("支払い完了");
-    expect(JSON.stringify(message)).toContain("操作を取り消す");
+    expect(message.components).toBeUndefined();
   });
 
   it("lists paid and unpaid entrants with their fees for the manager", () => {
@@ -73,6 +72,7 @@ describe("post-deadline workflow", () => {
       {
         title: "埼玉大会",
         trueDeadline: "2026-11-09T14:59:00.000Z",
+        paymentCollectionMethod: "advance_manager",
         paymentDetails: "埼玉銀行 かるた支店 普通 1234567",
         organizerPaymentSource: "text",
         organizerPaymentDocumentUrl: null,
@@ -104,6 +104,7 @@ describe("post-deadline workflow", () => {
       {
         title: "埼玉大会",
         trueDeadline: "2026-11-09T14:59:00.000Z",
+        paymentCollectionMethod: "advance_manager",
         paymentDetails: "振込先",
         organizerPaymentSource: "text",
         organizerPaymentDocumentUrl: null,
@@ -123,5 +124,33 @@ describe("post-deadline workflow", () => {
     expect(message.content).toContain("【至急・主催者への振込未完了】");
     expect(message.content).toContain("本日が主催締切日");
     expect(message.embeds?.[0]?.color).toBe(0xed4245);
+  });
+
+  it("当日支払いでも担当者チャンネル用の参加費情報を作る", () => {
+    const message = buildOrganizerPaymentMessage(
+      {
+        title: "埼玉大会",
+        trueDeadline: "2026-11-09T14:59:00.000Z",
+        paymentCollectionMethod: "onsite_cash",
+        paymentDetails: null,
+        organizerPaymentSource: "text",
+        organizerPaymentDocumentUrl: null,
+        organizerPaymentFileName: null,
+        guidanceBodyText: null,
+        guidanceDocumentUrl: null,
+        guidanceFileName: null,
+        organizerPaymentDeadline: null,
+        paymentDeadline: null,
+        organizerPaymentStatus: "unpaid",
+      },
+      [
+        { display_name: "石田洋音", grade: "C", participation_fee_yen: 2000, payment_status: "unpaid" },
+      ],
+    );
+
+    expect(message.content).toContain("担当者向け・当日支払い情報");
+    expect(JSON.stringify(message)).toContain("2,000円");
+    expect(JSON.stringify(message)).toContain("集金・振込作業はありません");
+    expect(JSON.stringify(message)).not.toContain("担当者の支払日");
   });
 });

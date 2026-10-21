@@ -12,8 +12,10 @@ import {
   buildResponseDeadlineChannelReminderMessage,
   buildResponseDeadlineDmReminderMessage,
   buildResponseDeadlineReminderTargets,
+  advanceTournamentWorkflowStages,
   closeExpiredTournamentsWithoutParticipants,
   createTournaments,
+  enqueueTournamentUpdateNotifications,
   getDeadlineReminderSchedule,
   getResponseDeadlineReminderSchedule,
   getRetryDelayMinutes,
@@ -115,13 +117,6 @@ describe("attendance DM", () => {
     expect(message.embeds?.[0]?.fields?.[0]?.value).toBe("すべて");
   });
 
-  it("labels tournament update DMs and keeps the current response", () => {
-    const message = buildAttendanceMessage(tournament, "yes", true);
-
-    expect(message.content).toContain("大会情報更新");
-    expect(message.content).toContain("現在の回答: **参加希望**");
-  });
-
   it("adds the member portal and PDF links to announcements and DMs", () => {
     const withDocument = {
       ...tournament,
@@ -130,7 +125,7 @@ describe("attendance DM", () => {
     const portalUrl = "https://portal.example.com";
     const messages = [
       buildAnnouncementMessage(withDocument, false, portalUrl),
-      buildAttendanceMessage(withDocument, undefined, false, portalUrl),
+      buildAttendanceMessage(withDocument, undefined, portalUrl),
     ];
 
     for (const message of messages) {
@@ -156,6 +151,20 @@ describe("attendance DM", () => {
       .toBe(false);
   });
 
+  it("同時登録した複数級を1通のお知らせにまとめる", () => {
+    const message = buildAnnouncementMessage([
+      { ...tournament, tournament_id: "T-c", registration_group_id: "TG-1", grade: "C" },
+      { ...tournament, tournament_id: "T-d", registration_group_id: "TG-1", grade: "D" },
+    ]);
+    const fields = message.embeds?.[0]?.fields ?? [];
+
+    expect(fields).toContainEqual(expect.objectContaining({
+      name: "対象級",
+      value: "C級・D級",
+    }));
+    expect(message.embeds).toHaveLength(1);
+  });
+
   it("builds channel and unanswered-member deadline reminders", () => {
     const portalUrl = "https://portal.example.com";
     const channelMessage = buildResponseDeadlineChannelReminderMessage(
@@ -171,7 +180,9 @@ describe("attendance DM", () => {
       "サークル内締切の2日前です。未回答の方はお早めに回答お願いします。",
     );
     expect(channelMessage.components).toBeUndefined();
-    expect(dmMessage.content).toContain("まだ回答が登録されていません");
+    expect(dmMessage.content).toBe(
+      "【回答締切リマインダー】\nサークル内締切がもうすぐです。\nまだ回答が登録されていません。締切までに参加意思を選択してください。",
+    );
     expect(dmMessage.components?.[0]?.components).toHaveLength(3);
     expect(dmMessage.embeds?.[0]?.fields).toContainEqual(
       expect.objectContaining({ name: "Web版大会参加確認" }),
@@ -179,7 +190,21 @@ describe("attendance DM", () => {
   });
 });
 
-describe("automatic no-participant closure", () => {
+describe("automatic tournament workflow transitions", () => {
+  it("moves registration-open tournaments to application-pending after the internal deadline", async () => {
+    const run = vi.fn().mockResolvedValue({ meta: { changes: 3 } });
+    const bind = vi.fn(() => ({ run }));
+    const prepare = vi.fn(() => ({ bind }));
+    const now = new Date("2026-10-25T15:01:00.000Z");
+
+    await expect(advanceTournamentWorkflowStages(
+      { prepare } as unknown as D1Database,
+      now,
+    )).resolves.toBe(3);
+    expect(prepare).toHaveBeenCalledWith(expect.stringContaining("workflow_stage = 'registration_open'"));
+    expect(bind).toHaveBeenCalledWith(now.toISOString(), now.toISOString());
+  });
+
   it("closes every due tournament returned by the zero-participant query", async () => {
     const statements: Array<{ sql: string; values: unknown[] }> = [];
     const prepare = vi.fn((sql: string) => ({
@@ -206,7 +231,9 @@ describe("automatic no-participant closure", () => {
 
     expect(changed).toBe(2);
     expect(prepare).toHaveBeenCalledWith(expect.stringContaining("responses.response = 'yes'"));
+    expect(prepare).toHaveBeenCalledWith(expect.stringContaining("tournaments.true_deadline <= ?"));
     expect(statements.filter((item) => item.sql.includes("UPDATE tournaments"))).toHaveLength(2);
+    expect(statements.filter((item) => item.sql.includes("workflow_stage = 'no_participants'"))).toHaveLength(2);
     expect(statements.filter((item) => item.sql.includes("system:no-participants"))).toHaveLength(2);
   });
 
@@ -410,17 +437,72 @@ describe("notification queue", () => {
     ]);
   });
 
-  it("uses revision-scoped idempotency keys for update notifications", () => {
-    const [announcement, directMessage] = buildNotificationTargets(
+  it("shows important tournament changes in a channel update", () => {
+    const message = buildAnnouncementMessage(
       tournament,
-      "channel-1",
-      [{ member_id: "M-1", discord_user_id: "discord-1" }],
-      { context: "update", revision: "revision-1" },
+      true,
+      undefined,
+      ["開催級: ABCD → ABC", "要項ファイルを差し替えました。"],
     );
 
-    expect(announcement.idempotencyKey).toContain("announcement:update:revision-1");
-    expect(directMessage.idempotencyKey).toContain("invitation_dm:update:revision-1");
-    expect(directMessage.deliveryContext).toBe("update");
+    expect(message.content).toBe("【大会情報更新】\n重要な大会情報を変更しました。");
+    expect(message.embeds?.[0]?.fields).toContainEqual({
+      name: "変更内容",
+      value: "・開催級: ABCD → ABC\n・要項ファイルを差し替えました。",
+      inline: false,
+    });
+  });
+
+  it("queues a tournament edit only for the announcement channel", async () => {
+    const statements: Array<{ sql: string; values: unknown[] }> = [];
+    const prepare = vi.fn((sql: string) => ({
+      first: vi.fn().mockResolvedValue({ announcement_channel_id: "channel-1" }),
+      bind: vi.fn((...values: unknown[]) => ({
+        first: vi.fn().mockResolvedValue({ announcement_channel_id: "channel-1" }),
+        sql,
+        values,
+      })),
+    }));
+    const batch = vi.fn(async (items: Array<{ sql: string; values: unknown[] }>) => {
+      statements.push(...items);
+      return items.map(() => ({ meta: { changes: 1 } }));
+    });
+
+    const queued = await enqueueTournamentUpdateNotifications(
+      { DB: { prepare, batch } as unknown as D1Database },
+      [{
+        ...tournament,
+        tournament_id: "T-11111111-1111-4111-8111-111111111111",
+      }],
+      "revision-1",
+      ["開催日: 2026-11-01 → 2026-11-02"],
+    );
+
+    expect(queued).toBe(1);
+    expect(statements).toHaveLength(1);
+    expect(statements[0].values).toEqual(expect.arrayContaining([
+      "announcement",
+      "channel",
+      "update",
+      '["開催日: 2026-11-01 → 2026-11-02"]',
+    ]));
+    expect(statements[0].values).not.toContain("dm");
+  });
+
+  it("does not queue an update without an important change", async () => {
+    const prepare = vi.fn();
+    const queued = await enqueueTournamentUpdateNotifications(
+      { DB: { prepare } as unknown as D1Database },
+      [{
+        ...tournament,
+        tournament_id: "T-11111111-1111-4111-8111-111111111111",
+      }],
+      "revision-1",
+      [],
+    );
+
+    expect(queued).toBe(0);
+    expect(prepare).not.toHaveBeenCalled();
   });
 
   it("builds one application-completed message for multiple grades", () => {

@@ -462,7 +462,7 @@ describe("Discord Worker", () => {
     ]);
   });
 
-  it("updates payment status from a participant-guidance DM button", async () => {
+  it("updates payment status while preserving a waitlist-promotion DM", async () => {
     const verifier = vi.fn().mockResolvedValue(true);
     const paymentRecorder = vi.fn().mockResolvedValue({
       content: "支払い状態を更新しました。",
@@ -480,7 +480,7 @@ describe("Discord Worker", () => {
           type: 3,
           user: { id: "discord-user-id" },
           data: {
-            custom_id: "payment:T-11111111-1111-4111-8111-111111111111:paid",
+            custom_id: "payment-promotion:T-11111111-1111-4111-8111-111111111111:paid",
           },
         }),
       }),
@@ -501,6 +501,7 @@ describe("Discord Worker", () => {
       tournamentId: "T-11111111-1111-4111-8111-111111111111",
       discordUserId: "discord-user-id",
       status: "paid",
+      waitlistPromotion: true,
     });
     await expect(response.json()).resolves.toMatchObject({
       type: 7,
@@ -558,6 +559,7 @@ describe("Discord Worker", () => {
       tournamentId: "T-11111111-1111-4111-8111-111111111111",
       discordUserId: "discord-user-id",
       status: "paid",
+      waitlistPromotion: false,
     });
     expect(originalResponseEditor).toHaveBeenCalledWith(
       "application-id",

@@ -119,8 +119,9 @@ describe("member portal", () => {
     expect(html).not.toContain('<option value="open"');
     expect(html).not.toContain('<option value="closed"');
     expect(html).toContain('<option value="current">すべての進行中</option>');
-    expect(html).toContain('<option value="active">申込受付中</option>');
-    expect(html).toContain('<option value="applied">申込済み</option>');
+    expect(html).toContain('<option value="registration_open">回答受付中</option>');
+    expect(html).toContain('<option value="application_pending">申込対応中</option>');
+    expect(html).toContain('<option value="application_complete">申込完了</option>');
     expect(html).toContain('<option value="pre_lottery">抽選前</option>');
     expect(html).toContain('<option value="confirmed">参加者確定</option>');
     expect(response.headers.get("Content-Security-Policy")).toContain("frame-ancestors 'none'");

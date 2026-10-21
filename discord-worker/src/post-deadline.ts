@@ -63,6 +63,7 @@ interface PaymentRow extends RecipientRow {
   grade: string;
   participation_fee_yen: number;
   payment_status: "paid" | "unpaid";
+  late_payment_consultation: number;
 }
 
 export interface PaymentReminderParticipant {
@@ -75,6 +76,7 @@ export interface PaymentReminderParticipant {
 export interface OrganizerPaymentGuidance {
   title: string;
   trueDeadline: string;
+  paymentCollectionMethod: "advance_manager" | "onsite_cash";
   paymentDetails: string | null;
   organizerPaymentSource: "text" | "file" | "guidance";
   organizerPaymentDocumentUrl: string | null;
@@ -82,8 +84,8 @@ export interface OrganizerPaymentGuidance {
   guidanceBodyText: string | null;
   guidanceDocumentUrl: string | null;
   guidanceFileName: string | null;
-  organizerPaymentDeadline: string;
-  paymentDeadline: string;
+  organizerPaymentDeadline: string | null;
+  paymentDeadline: string | null;
   organizerPaymentStatus: "unpaid" | "paid";
 }
 
@@ -159,7 +161,7 @@ export function buildPaymentReminderDmMessage(
   title: string,
   participationFeeYen: number,
   paymentDeadline: string,
-  tournamentId: string,
+  _tournamentId: string,
 ): DiscordMessagePayload {
   return {
     content: defaultBotMessageContent("payment_reminder_dm"),
@@ -170,13 +172,6 @@ export function buildPaymentReminderDmMessage(
         { name: "参加費", value: `${new Intl.NumberFormat("ja-JP").format(participationFeeYen)}円`, inline: true },
         { name: "支払い方法", value: "大会担当者へ事前に支払い", inline: true },
         { name: "サークル内支払期限", value: formatJstDateTime(paymentDeadline), inline: false },
-      ],
-    }],
-    components: [{
-      type: 1,
-      components: [
-        { type: 2, style: 3, label: "支払い完了", custom_id: `payment:${tournamentId}:paid` },
-        { type: 2, style: 2, label: "操作を取り消す", custom_id: `payment:${tournamentId}:unpaid` },
       ],
     }],
     allowed_mentions: { parse: [] },
@@ -259,6 +254,28 @@ export function buildOrganizerPaymentMessage(
     (sum, participant) => sum + Number(participant.participation_fee_yen),
     0,
   );
+  if (guidance.paymentCollectionMethod === "onsite_cash") {
+    return {
+      content: defaultBotMessageContent("onsite_payment_info"),
+      embeds: [{
+        title: guidance.title,
+        color: 0x5865f2,
+        fields: [
+          {
+            name: `当日支払い予定（${participants.length}人）`,
+            value: `${amount(total)}円\n${breakdown}`,
+            inline: false,
+          },
+          {
+            name: "支払い方法",
+            value: "大会当日に参加者が主催者へ直接支払い\n大会担当者による集金・振込作業はありません。",
+            inline: false,
+          },
+        ],
+      }],
+      allowed_mentions: { parse: [] },
+    };
+  }
   let paymentInstructions = "当日案内を参照してください。";
   if (guidance.organizerPaymentSource === "text") {
     paymentInstructions = guidance.paymentDetails || "振込先情報未登録";
@@ -290,12 +307,12 @@ export function buildOrganizerPaymentMessage(
     },
     {
       name: "担当者の支払日",
-      value: formatJstDateTime(guidance.organizerPaymentDeadline),
+      value: formatJstDateTime(guidance.organizerPaymentDeadline!),
       inline: true,
     },
     {
       name: "サークル内支払期限",
-      value: formatJstDateTime(guidance.paymentDeadline),
+      value: formatJstDateTime(guidance.paymentDeadline!),
       inline: true,
     },
     {
@@ -421,7 +438,15 @@ async function paymentParticipants(db: D1Database, groupKey: string): Promise<Pa
       COALESCE(NULLIF(members.display_name_kana, ''), '') AS display_name_kana,
       CASE WHEN tournaments.all_grades = 1 THEN members.grade ELSE tournaments.grade END AS grade,
       tournament_participation_fees.amount_yen AS participation_fee_yen,
-      COALESCE(tournament_entry_payments.status, 'unpaid') AS payment_status
+      COALESCE(tournament_entry_payments.status, 'unpaid') AS payment_status,
+      EXISTS (
+        SELECT 1
+        FROM participant_guidance_deliveries
+        WHERE participant_guidance_deliveries.group_key =
+            COALESCE(tournaments.registration_group_id, tournaments.tournament_id)
+          AND participant_guidance_deliveries.member_id = members.member_id
+          AND participant_guidance_deliveries.idempotency_key GLOB 'waitlist_promotion_late:*'
+      ) AS late_payment_consultation
      FROM tournament_entries
      INNER JOIN tournaments ON tournaments.tournament_id = tournament_entries.tournament_id
      INNER JOIN members ON members.member_id = tournament_entries.member_id
@@ -466,7 +491,10 @@ export async function enqueueDuePaymentReminders(
     const payments = await paymentParticipants(env.DB, guidance.group_key);
     const unpaid = payments.filter((participant) => participant.payment_status === "unpaid");
     const available = unpaid.filter((participant) =>
-      participant.status === "active" && participant.dm_enabled === 1 && Boolean(participant.discord_user_id)
+      participant.late_payment_consultation !== 1 &&
+      participant.status === "active" &&
+      participant.dm_enabled === 1 &&
+      Boolean(participant.discord_user_id)
     );
     const deadlineKey = guidance.payment_deadline.replace(/[^0-9]/g, "");
     const targets: DeliveryTarget[] = available.map((participant) => ({
@@ -655,6 +683,7 @@ async function organizerPaymentGuidance(
 ): Promise<OrganizerPaymentGuidance> {
   const row = await db.prepare(
     `SELECT tournaments.title, tournaments.true_deadline,
+      tournament_participant_guidance.payment_collection_method,
       tournament_participant_guidance.payment_details,
       tournament_participant_guidance.organizer_payment_source,
       tournament_participant_guidance.organizer_payment_document_url,
@@ -668,11 +697,11 @@ async function organizerPaymentGuidance(
      FROM tournament_participant_guidance
      INNER JOIN tournaments
        ON tournaments.tournament_id = tournament_participant_guidance.representative_tournament_id
-     WHERE tournament_participant_guidance.group_key = ?
-       AND tournament_participant_guidance.payment_collection_method = 'advance_manager'`,
+     WHERE tournament_participant_guidance.group_key = ?`,
   ).bind(groupKey).first<{
     title: string;
     true_deadline: string;
+    payment_collection_method: "advance_manager" | "onsite_cash";
     payment_details: string | null;
     organizer_payment_source: "text" | "file" | "guidance";
     organizer_payment_document_url: string | null;
@@ -684,12 +713,19 @@ async function organizerPaymentGuidance(
     payment_deadline: string | null;
     organizer_payment_status: "unpaid" | "paid";
   }>();
-  if (!row?.organizer_payment_deadline || !row.payment_deadline) {
+  if (!row) {
+    throw new Error("参加費の支払い方法が登録されていません。");
+  }
+  if (
+    row.payment_collection_method === "advance_manager" &&
+    (!row.organizer_payment_deadline || !row.payment_deadline)
+  ) {
     throw new Error("担当者向けの振込情報または支払期限が登録されていません。");
   }
   return {
     title: row.title,
     trueDeadline: row.true_deadline,
+    paymentCollectionMethod: row.payment_collection_method,
     paymentDetails: row.payment_details,
     organizerPaymentSource: row.organizer_payment_source,
     organizerPaymentDocumentUrl: row.organizer_payment_document_url,
@@ -777,7 +813,9 @@ export async function processPostDeadlineQueue(
         );
         messageSettingKey = delivery.delivery_kind === "organizer_payment_overdue_channel"
           ? "organizer_payment_overdue"
-          : "organizer_payment_info";
+          : guidance.paymentCollectionMethod === "onsite_cash"
+            ? "onsite_payment_info"
+            : "organizer_payment_info";
       } else {
         const guidance = await paymentGuidance(env.DB, delivery.group_key);
         const payments = await paymentParticipants(env.DB, delivery.group_key);

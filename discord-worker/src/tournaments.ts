@@ -71,6 +71,7 @@ export interface TournamentRow {
   venue?: string | null;
   document_url?: string | null;
   closure_reason?: "no_participants" | null;
+  workflow_stage?: string;
   application_method?: TournamentApplicationMethod | null;
   application_roster_url?: string | null;
   application_roster_file_name?: string | null;
@@ -97,6 +98,7 @@ export interface NotificationTarget {
   reminderKind?: ReminderKind;
   deliveryContext?: "initial" | "update" | "completion" | "response_reminder";
   relatedTournamentIds?: string[];
+  changeDetails?: string[];
 }
 
 export type ReminderKind = "internal_deadline" | "organizer_deadline";
@@ -120,6 +122,7 @@ interface QueuedNotificationRow extends TournamentRow {
   reminder_kind: ReminderKind | null;
   delivery_context: "initial" | "update" | "completion" | "response_reminder";
   related_tournament_ids: string | null;
+  change_details: string | null;
 }
 
 interface ReminderTournamentRow extends TournamentRow {
@@ -397,6 +400,29 @@ export function formatTournamentGrade(tournament: TournamentRow): string {
   return tournament.all_grades === 1 ? "すべて" : formatGrade(tournament.grade);
 }
 
+function asTournamentGroup(
+  tournamentOrGroup: TournamentRow | TournamentRow[],
+): TournamentRow[] {
+  return Array.isArray(tournamentOrGroup) ? tournamentOrGroup : [tournamentOrGroup];
+}
+
+function formatTournamentGroupGrades(tournaments: TournamentRow[]): string {
+  return [...new Set(tournaments.map(formatTournamentGrade))].join("・");
+}
+
+function formatTournamentGroupDates(tournaments: TournamentRow[]): string {
+  const values = tournaments.map((tournament) =>
+    tournament.event_start_date === tournament.event_end_date
+      ? tournament.event_start_date
+      : `${tournament.event_start_date}〜${tournament.event_end_date}`
+  );
+  const unique = [...new Set(values)];
+  if (unique.length === 1) return unique[0];
+  return tournaments.map((tournament, index) =>
+    `${formatTournamentGrade(tournament)}: ${values[index]}`
+  ).join("\n");
+}
+
 function attendanceChoiceComponents(
   tournamentId: string,
 ): NonNullable<DiscordMessagePayload["components"]> {
@@ -467,7 +493,6 @@ export function buildAttendanceEditingMessage(
 export function buildAttendanceMessage(
   tournament: TournamentRow,
   selectedResponse?: string,
-  isUpdate = false,
   memberPortalUrl?: string,
 ): DiscordMessagePayload {
   const selected = selectedResponse
@@ -510,9 +535,7 @@ export function buildAttendanceMessage(
   }
 
   return {
-    content: isUpdate
-      ? `${defaultBotMessageContent("attendance_update")}${selected}`
-      : `${defaultBotMessageContent("attendance_request")}${selected}`,
+    content: `${defaultBotMessageContent("attendance_request")}${selected}`,
     embeds: [
       {
         title: tournament.title,
@@ -552,22 +575,30 @@ function buildTournamentAdminUrl(
 }
 
 export function buildAnnouncementMessage(
-  tournament: TournamentRow,
+  tournamentOrGroup: TournamentRow | TournamentRow[],
   isUpdate = false,
   memberPortalUrl?: string,
+  changeDetails: string[] = [],
 ): DiscordMessagePayload {
+  const tournaments = asTournamentGroup(tournamentOrGroup);
+  const tournament = tournaments[0];
+  if (!tournament) throw new Error("大会情報がありません。");
   const fields = [
+    ...(isUpdate && changeDetails.length > 0
+      ? [{
+        name: "変更内容",
+        value: changeDetails.map((detail) => `・${detail}`).join("\n"),
+        inline: false,
+      }]
+      : []),
     {
       name: "対象級",
-      value: formatTournamentGrade(tournament),
+      value: formatTournamentGroupGrades(tournaments),
       inline: true,
     },
     {
       name: "開催日",
-      value:
-        tournament.event_start_date === tournament.event_end_date
-          ? tournament.event_start_date
-          : `${tournament.event_start_date}〜${tournament.event_end_date}`,
+      value: formatTournamentGroupDates(tournaments),
       inline: true,
     },
     {
@@ -607,7 +638,7 @@ export function buildAnnouncementMessage(
 }
 
 export function buildResponseDeadlineChannelReminderMessage(
-  tournament: TournamentRow,
+  tournament: TournamentRow | TournamentRow[],
   memberPortalUrl?: string,
 ): DiscordMessagePayload {
   const message = buildAnnouncementMessage(tournament, false, memberPortalUrl);
@@ -625,7 +656,6 @@ export function buildResponseDeadlineDmReminderMessage(
   const message = buildAttendanceMessage(
     tournament,
     undefined,
-    false,
     memberPortalUrl,
   );
   return {
@@ -800,12 +830,15 @@ export function buildEntryResultsAnnouncementMessage(
 }
 
 export function buildDeadlineReminderMessage(
-  tournament: TournamentRow,
+  tournamentOrGroup: TournamentRow | TournamentRow[],
   reminderKind: ReminderKind,
   participants: ReminderParticipant[] = [],
   isTest = false,
   tournamentAdminUrl?: string,
 ): DiscordMessagePayload {
+  const tournaments = asTournamentGroup(tournamentOrGroup);
+  const tournament = tournaments[0];
+  if (!tournament) throw new Error("大会情報がありません。");
   const isInternal = reminderKind === "internal_deadline";
   const deadlineLabel = isInternal ? "サークル内締切" : "主催者締切";
   const adminUrl = buildTournamentAdminUrl(tournamentAdminUrl);
@@ -823,7 +856,7 @@ export function buildDeadlineReminderMessage(
         fields: [
           {
             name: "対象級",
-            value: formatTournamentGrade(tournament),
+            value: formatTournamentGroupGrades(tournaments),
             inline: true,
           },
           {
@@ -1047,7 +1080,7 @@ export function buildResponseDeadlineReminderTargets(
   return [
     {
       idempotencyKey:
-        `response_reminder:channel:${tournament.tournament_id}:${announcementChannelId}`,
+        `response_reminder:channel:${tournament.registration_group_id ?? tournament.tournament_id}:${announcementChannelId}`,
       tournamentId: tournament.tournament_id,
       notificationType: "announcement",
       destinationType: "channel",
@@ -1071,29 +1104,24 @@ export function buildNotificationTargets(
   tournament: TournamentRow,
   announcementChannelId: string,
   members: TargetMemberRow[],
-  options: { context?: "initial" | "update"; revision?: string } = {},
 ): NotificationTarget[] {
-  const context = options.context ?? "initial";
-  const revisionPart = context === "update"
-    ? `:update:${options.revision ?? "update"}`
-    : "";
   return [
     {
-      idempotencyKey: `announcement${revisionPart}:${tournament.tournament_id}:${announcementChannelId}`,
+      idempotencyKey: `announcement:${tournament.tournament_id}:${announcementChannelId}`,
       tournamentId: tournament.tournament_id,
       notificationType: "announcement",
       destinationType: "channel",
       destinationId: announcementChannelId,
-      deliveryContext: context,
+      deliveryContext: "initial",
     },
     ...members.map((member) => ({
-      idempotencyKey: `invitation_dm${revisionPart}:${tournament.tournament_id}:${member.member_id}`,
+      idempotencyKey: `invitation_dm:${tournament.tournament_id}:${member.member_id}`,
       tournamentId: tournament.tournament_id,
       memberId: member.member_id,
       notificationType: "invitation_dm" as const,
       destinationType: "dm" as const,
       destinationId: member.discord_user_id,
-      deliveryContext: context,
+      deliveryContext: "initial" as const,
     })),
   ];
 }
@@ -1127,7 +1155,7 @@ export function buildDeadlineReminderTargets(
   return reminders
     .filter(({ enabled }) => enabled)
     .map(({ kind }) => ({
-      idempotencyKey: `deadline_reminder:${kind}:${tournament.tournament_id}:${reminderChannelId}`,
+      idempotencyKey: `deadline_reminder:${kind}:${tournament.registration_group_id ?? tournament.tournament_id}:${reminderChannelId}`,
       tournamentId: tournament.tournament_id,
       notificationType: "deadline_reminder" as const,
       destinationType: "channel" as const,
@@ -1410,9 +1438,10 @@ async function insertNotificationTargets(
           reminder_kind,
           delivery_context,
           related_tournament_ids,
+          change_details,
           status,
           next_attempt_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
         ON CONFLICT(idempotency_key) DO NOTHING`,
       ).bind(
         target.idempotencyKey,
@@ -1426,6 +1455,7 @@ async function insertNotificationTargets(
         target.relatedTournamentIds
           ? JSON.stringify(target.relatedTournamentIds)
           : null,
+        target.changeDetails ? JSON.stringify(target.changeDetails) : null,
         new Date().toISOString(),
       ),
     );
@@ -1471,6 +1501,9 @@ export async function createTournaments(
     true_deadline: input.trueDeadline,
     internal_deadline: input.internalDeadline,
     document_url: input.documentUrl || null,
+    workflow_stage: Date.parse(input.internalDeadline) <= now.getTime()
+      ? "application_pending"
+      : "registration_open",
   }));
 
   const statements = tournaments.map((tournament, index) => {
@@ -1491,11 +1524,12 @@ export async function createTournaments(
           venue,
           document_url,
           status,
+          workflow_stage,
           created_by_discord_user_id,
           created_by_email,
           created_at,
           updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)`,
       ).bind(
         tournament.tournament_id,
         tournament.registration_group_id,
@@ -1510,6 +1544,7 @@ export async function createTournaments(
         tournament.internal_deadline,
         input.venue || null,
         input.documentUrl || null,
+        tournament.workflow_stage,
         input.createdByDiscordUserId || null,
         input.createdByEmail || null,
         now.toISOString(),
@@ -1593,23 +1628,48 @@ export async function enqueueTournamentNotifications(
     throw new Error("告知チャンネルが未設定です。");
   }
 
-  const members = await env.DB.prepare(
-    `SELECT member_id, discord_user_id
-     FROM members
-     WHERE status = 'active'
-       AND dm_enabled = 1
-       AND (? = 1 OR grade = ?)
-       AND discord_user_id IS NOT NULL
-     ORDER BY member_id`,
-  )
-    .bind(tournament.all_grades ?? 0, tournament.grade)
-    .all<TargetMemberRow>();
-
-  const targets = buildNotificationTargets(
-    tournament,
-    settings.announcement_channel_id,
-    members.results,
-  );
+  const groupKey = tournament.registration_group_id ?? tournament.tournament_id;
+  const group = tournament.registration_group_id
+    ? await env.DB.prepare(
+      `SELECT tournament_id, registration_group_id, title, event_start_date,
+        event_end_date, grade, all_grades, tournament_type, venue,
+        true_deadline, internal_deadline, document_url
+       FROM tournaments
+       WHERE registration_group_id = ? AND status = 'active'
+       ORDER BY grade, tournament_id`,
+    ).bind(tournament.registration_group_id).all<TournamentRow>()
+    : { results: [tournament] };
+  const targets: NotificationTarget[] = [{
+    idempotencyKey: `announcement:${groupKey}:${settings.announcement_channel_id}`,
+    tournamentId: group.results[0].tournament_id,
+    notificationType: "announcement",
+    destinationType: "channel",
+    destinationId: settings.announcement_channel_id,
+    deliveryContext: "initial",
+    relatedTournamentIds: group.results.map((item) => item.tournament_id),
+  }];
+  for (const groupTournament of group.results) {
+    const members = await env.DB.prepare(
+      `SELECT member_id, discord_user_id
+       FROM members
+       WHERE status = 'active'
+         AND dm_enabled = 1
+         AND (? = 1 OR grade = ?)
+         AND discord_user_id IS NOT NULL
+       ORDER BY member_id`,
+    )
+      .bind(groupTournament.all_grades ?? 0, groupTournament.grade)
+      .all<TargetMemberRow>();
+    targets.push(...members.results.map((member) => ({
+      idempotencyKey: `invitation_dm:${groupKey}:${member.member_id}`,
+      tournamentId: groupTournament.tournament_id,
+      memberId: member.member_id,
+      notificationType: "invitation_dm" as const,
+      destinationType: "dm" as const,
+      destinationId: member.discord_user_id,
+      deliveryContext: "initial" as const,
+    })));
+  }
   return insertNotificationTargets(env, targets);
 }
 
@@ -1631,30 +1691,24 @@ async function latestAnnouncementChannelId(
 
 export async function enqueueTournamentUpdateNotifications(
   env: TournamentEnv,
-  tournament: TournamentRow,
+  tournaments: TournamentRow[],
   revision: string,
+  changeDetails: string[],
 ): Promise<number> {
+  if (tournaments.length === 0 || changeDetails.length === 0) return 0;
   const announcementChannelId = await latestAnnouncementChannelId(env.DB);
-  const members = await env.DB.prepare(
-    `SELECT member_id, discord_user_id
-     FROM members
-     WHERE status = 'active'
-       AND dm_enabled = 1
-       AND (? = 1 OR grade = ?)
-       AND discord_user_id IS NOT NULL
-     ORDER BY member_id`,
-  )
-    .bind(tournament.all_grades ?? 0, tournament.grade)
-    .all<TargetMemberRow>();
-  return insertNotificationTargets(
-    env,
-    buildNotificationTargets(
-      tournament,
-      announcementChannelId,
-      members.results,
-      { context: "update", revision },
-    ),
-  );
+  const tournament = tournaments[0];
+  const groupKey = tournament.registration_group_id ?? tournament.tournament_id;
+  return insertNotificationTargets(env, [{
+    idempotencyKey: `announcement:update:${revision}:${groupKey}:${announcementChannelId}`,
+    tournamentId: tournament.tournament_id,
+    notificationType: "announcement",
+    destinationType: "channel",
+    destinationId: announcementChannelId,
+    deliveryContext: "update",
+    relatedTournamentIds: tournaments.map((item) => item.tournament_id),
+    changeDetails,
+  }]);
 }
 
 export async function enqueueApplicationCompletedNotification(
@@ -1701,6 +1755,7 @@ export async function enqueueDeadlineReminders(
   const tournaments = await env.DB.prepare(
     `SELECT
       tournament_id,
+      registration_group_id,
       title,
       event_start_date,
       event_end_date,
@@ -1768,6 +1823,7 @@ export async function enqueueResponseDeadlineReminders(
   const tournaments = await env.DB.prepare(
     `SELECT
       tournament_id,
+      registration_group_id,
       title,
       event_start_date,
       event_end_date,
@@ -1785,7 +1841,12 @@ export async function enqueueResponseDeadlineReminders(
         NOT EXISTS (
           SELECT 1
           FROM notification_deliveries
-          WHERE notification_deliveries.tournament_id = tournaments.tournament_id
+          INNER JOIN tournaments AS delivery_tournaments
+            ON delivery_tournaments.tournament_id = notification_deliveries.tournament_id
+          WHERE COALESCE(
+              delivery_tournaments.registration_group_id,
+              delivery_tournaments.tournament_id
+            ) = COALESCE(tournaments.registration_group_id, tournaments.tournament_id)
             AND notification_deliveries.delivery_context = 'response_reminder'
             AND notification_deliveries.destination_type = 'channel'
         )
@@ -1806,7 +1867,12 @@ export async function enqueueResponseDeadlineReminders(
             AND NOT EXISTS (
               SELECT 1
               FROM notification_deliveries
-              WHERE notification_deliveries.tournament_id = tournaments.tournament_id
+              INNER JOIN tournaments AS delivery_tournaments
+                ON delivery_tournaments.tournament_id = notification_deliveries.tournament_id
+              WHERE COALESCE(
+                  delivery_tournaments.registration_group_id,
+                  delivery_tournaments.tournament_id
+                ) = COALESCE(tournaments.registration_group_id, tournaments.tournament_id)
                 AND notification_deliveries.member_id = members.member_id
                 AND notification_deliveries.delivery_context = 'response_reminder'
                 AND notification_deliveries.destination_type = 'dm'
@@ -1900,6 +1966,57 @@ function parseRelatedTournamentIds(
   return [fallbackId];
 }
 
+function parseChangeDetails(raw: string | null): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (
+      Array.isArray(parsed) &&
+      parsed.length <= 10 &&
+      parsed.every((value) => typeof value === "string" && value.length <= 500)
+    ) {
+      return parsed;
+    }
+  } catch {
+    // 壊れた付加情報は表示せず、現在の大会情報だけで通知する。
+  }
+  return [];
+}
+
+async function loadNotificationTournamentGroup(
+  db: D1Database,
+  notification: QueuedNotificationRow,
+): Promise<TournamentRow[]> {
+  if (!notification.registration_group_id) return [notification];
+  const rows = await db.prepare(
+    `SELECT
+      tournaments.tournament_id,
+      tournaments.registration_group_id,
+      tournaments.title,
+      tournaments.event_start_date,
+      tournaments.event_end_date,
+      tournaments.grade,
+      tournaments.all_grades,
+      tournaments.tournament_type,
+      tournaments.venue,
+      tournaments.true_deadline,
+      tournaments.internal_deadline,
+      tournaments.document_url,
+      tournament_application_methods.application_method,
+      tournament_application_methods.roster_document_url AS application_roster_url,
+      tournament_application_methods.roster_file_name AS application_roster_file_name,
+      tournament_application_methods.form_url AS application_form_url,
+      tournament_application_methods.application_email
+     FROM tournaments
+     LEFT JOIN tournament_application_methods
+       ON tournament_application_methods.group_key = tournaments.registration_group_id
+     WHERE tournaments.registration_group_id = ?
+       AND tournaments.status <> 'deleted'
+     ORDER BY tournaments.grade, tournaments.tournament_id`,
+  ).bind(notification.registration_group_id).all<TournamentRow>();
+  return rows.results.length ? rows.results : [notification];
+}
+
 async function applicationCompletedPayload(
   db: D1Database,
   notification: QueuedNotificationRow,
@@ -1984,9 +2101,11 @@ export async function processNotificationQueue(
       notification_deliveries.reminder_kind,
       notification_deliveries.delivery_context,
       notification_deliveries.related_tournament_ids,
+      notification_deliveries.change_details,
       notification_deliveries.destination_id,
       notification_deliveries.attempt_count,
       tournaments.tournament_id,
+      tournaments.registration_group_id,
       tournaments.title,
       tournaments.event_start_date,
       tournaments.event_end_date,
@@ -2062,10 +2181,24 @@ export async function processNotificationQueue(
     }
 
     processed += 1;
+    if (
+      notification.notification_type === "invitation_dm" &&
+      notification.delivery_context === "update"
+    ) {
+      await markNotificationSkipped(
+        env.DB,
+        notification.notification_id,
+        "大会情報編集時は追いDMを送信しない設定へ変更されました。",
+      );
+      continue;
+    }
     const statusAllowsNotification =
       notification.notification_type === "application_completed"
         ? notification.tournament_status === "applied"
-        : notification.tournament_status === "active";
+        : notification.notification_type === "announcement" &&
+            notification.delivery_context === "update"
+          ? !["canceled", "deleted"].includes(notification.tournament_status)
+          : notification.tournament_status === "active";
     if (!statusAllowsNotification) {
       await markNotificationSkipped(
         env.DB,
@@ -2134,8 +2267,9 @@ export async function processNotificationQueue(
           );
           messageSettingKey = "response_reminder_dm";
         } else if (notification.notification_type === "announcement") {
+          const group = await loadNotificationTournamentGroup(env.DB, notification);
           payload = buildResponseDeadlineChannelReminderMessage(
-            notification,
+            group,
             env.MEMBER_PORTAL_URL,
           );
           messageSettingKey = "response_reminder_channel";
@@ -2143,10 +2277,16 @@ export async function processNotificationQueue(
           throw new Error("回答リマインダーの通知種別が不正です。");
         }
       } else if (notification.notification_type === "announcement") {
+        const group = notification.destination_id && notification.registration_group_id
+          ? await loadNotificationTournamentGroup(env.DB, notification)
+          : [notification];
         payload = buildAnnouncementMessage(
-          notification,
+          group,
           notification.delivery_context === "update",
           env.MEMBER_PORTAL_URL,
+          notification.delivery_context === "update"
+            ? parseChangeDetails(notification.change_details)
+            : [],
         );
         messageSettingKey = notification.delivery_context === "update"
           ? "announcement_update"
@@ -2170,8 +2310,9 @@ export async function processNotificationQueue(
           );
           continue;
         }
+        const group = await loadNotificationTournamentGroup(env.DB, notification);
         payload = buildDeadlineReminderMessage(
-          notification,
+          group,
           notification.reminder_kind,
           participants,
           false,
@@ -2200,12 +2341,9 @@ export async function processNotificationQueue(
         payload = buildAttendanceMessage(
           notification,
           selectedResponse,
-          notification.delivery_context === "update",
           env.MEMBER_PORTAL_URL,
         );
-        messageSettingKey = notification.delivery_context === "update"
-          ? "attendance_update"
-          : "attendance_request";
+        messageSettingKey = "attendance_request";
       }
       payload = await applyBotMessageContent(
         env.DB,
@@ -2247,10 +2385,12 @@ export async function processNotificationQueue(
 export async function notifyPendingTournaments(
   env: TournamentEnv,
 ): Promise<void> {
+  await advanceTournamentWorkflowStages(env.DB);
   await closeExpiredTournamentsWithoutParticipants(env.DB);
   const pending = await env.DB.prepare(
     `SELECT
       tournaments.tournament_id,
+      tournaments.registration_group_id,
       tournaments.title,
       tournaments.event_start_date,
       tournaments.event_end_date,
@@ -2267,7 +2407,12 @@ export async function notifyPendingTournaments(
         NOT EXISTS (
           SELECT 1
           FROM notification_deliveries
-          WHERE notification_deliveries.tournament_id = tournaments.tournament_id
+          INNER JOIN tournaments AS delivery_tournaments
+            ON delivery_tournaments.tournament_id = notification_deliveries.tournament_id
+          WHERE COALESCE(
+              delivery_tournaments.registration_group_id,
+              delivery_tournaments.tournament_id
+            ) = COALESCE(tournaments.registration_group_id, tournaments.tournament_id)
             AND notification_deliveries.notification_type = 'announcement'
             AND notification_deliveries.delivery_context = 'initial'
         )
@@ -2281,7 +2426,12 @@ export async function notifyPendingTournaments(
             AND NOT EXISTS (
               SELECT 1
               FROM notification_deliveries
-              WHERE notification_deliveries.tournament_id = tournaments.tournament_id
+              INNER JOIN tournaments AS delivery_tournaments
+                ON delivery_tournaments.tournament_id = notification_deliveries.tournament_id
+              WHERE COALESCE(
+                  delivery_tournaments.registration_group_id,
+                  delivery_tournaments.tournament_id
+                ) = COALESCE(tournaments.registration_group_id, tournaments.tournament_id)
                 AND notification_deliveries.member_id = members.member_id
                 AND notification_deliveries.notification_type = 'invitation_dm'
                 AND notification_deliveries.delivery_context = 'initial'
@@ -2307,6 +2457,21 @@ export async function notifyPendingTournaments(
   await processNotificationQueue(env);
 }
 
+export async function advanceTournamentWorkflowStages(
+  db: D1Database,
+  now = new Date(),
+): Promise<number> {
+  const timestamp = now.toISOString();
+  const result = await db.prepare(
+    `UPDATE tournaments
+     SET workflow_stage = 'application_pending', updated_at = ?
+     WHERE status = 'active'
+       AND workflow_stage = 'registration_open'
+       AND internal_deadline <= ?`,
+  ).bind(timestamp, timestamp).run();
+  return Number(result.meta.changes ?? 0);
+}
+
 export async function closeExpiredTournamentsWithoutParticipants(
   db: D1Database,
   now = new Date(),
@@ -2315,7 +2480,7 @@ export async function closeExpiredTournamentsWithoutParticipants(
     `SELECT tournaments.tournament_id
      FROM tournaments
      WHERE tournaments.status = 'active'
-       AND tournaments.internal_deadline <= ?
+       AND tournaments.true_deadline <= ?
        AND NOT EXISTS (
          SELECT 1
          FROM tournaments AS pending_group_member
@@ -2327,7 +2492,7 @@ export async function closeExpiredTournamentsWithoutParticipants(
            tournaments.tournament_id
          )
            AND pending_group_member.status = 'active'
-           AND pending_group_member.internal_deadline > ?
+           AND pending_group_member.true_deadline > ?
        )
        AND NOT EXISTS (
          SELECT 1
@@ -2359,6 +2524,7 @@ export async function closeExpiredTournamentsWithoutParticipants(
       db.prepare(
         `UPDATE tournaments
          SET status = 'closed', closure_reason = 'no_participants',
+             workflow_stage = 'no_participants',
              updated_at = ?
          WHERE tournament_id = ? AND status = 'active'`,
       ).bind(changedAt, tournamentId),
@@ -2469,7 +2635,6 @@ export async function recordAttendanceResponse(
     buildAttendanceMessage(
       target,
       input.response,
-      false,
       env.MEMBER_PORTAL_URL,
     ),
     `\n現在の回答: **${RESPONSE_LABELS[input.response]}**`,

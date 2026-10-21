@@ -115,7 +115,7 @@ describe("Admin Worker", () => {
     const html = await response.text();
     expect(html).toContain('class="admin-brand-name">埼玉大学かるた会</span>');
     expect(html).toContain("<h1>運営管理ポータル</h1>");
-    expect(html).toContain(">大会管理<span");
+    expect(html).toContain(">大会管理</a>");
     expect(html).toContain(">メンバー管理");
     expect(html).toContain(">設定</a>");
     expect(html).toContain(`>${label}`);
@@ -135,7 +135,7 @@ describe("Admin Worker", () => {
     const tournamentHtml = await tournamentResponse.text();
     expect(tournamentHtml).toContain('aria-label="大会管理メニュー"');
     expect(tournamentHtml).toContain('href="/register">大会新規登録</a>');
-    expect(tournamentHtml).toContain('href="/todo" aria-current="page">TODO</a>');
+    expect(tournamentHtml).toContain('href="/todo" aria-current="page">TODO<span id="todo-count-badge"');
     expect(tournamentHtml).toContain('href="/tournaments">一覧</a>');
     expect(tournamentHtml).toContain('<main class="tournament-workspace">');
     expect(tournamentHtml).toContain('main.tournament-workspace { display: grid; grid-template-columns: 180px minmax(0, 1fr)');
@@ -156,6 +156,11 @@ describe("Admin Worker", () => {
     expect(settingsHtml).toContain("自動入力・期限");
     expect(settingsHtml).toContain('id="manual-settings"');
     expect(settingsHtml).toContain("運用マニュアル");
+    expect(settingsHtml).toContain('data-settings-view="database">データ管理</button>');
+    expect(settingsHtml).toContain('id="database-settings"');
+    expect(settingsHtml).toContain('href="/api/settings/database-export"');
+    expect(settingsHtml).toContain("CSVを一括ダウンロード");
+    expect(settingsHtml).toContain("1テーブルにつき1つのCSVファイル");
     expect(settingsHtml).toContain('aria-label="運用マニュアル目次"');
     expect(settingsHtml).toContain('class="manual-menu-heading">はじめに</span>');
     expect(settingsHtml).toContain('class="manual-menu-heading">日常操作</span>');
@@ -171,6 +176,7 @@ describe("Admin Worker", () => {
     expect(settingsHtml).toContain('class="settings-menu"');
     expect(settingsHtml).toContain('data-settings-view="messages"');
     expect(settingsHtml).toContain('data-settings-view="deadlines"');
+    expect(settingsHtml).toContain('data-settings-view="database"');
     expect(settingsHtml).toContain('data-settings-view="manuals"');
     expect(settingsHtml).toContain("function selectSettingsView(name, updateHash = true)");
     expect(settingsHtml).toContain('class="subtab-bar" hidden');
@@ -209,6 +215,7 @@ describe("Admin Worker", () => {
     const html = await response.text();
     expect(html).toContain('id="todo-list"');
     expect(html).toContain('id="todo-count-badge"');
+    expect(html).toContain('>TODO<span id="todo-count-badge"');
     expect(html).toContain("todoCountBadge.hidden = normalized === 0");
     expect(html).toContain("setTodoCountBadge(body.todos.length)");
     expect(html).toContain("申込完了にする");
@@ -374,12 +381,13 @@ describe("Admin Worker", () => {
     expect(html).toContain('<option value="deadline_asc">締切日が近い順</option>');
     expect(html).toContain('id="tournament-status-filter"');
     expect(html).toContain('<option value="default" selected>通常表示（中止・参加者なしを除く）</option>');
+    expect(html).not.toContain('<option value="closed">締切済み</option>');
     expect(html).toContain("displayStatus !== 'canceled' && displayStatus !== 'no_participants'");
     expect(html).toContain("responseLabels[response] + '(' + people.length + '人)'");
     expect(html).toContain("yes: '参加希望'");
     expect(html).toContain("person.entry_status === 'selected'");
     expect(html).toContain("person.payment_status === 'paid' ? '支払済み' : '未納'");
-    expect(html).toContain("item.status === 'applied' || item.status === 'closed'");
+    expect(html).toContain("item.status === 'applied'");
     expect(html).toContain("if (!applicationCompleted)");
     expect(html).toContain("groupTournaments(loadedTournaments)");
     expect(html).toContain("person.display_name_kana || 'よみがな未登録'");
@@ -412,7 +420,8 @@ describe("Admin Worker", () => {
     expect(html).toContain("row.classList.toggle('has-waitlist', waitlisted)");
     expect(html).toContain("row.classList.toggle('has-payment', showsPayment)");
     expect(html).toContain("tournamentIds: tournaments.map");
-    expect(html).toContain("開催級はこの画面では変更できません");
+    expect(html).toContain("回答受付中のみ変更可");
+    expect(html).toContain('name="editGrades" value="D"');
     expect(html).toContain("1. 申込確認名簿（抽選前・");
     expect(html).not.toContain("抽選なしで全員を受け入れる大会では、この項目を飛ばし");
     expect(html).toContain("2. 抽選結果・確定名簿・参加費・当日案内");
@@ -470,8 +479,9 @@ describe("Admin Worker", () => {
     expect(html).toContain("document.createElement('details')");
     expect(html).toContain("entry-management-body");
     expect(html).toContain("archive-management-body");
-    expect(html).toContain("抽選結果・確定名簿・当日案内を送信");
+    expect(html).toContain("抽選結果・確定名簿・参加費・当日案内を保存して送信");
     expect(html).toContain("/api/lottery-results/send");
+    expect(html).toContain("entriesBody.promotionDmQueued");
     expect(html).toContain("参加者なし終了");
     expect(html).toContain("applicationBlocked");
     expect(html).toContain("一度ほかのステータスへ変更してください");
@@ -499,6 +509,7 @@ describe("Admin Worker", () => {
             {
               tournament_id: tournamentId,
               member_id: selectedMemberId,
+              group_key: tournamentId,
               entry_status: "submitted",
               waitlist_number: null,
               payment_status: null,
@@ -506,6 +517,7 @@ describe("Admin Worker", () => {
             {
               tournament_id: tournamentId,
               member_id: waitlistedMemberId,
+              group_key: tournamentId,
               entry_status: "submitted",
               waitlist_number: null,
               payment_status: null,
@@ -542,10 +554,16 @@ describe("Admin Worker", () => {
       "discord:admin",
     );
 
-    expect(result).toEqual({ entryCount: 2, changedCount: 2 });
-    expect(batch).toHaveBeenCalledTimes(1);
+    expect(result).toEqual({
+      entryCount: 2,
+      changedCount: 2,
+      promotionDmQueued: 0,
+      promotionDmUnavailable: 0,
+    });
+    expect(batch).toHaveBeenCalledTimes(2);
     expect(statements.filter((item) => item.sql.includes("INSERT INTO tournament_entries"))).toHaveLength(2);
     expect(statements.some((item) => item.sql.includes("INSERT INTO tournament_entry_payments"))).toBe(true);
+    expect(statements.some((item) => item.sql.includes("SET workflow_stage = 'confirmed'"))).toBe(true);
   });
 
   it("rejects an invalid waitlist number before a bulk database write", async () => {
@@ -708,6 +726,49 @@ describe("Admin Worker", () => {
     expect(statements.some((item) => item.sql.includes("INSERT INTO tournament_entries"))).toBe(true);
     expect(statements.some((item) => item.sql.includes("INSERT INTO tournament_entry_history"))).toBe(true);
     expect(statements.every((item) => !item.sql.includes("UPDATE responses"))).toBe(true);
+  });
+
+  it("queues guidance when a waitlisted entrant is promoted", async () => {
+    const tournamentId = "T-11111111-1111-4111-8111-111111111111";
+    const memberId = "M-11111111-1111-4111-8111-111111111111";
+    const prepare = vi.fn((sql: string) => ({
+      bind: vi.fn(() => ({
+        first: vi.fn().mockResolvedValue(
+          sql.includes("FROM tournaments\n     INNER JOIN responses")
+            ? { entry_status: "not_selected", waitlist_number: 1 }
+            : {
+              group_key: tournamentId,
+              revision: 2,
+              payment_collection_method: "advance_manager",
+              payment_deadline: "2099-10-20T14:59:00.000Z",
+              discord_user_id: "discord-user-1",
+              member_status: "active",
+              dm_enabled: 1,
+            },
+        ),
+        run: vi.fn().mockResolvedValue({ meta: { changes: 1 } }),
+      })),
+    }));
+    const batch = vi.fn().mockResolvedValue([{ success: true }, { success: true }]);
+
+    const result = await updateTournamentEntryStatus(
+      { DB: { prepare, batch } as unknown as D1Database },
+      tournamentId,
+      memberId,
+      "selected",
+      null,
+      "discord:admin",
+    );
+
+    expect(result).toMatchObject({
+      previousStatus: "not_selected",
+      status: "selected",
+      promotionDmQueued: 1,
+      promotionDmUnavailable: 0,
+    });
+    expect(prepare.mock.calls.some(([sql]) =>
+      String(sql).includes("INSERT INTO participant_guidance_deliveries")
+    )).toBe(true);
   });
 
   it("requires a positive waitlist number for a waitlisted entrant", async () => {
@@ -1267,7 +1328,7 @@ describe("Admin Worker", () => {
     const statusUpdater = vi.fn().mockResolvedValue({
       tournamentId: "T-11111111-1111-4111-8111-111111111111",
       previousStatus: "active",
-      status: "closed",
+      status: "canceled",
       changed: true,
     });
     const response = await handleAdminRequest(
@@ -1279,7 +1340,7 @@ describe("Admin Worker", () => {
             "Content-Type": "application/json",
             Origin: "https://admin.example.com",
           },
-          body: JSON.stringify({ status: "closed" }),
+          body: JSON.stringify({ status: "canceled" }),
         },
       ),
       env,
@@ -1293,7 +1354,7 @@ describe("Admin Worker", () => {
     expect(statusUpdater).toHaveBeenCalledWith(
       env,
       "T-11111111-1111-4111-8111-111111111111",
-      "closed",
+      "canceled",
       "admin@example.com",
     );
   });
@@ -1475,7 +1536,143 @@ describe("Admin Worker", () => {
     expect(updateStatement?.values.slice(0, 2)).toEqual(["複数日大会", "2026-11-08"]);
   });
 
-  it("rejects an unsupported tournament status", async () => {
+  it("removes an excluded grade, invalidates its answers, and queues only a channel update", async () => {
+    const statements: Array<{ sql: string; values: unknown[] }> = [];
+    const tournaments = [
+      {
+        tournament_id: "T-11111111-1111-4111-8111-111111111111",
+        registration_group_id: "TG-11111111-1111-4111-8111-111111111111",
+        title: "級訂正大会",
+        event_start_date: "2026-11-01",
+        event_end_date: "2026-11-01",
+        grade: "B",
+        all_grades: 0,
+        tournament_type: "official",
+        venue: null,
+        true_deadline: "2026-10-28T14:59:00.000Z",
+        internal_deadline: "2026-10-25T14:59:00.000Z",
+        document_url: "https://example.com/guideline.pdf",
+        status: "active",
+      },
+      {
+        tournament_id: "T-22222222-2222-4222-8222-222222222222",
+        registration_group_id: "TG-11111111-1111-4111-8111-111111111111",
+        title: "級訂正大会",
+        event_start_date: "2026-11-01",
+        event_end_date: "2026-11-01",
+        grade: "D",
+        all_grades: 0,
+        tournament_type: "official",
+        venue: null,
+        true_deadline: "2026-10-28T14:59:00.000Z",
+        internal_deadline: "2026-10-25T14:59:00.000Z",
+        document_url: "https://example.com/guideline.pdf",
+        status: "active",
+      },
+    ];
+    const prepare = vi.fn((sql: string) => ({
+      first: vi.fn().mockResolvedValue(
+        sql.includes("announcement_channel_id")
+          ? { announcement_channel_id: "channel-1" }
+          : { count: 2 },
+      ),
+      bind: vi.fn((...values: unknown[]) => ({
+        all: vi.fn().mockResolvedValue({ results: tournaments }),
+        first: vi.fn().mockResolvedValue(
+          sql.includes("announcement_channel_id")
+            ? { announcement_channel_id: "channel-1" }
+            : { count: 2 },
+        ),
+        sql,
+        values,
+      })),
+    }));
+    const batch = vi.fn(async (items: Array<{ sql: string; values: unknown[] }>) => {
+      statements.push(...items);
+      return items.map(() => ({ meta: { changes: 1 } }));
+    });
+
+    const result = await editTournaments(
+      { DB: { prepare, batch } as unknown as D1Database },
+      tournaments.map((item) => item.tournament_id),
+      {
+        title: "級訂正大会",
+        grades: ["B"],
+        eventStartDate: "2026-11-01",
+        eventDatesByGrade: { B: "2026-11-01" },
+        tournamentType: "official",
+        trueDeadline: "2026-10-28T14:59:00.000Z",
+        internalDeadline: "2026-10-25T14:59:00.000Z",
+        documentUrl: "https://example.com/guideline.pdf",
+      },
+      "admin@example.com",
+    );
+
+    expect(result.tournaments.map((item) => item.grade)).toEqual(["B"]);
+    expect(statements.some((item) =>
+      item.sql.includes("UPDATE responses") &&
+      item.values.includes("T-22222222-2222-4222-8222-222222222222")
+    )).toBe(true);
+    const notification = statements.find((item) =>
+      item.sql.includes("INSERT INTO notification_deliveries") &&
+      item.values.includes("announcement")
+    );
+    expect(notification?.values).toContain('["開催級: BD → B"]');
+    expect(notification?.values).not.toContain("dm");
+  });
+
+  it("does not notify Discord when only a deadline changes", async () => {
+    const statements: Array<{ sql: string; values: unknown[] }> = [];
+    const tournament = {
+      tournament_id: "T-11111111-1111-4111-8111-111111111111",
+      registration_group_id: null,
+      title: "締切変更大会",
+      event_start_date: "2026-11-01",
+      event_end_date: "2026-11-01",
+      grade: "C",
+      all_grades: 0,
+      tournament_type: "official",
+      venue: null,
+      true_deadline: "2026-10-28T14:59:00.000Z",
+      internal_deadline: "2026-10-25T14:59:00.000Z",
+      document_url: "https://example.com/guideline.pdf",
+      status: "active",
+    };
+    const prepare = vi.fn((sql: string) => ({
+      bind: vi.fn((...values: unknown[]) => ({
+        all: vi.fn().mockResolvedValue({ results: [tournament] }),
+        sql,
+        values,
+      })),
+    }));
+    const batch = vi.fn(async (items: Array<{ sql: string; values: unknown[] }>) => {
+      statements.push(...items);
+      return items.map(() => ({ meta: { changes: 1 } }));
+    });
+
+    const result = await editTournaments(
+      { DB: { prepare, batch } as unknown as D1Database },
+      [tournament.tournament_id],
+      {
+        title: tournament.title,
+        grades: ["C"],
+        eventStartDate: tournament.event_start_date,
+        eventDatesByGrade: { C: tournament.event_start_date },
+        tournamentType: tournament.tournament_type,
+        trueDeadline: tournament.true_deadline,
+        internalDeadline: "2026-10-24T14:59:00.000Z",
+        documentUrl: tournament.document_url,
+      },
+      "admin@example.com",
+    );
+
+    expect(result.notificationsQueued).toBe(0);
+    expect(statements.some((item) =>
+      item.sql.includes("INSERT INTO notification_deliveries")
+    )).toBe(false);
+  });
+
+  it.each(["closed", "deleted"])("rejects the removed or unsupported tournament status %s", async (status) => {
     const statusUpdater = vi.fn();
     const response = await handleAdminRequest(
       new Request(
@@ -1486,7 +1683,7 @@ describe("Admin Worker", () => {
             "Content-Type": "application/json",
             Origin: "https://admin.example.com",
           },
-          body: JSON.stringify({ status: "deleted" }),
+          body: JSON.stringify({ status }),
         },
       ),
       env,

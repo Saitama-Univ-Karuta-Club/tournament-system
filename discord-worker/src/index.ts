@@ -562,9 +562,12 @@ export async function handleRequest(
 
   if (
     interaction.type === InteractionType.MESSAGE_COMPONENT &&
-    interaction.data?.custom_id?.startsWith("payment:")
+    (
+      interaction.data?.custom_id?.startsWith("payment:") ||
+      interaction.data?.custom_id?.startsWith("payment-promotion:")
+    )
   ) {
-    const [, tournamentId, status] = interaction.data.custom_id.split(":");
+    const [paymentKind, tournamentId, status] = interaction.data.custom_id.split(":");
     if (status !== "paid" && status !== "unpaid") {
       return ephemeralMessage("支払い操作が不正です。");
     }
@@ -573,6 +576,7 @@ export async function handleRequest(
       discordUserId:
         interaction.member?.user?.id ?? interaction.user?.id ?? "",
       status,
+      waitlistPromotion: paymentKind === "payment-promotion",
     };
     if (
       executionContext &&

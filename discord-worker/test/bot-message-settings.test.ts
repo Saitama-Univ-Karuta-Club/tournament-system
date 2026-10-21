@@ -8,7 +8,7 @@ import {
 
 describe("Discord Bot message settings", () => {
   it("defines editable fixed bodies without dynamic embed data", () => {
-    expect(BOT_MESSAGE_DEFINITIONS).toHaveLength(19);
+    expect(BOT_MESSAGE_DEFINITIONS).toHaveLength(22);
     expect([...new Set(BOT_MESSAGE_DEFINITIONS.map((definition) => definition.category))]).toEqual([
       "大会案内・参加回答",
       "申込・抽選",
@@ -20,6 +20,12 @@ describe("Discord Bot message settings", () => {
     );
     expect(defaultBotMessageContent("organizer_deadline")).toContain(
       "本日が主催者締切日",
+    );
+    expect(defaultBotMessageContent("waitlist_promotion_before_deadline")).toContain(
+      "キャンセル待ちから繰り上がり、出場が確定しました。",
+    );
+    expect(defaultBotMessageContent("waitlist_promotion_after_deadline")).toContain(
+      "支払いに関しては大会担当者に相談してください。",
     );
   });
 

@@ -13,7 +13,7 @@ export const BOT_MESSAGE_DEFINITIONS = [
     category: "大会案内・参加回答",
     label: "大会情報更新のお知らせ",
     recipient: "大会お知らせチャンネル",
-    defaultContent: "【大会情報更新】\n変更後の内容を対象者のDMへ再送します。",
+    defaultContent: "【大会情報更新】\n重要な大会情報を変更しました。",
   },
   {
     key: "attendance_request",
@@ -21,13 +21,6 @@ export const BOT_MESSAGE_DEFINITIONS = [
     label: "大会参加確認",
     recipient: "対象メンバーのDM",
     defaultContent: "大会への参加意思を選択してください。",
-  },
-  {
-    key: "attendance_update",
-    category: "大会案内・参加回答",
-    label: "大会情報更新後の参加確認",
-    recipient: "対象メンバーのDM",
-    defaultContent: "【大会情報更新】内容が変更されました。参加意思をもう一度確認してください。",
   },
   {
     key: "response_reminder_channel",
@@ -41,7 +34,7 @@ export const BOT_MESSAGE_DEFINITIONS = [
     category: "大会案内・参加回答",
     label: "未回答者へのリマインダー",
     recipient: "未回答メンバーのDM",
-    defaultContent: "【回答締切リマインダー】まだ回答が登録されていません。サークル内締切までに参加意思を選択してください。",
+    defaultContent: "【回答締切リマインダー】\nサークル内締切がもうすぐです。\nまだ回答が登録されていません。締切までに参加意思を選択してください。",
   },
   {
     key: "internal_deadline",
@@ -86,6 +79,27 @@ export const BOT_MESSAGE_DEFINITIONS = [
     defaultContent: "【参加者向け案内】出場確定者へのお知らせです。",
   },
   {
+    key: "waitlist_result",
+    category: "申込・抽選",
+    label: "キャンセル待ち結果",
+    recipient: "キャンセル待ちの選手DM",
+    defaultContent: "【抽選結果のお知らせ】\n\n抽選の結果、キャンセル待ちとなりました。\n繰り上がりが決まった場合は、改めてDMでお知らせします。",
+  },
+  {
+    key: "waitlist_promotion_before_deadline",
+    category: "参加費・当日案内",
+    label: "キャンセル待ち繰り上げ（支払期限前）",
+    recipient: "繰り上げ対象者のDM",
+    defaultContent: "【キャンセル待ち繰り上げのお知らせ】\n\nキャンセル待ちから繰り上がり、出場が確定しました。\n当日案内と参加費をご確認ください。\n\n大会担当者へ参加費を支払った後、「支払い完了」ボタンを押してください。",
+  },
+  {
+    key: "waitlist_promotion_after_deadline",
+    category: "参加費・当日案内",
+    label: "キャンセル待ち繰り上げ（支払期限後）",
+    recipient: "繰り上げ対象者のDM",
+    defaultContent: "【キャンセル待ち繰り上げのお知らせ】\n\nキャンセル待ちから繰り上がり、出場が確定しました。\n当日案内と参加費をご確認ください。\n\nサークル内支払期限を過ぎているため、支払いに関しては大会担当者に相談してください。",
+  },
+  {
     key: "payment_reminder_dm",
     category: "参加費・当日案内",
     label: "参加費未納リマインダー",
@@ -105,6 +119,13 @@ export const BOT_MESSAGE_DEFINITIONS = [
     label: "主催者への振込情報",
     recipient: "大会担当チャンネル",
     defaultContent: "【担当者向け・参加費振込情報】抽選結果と出場確定者が登録されました。主催者への振込内容を確認してください。",
+  },
+  {
+    key: "onsite_payment_info",
+    category: "参加費・当日案内",
+    label: "当日支払いの担当者通知",
+    recipient: "大会担当チャンネル",
+    defaultContent: "【担当者向け・当日支払い情報】抽選結果と出場確定者が登録されました。参加費は大会当日に参加者が主催者へ直接支払います。",
   },
   {
     key: "organizer_payment_overdue",
