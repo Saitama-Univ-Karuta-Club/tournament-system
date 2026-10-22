@@ -5,6 +5,7 @@ DISCORD_GUILD_ID="開発用DiscordサーバーのID"
 DISCORD_BOT_TOKEN="Botトークン"
 MEMBER_PORTAL_URL="https://sukc-tournament-portal.saitama-univ-karuta-club.workers.dev"
 TOURNAMENT_ADMIN_URL="https://sukc-tournament-admin.saitama-univ-karuta-club.workers.dev/tournaments"
+DISCORD_BOT_PUBLIC_URL="http://localhost:8787"
 
 # メンバーポータル（Discord OAuth）
 DISCORD_CLIENT_SECRET="Discord Developer PortalのOAuth2 Client Secret"

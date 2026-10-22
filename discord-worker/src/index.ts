@@ -37,6 +37,7 @@ import {
   upsertAnnouncementChannel,
   upsertReminderChannel,
 } from "./tournaments";
+import { serveUrgentAdminAlertAsset } from "./urgent-admin-alerts";
 
 function escapeHtml(value: string): string {
   return value
@@ -80,6 +81,7 @@ export interface Env {
   DISCORD_BOT_TOKEN?: string;
   MEMBER_PORTAL_URL?: string;
   TOURNAMENT_ADMIN_URL?: string;
+  DISCORD_BOT_PUBLIC_URL?: string;
 }
 
 interface DiscordInteraction {
@@ -276,6 +278,12 @@ export async function handleRequest(
   interactionOriginalResponseEditor: InteractionOriginalResponseEditor = editOriginalInteractionResponse,
 ): Promise<Response> {
   const url = new URL(request.url);
+
+  const urgentAlertAsset = await serveUrgentAdminAlertAsset(
+    request,
+    env.DOCUMENTS,
+  );
+  if (urgentAlertAsset) return urgentAlertAsset;
 
   const documentResponse = await serveTournamentDocument(request, env.DOCUMENTS, env.DB);
   if (documentResponse) return documentResponse;

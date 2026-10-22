@@ -1,6 +1,8 @@
 import {
+  type DiscordFileAttachment,
   type DiscordMessagePayload,
   sendChannelMessage,
+  sendChannelMessageWithFiles,
   sendDirectMessage,
 } from "./discord-api";
 import { formatGrade } from "./members";
@@ -10,13 +12,20 @@ import {
   type BotMessageKey,
 } from "./bot-message-settings";
 import { getDeadlineAutomationSettings } from "./deadline-settings";
+import {
+  decorateUrgentAdminAlert,
+  loadAdminRoleId,
+  loadUrgentAdminAlertAttachment,
+} from "./urgent-admin-alerts";
 
 export interface TournamentEnv {
   DB: D1Database;
+  DOCUMENTS?: R2Bucket;
   DISCORD_GUILD_ID?: string;
   DISCORD_BOT_TOKEN?: string;
   MEMBER_PORTAL_URL?: string;
   TOURNAMENT_ADMIN_URL?: string;
+  DISCORD_BOT_PUBLIC_URL?: string;
 }
 
 export interface TestTournamentInput {
@@ -2209,6 +2218,7 @@ export async function processNotificationQueue(
     }
 
     try {
+      let urgentAttachment: DiscordFileAttachment | null = null;
       let payload: DiscordMessagePayload;
       let messageSettingKey: BotMessageKey;
       let messageContentSuffix = "";
@@ -2351,13 +2361,36 @@ export async function processNotificationQueue(
         payload,
         messageContentSuffix,
       );
+      if (
+        notification.notification_type === "deadline_reminder" &&
+        notification.reminder_kind === "organizer_deadline"
+      ) {
+        urgentAttachment = await loadUrgentAdminAlertAttachment(
+          env.DOCUMENTS,
+          "organizer_deadline",
+        );
+        payload = decorateUrgentAdminAlert(payload, "organizer_deadline", {
+          adminRoleId: await loadAdminRoleId(env.DB, env.DISCORD_GUILD_ID),
+          publicBaseUrl: env.DISCORD_BOT_PUBLIC_URL,
+          imageUrl: urgentAttachment
+            ? `attachment://${urgentAttachment.filename}`
+            : undefined,
+        });
+      }
       const message =
         notification.notification_type !== "invitation_dm"
-          ? await sendChannelMessage(
-              env.DISCORD_BOT_TOKEN,
-              notification.destination_id,
-              payload,
-            )
+          ? urgentAttachment
+            ? await sendChannelMessageWithFiles(
+                env.DISCORD_BOT_TOKEN,
+                notification.destination_id,
+                payload,
+                [urgentAttachment],
+              )
+            : await sendChannelMessage(
+                env.DISCORD_BOT_TOKEN,
+                notification.destination_id,
+                payload,
+              )
           : await sendDirectMessage(
               env.DISCORD_BOT_TOKEN,
               notification.destination_id,

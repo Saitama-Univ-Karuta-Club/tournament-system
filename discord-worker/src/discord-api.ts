@@ -5,12 +5,22 @@ export interface DiscordMessage {
   channel_id: string;
 }
 
+export interface DiscordFileAttachment {
+  data: ArrayBuffer;
+  filename: string;
+  contentType: string;
+  description?: string;
+}
+
 export interface DiscordMessagePayload {
   content?: string;
   embeds?: Array<{
     title?: string;
     description?: string;
     color?: number;
+    image?: {
+      url: string;
+    };
     fields?: Array<{
       name: string;
       value: string;
@@ -28,6 +38,7 @@ export interface DiscordMessagePayload {
   }>;
   allowed_mentions?: {
     parse: string[];
+    roles?: string[];
   };
 }
 
@@ -66,6 +77,45 @@ export function sendChannelMessage(
     { method: "POST", body: JSON.stringify(payload) },
     fetcher,
   );
+}
+
+export async function sendChannelMessageWithFiles(
+  token: string,
+  channelId: string,
+  payload: DiscordMessagePayload,
+  files: DiscordFileAttachment[],
+  fetcher: typeof fetch = fetch,
+): Promise<DiscordMessage> {
+  const form = new FormData();
+  form.append("payload_json", JSON.stringify({
+    ...payload,
+    attachments: files.map((file, index) => ({
+      id: index,
+      filename: file.filename,
+      description: file.description,
+    })),
+  }));
+  files.forEach((file, index) => {
+    form.append(
+      `files[${index}]`,
+      new Blob([file.data], { type: file.contentType }),
+      file.filename,
+    );
+  });
+
+  const response = await fetcher(
+    `${DISCORD_API_BASE}/channels/${channelId}/messages`,
+    {
+      method: "POST",
+      headers: { Authorization: `Bot ${token}` },
+      body: form,
+    },
+  );
+  if (!response.ok) {
+    const detail = (await response.text()).slice(0, 500);
+    throw new Error(`Discord API error (${response.status}): ${detail}`);
+  }
+  return await response.json<DiscordMessage>();
 }
 
 export async function sendDirectMessage(

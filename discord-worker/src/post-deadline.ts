@@ -1,4 +1,10 @@
-import { sendChannelMessage, sendDirectMessage, type DiscordMessagePayload } from "./discord-api";
+import {
+  sendChannelMessage,
+  sendChannelMessageWithFiles,
+  sendDirectMessage,
+  type DiscordFileAttachment,
+  type DiscordMessagePayload,
+} from "./discord-api";
 import { formatGrade } from "./members";
 import {
   applyBotMessageContent,
@@ -11,10 +17,18 @@ import {
   type EntryResultAnnouncementParticipant,
   type TournamentRow,
 } from "./tournaments";
+import {
+  decorateUrgentAdminAlert,
+  loadAdminRoleId,
+  loadUrgentAdminAlertAttachment,
+} from "./urgent-admin-alerts";
 
 export interface PostDeadlineEnv {
   DB: D1Database;
+  DOCUMENTS?: R2Bucket;
   DISCORD_BOT_TOKEN?: string;
+  DISCORD_GUILD_ID?: string;
+  DISCORD_BOT_PUBLIC_URL?: string;
   TOURNAMENT_ADMIN_URL?: string;
 }
 
@@ -769,6 +783,7 @@ export async function processPostDeadlineQueue(
     if (Number(claim.meta.changes ?? 0) !== 1) continue;
     processed += 1;
     try {
+      let urgentAttachment: DiscordFileAttachment | null = null;
       let payload: DiscordMessagePayload;
       let messageSettingKey: BotMessageKey;
       if (delivery.delivery_kind === "confirmation_roster_dm") {
@@ -852,9 +867,29 @@ export async function processPostDeadlineQueue(
       }
 
       payload = await applyBotMessageContent(env.DB, messageSettingKey, payload);
+      if (delivery.delivery_kind === "organizer_payment_overdue_channel") {
+        urgentAttachment = await loadUrgentAdminAlertAttachment(
+          env.DOCUMENTS,
+          "organizer_payment",
+        );
+        payload = decorateUrgentAdminAlert(payload, "organizer_payment", {
+          adminRoleId: await loadAdminRoleId(env.DB, env.DISCORD_GUILD_ID),
+          publicBaseUrl: env.DISCORD_BOT_PUBLIC_URL,
+          imageUrl: urgentAttachment
+            ? `attachment://${urgentAttachment.filename}`
+            : undefined,
+        });
+      }
 
       const message = delivery.destination_type === "channel"
-        ? await sendChannelMessage(env.DISCORD_BOT_TOKEN, delivery.destination_id, payload)
+        ? urgentAttachment
+          ? await sendChannelMessageWithFiles(
+              env.DISCORD_BOT_TOKEN,
+              delivery.destination_id,
+              payload,
+              [urgentAttachment],
+            )
+          : await sendChannelMessage(env.DISCORD_BOT_TOKEN, delivery.destination_id, payload)
         : await sendDirectMessage(env.DISCORD_BOT_TOKEN, delivery.destination_id, payload);
       await env.DB.prepare(
         `UPDATE post_deadline_deliveries

@@ -8,7 +8,8 @@
   },
   "vars": {
     "MEMBER_PORTAL_URL": "https://sukc-tournament-portal.saitama-univ-karuta-club.workers.dev",
-    "TOURNAMENT_ADMIN_URL": "https://sukc-tournament-admin.saitama-univ-karuta-club.workers.dev/tournaments"
+    "TOURNAMENT_ADMIN_URL": "https://sukc-tournament-admin.saitama-univ-karuta-club.workers.dev/tournaments",
+    "DISCORD_BOT_PUBLIC_URL": "https://sukc-tournament-discord-bot.saitama-univ-karuta-club.workers.dev"
   },
   "triggers": {
     "crons": ["*/1 * * * *"]

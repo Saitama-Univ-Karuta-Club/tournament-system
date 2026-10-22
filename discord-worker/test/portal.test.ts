@@ -172,6 +172,7 @@ describe("member portal", () => {
     expect(script).toContain("function tournamentStage(group)");
     expect(script).toContain("function tournamentResourceLinks(group,stage)");
     expect(script).toContain("function renderDocumentIndex()");
+    expect(script).toContain("group.every(item=>item.workflow_stage!=='canceled'&&item.status!=='canceled')");
     expect(html).toContain('id="info-tab"');
     expect(html).toContain('id="documents-view-tab"');
     expect(html).toContain('id="document-search"');
