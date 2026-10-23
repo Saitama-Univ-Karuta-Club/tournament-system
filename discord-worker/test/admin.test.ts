@@ -115,7 +115,7 @@ describe("Admin Worker", () => {
     const html = await response.text();
     expect(html).toContain('class="admin-brand-name">埼玉大学かるた会</span>');
     expect(html).toContain("<h1>運営管理ポータル</h1>");
-    expect(html).toContain(">大会管理</a>");
+    expect(html).toContain('>大会管理<span id="tournament-todo-count-badge"');
     expect(html).toContain(">メンバー管理");
     expect(html).toContain(">設定</a>");
     expect(html).toContain(`>${label}`);
@@ -215,8 +215,13 @@ describe("Admin Worker", () => {
     const html = await response.text();
     expect(html).toContain('id="todo-list"');
     expect(html).toContain('id="todo-count-badge"');
+    expect(html).toContain('id="tournament-todo-count-badge"');
     expect(html).toContain('>TODO<span id="todo-count-badge"');
-    expect(html).toContain("todoCountBadge.hidden = normalized === 0");
+    expect(html).toContain("const tournamentManagementPages = ['todo', 'register', 'tournaments']");
+    expect(html).toContain("? todoCountBadge");
+    expect(html).toContain(": tournamentTodoCountBadge");
+    expect(html).toContain("inactiveBadge.hidden = true");
+    expect(html).toContain("activeBadge.hidden = normalized === 0");
     expect(html).toContain("setTodoCountBadge(body.todos.length)");
     expect(html).toContain("申込完了にする");
     expect(html).toContain("振込完了にする");

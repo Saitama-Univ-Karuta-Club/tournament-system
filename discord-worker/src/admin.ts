@@ -3347,7 +3347,7 @@ function adminHtml(page: AdminPage): string {
   <header><div class="header-inner"><div class="admin-brand"><span class="admin-brand-name">埼玉大学かるた会</span><h1>運営管理ポータル</h1></div><span class="identity-wrap"><span id="identity">認証情報を確認中…</span><a id="logout" href="/auth/logout" hidden>ログアウト</a></span></div></header>
   <div class="tab-bar">
     <nav class="tabs" aria-label="管理画面メニュー">
-      <a class="${tabClass("tournament-management")}" href="/register"${section === "tournament-management" ? ' aria-current="true"' : ""}>大会管理</a>
+      <a class="${tabClass("tournament-management")}" href="/register"${section === "tournament-management" ? ' aria-current="true"' : ""}>大会管理<span id="tournament-todo-count-badge" class="request-badge" role="status" aria-live="polite" hidden>0</span></a>
       <a class="${tabClass("members")}" href="/members"${currentPage("members")}>メンバー管理<span id="pending-request-badge" class="request-badge" role="status" aria-live="polite" hidden>0</span></a>
       <a class="${tabClass("settings")}" href="/settings"${currentPage("settings")}>設定</a>
     </nav>
@@ -3593,6 +3593,7 @@ function adminHtml(page: AdminPage): string {
     const todoActionStatus = document.querySelector('#todo-action-status');
     const refreshTodos = document.querySelector('#refresh-todos');
     const todoCountBadge = document.querySelector('#todo-count-badge');
+    const tournamentTodoCountBadge = document.querySelector('#tournament-todo-count-badge');
     const form = document.querySelector('#tournament-form');
     const submit = document.querySelector('#submit');
     const result = document.querySelector('#result');
@@ -4073,9 +4074,17 @@ function adminHtml(page: AdminPage): string {
 
     function setTodoCountBadge(count) {
       const normalized = Number.isFinite(Number(count)) ? Math.max(0, Number(count)) : 0;
-      todoCountBadge.hidden = normalized === 0;
-      todoCountBadge.textContent = normalized > 99 ? '99+' : String(normalized);
-      todoCountBadge.setAttribute('aria-label', '未完了のTODO ' + normalized + '件');
+      const tournamentManagementPages = ['todo', 'register', 'tournaments'];
+      const activeBadge = tournamentManagementPages.includes(currentPage)
+        ? todoCountBadge
+        : tournamentTodoCountBadge;
+      const inactiveBadge = activeBadge === todoCountBadge
+        ? tournamentTodoCountBadge
+        : todoCountBadge;
+      inactiveBadge.hidden = true;
+      activeBadge.hidden = normalized === 0;
+      activeBadge.textContent = normalized > 99 ? '99+' : String(normalized);
+      activeBadge.setAttribute('aria-label', '未完了のTODO ' + normalized + '件');
     }
 
     async function loadTodoCount() {
