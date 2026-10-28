@@ -1,6 +1,11 @@
 export const profileTabHtml = `
 <section class="panel" id="profile-panel" role="tabpanel" aria-labelledby="profile-tab" hidden>
   <div class="profile-layout" id="profile-content"></div>
+  <section class="profile-match-section">
+    <div class="practice-heading"><div><h2>対戦記録</h2><p>大会・サークル内練習・外部練習会の成績をまとめて表示します。</p></div></div>
+    <div id="profile-practice-statistics"></div>
+    <div id="profile-practice-record-list" class="practice-record-list"></div>
+  </section>
 </section>`;
 
 export const profileTabScript = String.raw`

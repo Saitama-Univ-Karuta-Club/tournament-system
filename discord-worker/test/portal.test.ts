@@ -101,6 +101,13 @@ describe("member portal", () => {
     expect(html).not.toContain("登録済みの大会案内をまとめて閲覧できます");
     expect(html).not.toContain("大会要項・選手名簿・大会結果と、サークルから出場したメンバーの成績を大会ごとにまとめています");
     expect(html).toContain('id="profile-tab"');
+    expect(html).toContain('id="practice-tab"');
+    expect(html).toContain('id="practice-panel"');
+    expect(html).toContain('id="practice-session-form"');
+    expect(html).toContain("function renderPractice()");
+    expect(html).toContain("function generatePracticeRound(event)");
+    expect(html).toContain("級ごとの成績");
+    expect(html).toContain("相手ごとの成績");
     expect(html).toContain('id="answer-list"');
     expect(html).toContain('id="tournament-list"');
     expect(html).toContain('id="archive-list"');

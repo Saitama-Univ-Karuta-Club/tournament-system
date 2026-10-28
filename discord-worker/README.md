@@ -46,6 +46,7 @@
 - `sukc-tournament-admin`: 大会登録画面。移行中はCloudflare Accessを併用し、最終的にDiscord大会管理者ロールで保護する。BotのSecretは保持しない
 - `sukc-tournament-portal`: 承認済みメンバー用。Discord OAuthで本人確認し、大会閲覧・PDF閲覧・Web回答を提供する
 - `sukc-tournament-backup`: 毎日3:00（日本時間）にD1と未退避のR2 PDFをGoogle Driveへ保存する
+- `sukc-practice-recorder-bot`: 「練習記録屋さん」。練習の札組・対戦組み合わせをDiscordへ投稿する
 
 管理画面で保存した大会はD1へ入り、Discord WorkerのCronが1分以内を目安に取得して告知とDMを送ります。管理画面WorkerへBotトークンを複製しない構成です。
 
@@ -90,6 +91,16 @@ Google OAuthはサークル用Googleアカウントで、最小権限の
 npx wrangler secret put DISCORD_APPLICATION_ID --config wrangler.portal.jsonc
 npx wrangler secret put DISCORD_CLIENT_SECRET --config wrangler.portal.jsonc
 npx wrangler secret put SESSION_SECRET --config wrangler.portal.jsonc
+```
+
+練習記録屋さんには、新しく作成したDiscord ApplicationのSecretを登録します。
+大会Botとはトークン・公開鍵を共有しません。
+
+```sh
+npx wrangler secret put DISCORD_PUBLIC_KEY --config wrangler.practice.jsonc
+npx wrangler secret put DISCORD_BOT_TOKEN --config wrangler.practice.jsonc
+npx wrangler secret put DISCORD_APPLICATION_ID --config wrangler.practice.jsonc
+npx wrangler secret put DISCORD_GUILD_ID --config wrangler.practice.jsonc
 ```
 
 大会管理画面のDiscord認証にも同じ3種類のSecretを登録します。Botトークンは登録しません。
@@ -166,6 +177,7 @@ npm run deploy:backup:development
 npm run deploy:development
 npm run deploy:admin:development
 npm run deploy:portal:development
+npm run deploy:practice:development
 ```
 
 ## 開発コマンド
@@ -178,6 +190,7 @@ npm run dev
 npm run dev:admin
 npm run dev:portal
 npm run dev:backup
+npm run dev:practice
 ```
 
 ## D1マイグレーション
@@ -199,6 +212,33 @@ npm run deploy
 npm run deploy:admin
 npm run deploy:portal
 npm run deploy:backup
+npm run deploy:practice
+```
+
+## 練習記録屋さん
+
+メンバーポータルの「練習」では、練習日、参加メンバー、組み合わせ方式、
+使用札を登録できます。組み合わせを生成するとD1の通知キューへ入り、
+練習記録屋さんが設定済みDiscordチャンネルへ1分以内を目安に投稿します。
+
+Discord Developer Portalでは新しいApplicationを作成し、Interactions Endpointを
+次のWorkerへ設定します。
+
+```text
+https://sukc-practice-recorder-bot.saitama-univ-karuta-club.workers.dev/interactions
+```
+
+Botの導入時は `bot` と `applications.commands` スコープを使用し、
+チャンネル閲覧、メッセージ送信、埋め込みリンク、履歴閲覧だけを許可します。
+Administrator権限は不要です。導入後、投稿先チャンネルで `/practice-setup` を実行します。
+
+開発サーバーへコマンドを登録する場合は、練習記録屋さんの値を指定します。
+
+```sh
+DISCORD_APPLICATION_ID=... \
+DISCORD_GUILD_ID=... \
+DISCORD_BOT_TOKEN=... \
+npm run register:practice-commands
 ```
 
 ## Google Driveバックアップ

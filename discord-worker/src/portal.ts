@@ -14,6 +14,7 @@ import {
 } from "./portal/documents";
 import { htmlResponse, json, sameOrigin, securityHeaders } from "./portal/http";
 import { loadPortalProfile, submitPortalProfileRequest } from "./portal/profile";
+import { handlePracticePortalRequest } from "./portal/practice";
 import {
   listPortalTournaments,
   PortalError,
@@ -56,6 +57,9 @@ export async function handlePortalRequest(
   const authenticated = await loadSessionMember(request, env);
   if (!authenticated) return json({ error: "ログインが必要です。" }, 401);
   const { member, session } = authenticated;
+
+  const practiceResponse = await handlePracticePortalRequest(request, url, env, member);
+  if (practiceResponse) return practiceResponse;
 
   if (request.method === "GET" && url.pathname === "/api/session") {
     const refreshedCookie = await refreshedSessionCookie(session, env.SESSION_SECRET);

@@ -79,6 +79,21 @@ export function sendChannelMessage(
   );
 }
 
+export function editChannelMessage(
+  token: string,
+  channelId: string,
+  messageId: string,
+  payload: DiscordMessagePayload,
+  fetcher: typeof fetch = fetch,
+): Promise<DiscordMessage> {
+  return discordRequest<DiscordMessage>(
+    token,
+    `/channels/${channelId}/messages/${messageId}`,
+    { method: "PATCH", body: JSON.stringify(payload) },
+    fetcher,
+  );
+}
+
 export async function sendChannelMessageWithFiles(
   token: string,
   channelId: string,
