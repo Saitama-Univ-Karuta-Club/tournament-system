@@ -850,7 +850,8 @@ describe("notification queue", () => {
       field.name === "申込メール作成"
     )?.value ?? "";
     expect(email).toContain("https://files.example.com/application-email/T-test");
-    expect(email).toContain("申込名簿はメーラーで添付");
+    expect(email).toContain("申込名簿を入力済み");
+    expect(email).not.toContain("申込名簿はメーラーで添付");
   });
 
   it("参加希望者がいる級だけを人数付きで申込メールに入れる", () => {
@@ -873,6 +874,7 @@ describe("notification queue", () => {
     expect(template.body).toContain("申し込みはC級2名、E級1名の計3名になります。");
     expect(template.body).not.toContain("A級");
     expect(template.body).not.toContain("B級");
+    expect(template.attachmentUrl).toBeNull();
     expect(template.body).not.toContain("D級");
     expect(template.body).toContain("E-mail: saitama.iroha@gmail.com");
     expect(decodeURIComponent(template.mailto)).toContain(template.body);

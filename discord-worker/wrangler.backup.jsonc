@@ -39,5 +39,44 @@
       "binding": "DOCUMENT_BACKUP_WORKFLOW",
       "class_name": "TournamentDocumentBackupWorkflow"
     }
-  ]
+  ],
+  "env": {
+    "development": {
+      "vars": {
+        "ENVIRONMENT": "development",
+        "ACCOUNT_ID": "9ea8291abc3716afbef1f4e59fa3bee5",
+        "DATABASE_ID": "86c04659-78f6-4bdb-909f-c7de05ad4246",
+        "DATABASE_BACKUP_RETENTION_DAYS": "30"
+      },
+      "triggers": {
+        "crons": []
+      },
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "sukc-tournament-discord-db-development",
+          "database_id": "86c04659-78f6-4bdb-909f-c7de05ad4246",
+          "migrations_dir": "migrations"
+        }
+      ],
+      "r2_buckets": [
+        {
+          "binding": "DOCUMENTS",
+          "bucket_name": "sukc-tournament-documents-development"
+        }
+      ],
+      "workflows": [
+        {
+          "name": "sukc-tournament-google-drive-backup-development",
+          "binding": "BACKUP_WORKFLOW",
+          "class_name": "TournamentBackupWorkflow"
+        },
+        {
+          "name": "sukc-tournament-google-drive-document-backup-development",
+          "binding": "DOCUMENT_BACKUP_WORKFLOW",
+          "class_name": "TournamentDocumentBackupWorkflow"
+        }
+      ]
+    }
+  }
 }

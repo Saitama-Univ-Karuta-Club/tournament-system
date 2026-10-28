@@ -28,6 +28,7 @@ import {
   buildGuidanceFilename,
   buildOrganizerPaymentFilename,
   DocumentUploadError,
+  MAX_GUIDANCE_BYTES,
   storeParticipantGuidanceDocument,
   uploadApplicationRoster,
   uploadTournamentDocument,
@@ -63,8 +64,28 @@ import {
   saveDeadlineAutomationSettings,
 } from "./deadline-settings";
 import { createDatabaseCsvArchive } from "./database-export";
+import {
+  ApplicationRosterGenerationError,
+  generateApplicationRoster as createFilledApplicationRoster,
+  type ExcelProfileEnv,
+} from "./application-roster-generation";
+import {
+  extractTournamentResults,
+  ResultAutoFillError,
+  type ResultExtractionCandidate,
+  type ResultExtractionReport,
+} from "./result-auto-fill";
+import {
+  checkApplicationRoster,
+  extractLotteryRoster,
+  type ApplicationRosterReport,
+  type LotteryRosterReport,
+  type RosterExtractionCandidate,
+} from "./roster-auto-fill";
 
-export interface AdminEnv extends TournamentEnv, DocumentEnv, AdminAuthEnv {}
+export interface AdminEnv extends TournamentEnv, DocumentEnv, AdminAuthEnv, ExcelProfileEnv {
+  ENVIRONMENT?: string;
+}
 
 type AdminContext = Pick<ExecutionContext, "waitUntil"> &
   Partial<Pick<ExecutionContext, "access">>;
@@ -175,6 +196,31 @@ interface AdminResponseRow {
   waitlist_number: number | null;
   payment_status: "unpaid" | "paid" | null;
   result_text: string | null;
+  matches: TournamentEntryMatch[];
+}
+
+export interface TournamentEntryMatch {
+  roundNumber: number;
+  outcome: "win" | "loss";
+  scoreDifference: number | null;
+  resultNote: string | null;
+  opponentName: string | null;
+  opponentAffiliation: string | null;
+  sourceSheetName: string | null;
+  sourceCellReference: string | null;
+}
+
+interface TournamentEntryMatchRow {
+  tournament_id: string;
+  member_id: string;
+  round_number: number;
+  outcome: "win" | "loss";
+  score_difference: number | null;
+  result_note: string | null;
+  opponent_name: string | null;
+  opponent_affiliation: string | null;
+  source_sheet_name: string | null;
+  source_cell_reference: string | null;
 }
 
 interface AdminArchiveDocumentRow {
@@ -329,11 +375,13 @@ export interface TournamentEntryResultBatchInput {
   tournamentId: string;
   memberId: string;
   resultText: string;
+  matches?: TournamentEntryMatch[];
 }
 
 export interface TournamentEntryResultBatchUpdateResult {
   entryCount: number;
   changedCount: number;
+  matchesSavedCount: number;
 }
 
 export interface TournamentArchivePublishResult {
@@ -674,6 +722,30 @@ export async function listAdminTournaments(
       members.display_name`,
   ).all<AdminResponseRow>();
 
+  const matchRows = await env.DB.prepare(
+    `SELECT tournament_id, member_id, round_number, outcome,
+      score_difference, result_note, opponent_name, opponent_affiliation,
+      source_sheet_name, source_cell_reference
+     FROM tournament_entry_matches
+     ORDER BY tournament_id, member_id, round_number`,
+  ).all<TournamentEntryMatchRow>();
+  const matchesByEntry = new Map<string, TournamentEntryMatch[]>();
+  for (const match of matchRows.results) {
+    const key = `${match.tournament_id}:${match.member_id}`;
+    const current = matchesByEntry.get(key) ?? [];
+    current.push({
+      roundNumber: Number(match.round_number),
+      outcome: match.outcome,
+      scoreDifference: match.score_difference === null ? null : Number(match.score_difference),
+      resultNote: match.result_note,
+      opponentName: match.opponent_name,
+      opponentAffiliation: match.opponent_affiliation,
+      sourceSheetName: match.source_sheet_name,
+      sourceCellReference: match.source_cell_reference,
+    });
+    matchesByEntry.set(key, current);
+  }
+
   const archiveDocuments = await env.DB.prepare(
     `SELECT group_key, document_type, document_url, file_name, file_size, uploaded_at
      FROM tournament_archive_documents
@@ -758,7 +830,10 @@ export async function listAdminTournaments(
   const responsesByTournament = new Map<string, AdminResponseRow[]>();
   for (const response of responseRows.results) {
     const current = responsesByTournament.get(response.tournament_id) ?? [];
-    current.push(response);
+    current.push({
+      ...response,
+      matches: matchesByEntry.get(`${response.tournament_id}:${response.member_id}`) ?? [],
+    });
     responsesByTournament.set(response.tournament_id, current);
   }
 
@@ -1362,10 +1437,51 @@ export async function updateTournamentEntryResultsBatch(
   }
   const seen = new Set<string>();
   const entries = rawEntries.map((entry) => {
+    const roundNumbers = new Set<number>();
+    const matches = entry.matches?.map((match) => {
+      const roundNumber = Number(match.roundNumber);
+      const scoreDifference = match.scoreDifference === null
+        ? null
+        : Number(match.scoreDifference);
+      const normalizedMatch: TournamentEntryMatch = {
+        roundNumber,
+        outcome: match.outcome,
+        scoreDifference,
+        resultNote: match.resultNote === null ? null : String(match.resultNote ?? "").trim() || null,
+        opponentName: match.opponentName === null ? null : String(match.opponentName ?? "").trim() || null,
+        opponentAffiliation: match.opponentAffiliation === null
+          ? null
+          : String(match.opponentAffiliation ?? "").trim() || null,
+        sourceSheetName: match.sourceSheetName === null
+          ? null
+          : String(match.sourceSheetName ?? "").trim() || null,
+        sourceCellReference: match.sourceCellReference === null
+          ? null
+          : String(match.sourceCellReference ?? "").trim() || null,
+      };
+      if (
+        !Number.isInteger(roundNumber) || roundNumber < 1 || roundNumber > 12 ||
+        roundNumbers.has(roundNumber) ||
+        !new Set(["win", "loss"]).has(normalizedMatch.outcome) ||
+        (scoreDifference !== null && (
+          !Number.isInteger(scoreDifference) || scoreDifference < 0 || scoreDifference > 50
+        )) ||
+        (normalizedMatch.resultNote?.length ?? 0) > 50 ||
+        (normalizedMatch.opponentName?.length ?? 0) > 100 ||
+        (normalizedMatch.opponentAffiliation?.length ?? 0) > 200 ||
+        (normalizedMatch.sourceSheetName?.length ?? 0) > 100 ||
+        (normalizedMatch.sourceCellReference?.length ?? 0) > 20
+      ) {
+        throw new AdminRequestError("対戦詳細の指定が不正です。", 400);
+      }
+      roundNumbers.add(roundNumber);
+      return normalizedMatch;
+    });
     const normalized = {
       tournamentId: String(entry.tournamentId ?? ""),
       memberId: String(entry.memberId ?? ""),
       resultText: String(entry.resultText ?? "").trim(),
+      matches,
     };
     if (
       !/^T-[0-9a-f-]{36}$/.test(normalized.tournamentId) ||
@@ -1382,6 +1498,7 @@ export async function updateTournamentEntryResultsBatch(
     return normalized;
   });
   let changedCount = 0;
+  let matchesSavedCount = 0;
   for (const entry of entries) {
     const result = await updateTournamentEntryResult(
       env,
@@ -1391,8 +1508,41 @@ export async function updateTournamentEntryResultsBatch(
       changedByEmail,
     );
     if (result.changed) changedCount += 1;
+    if (entry.matches) {
+      const now = new Date().toISOString();
+      const statements = [
+        env.DB.prepare(
+          `DELETE FROM tournament_entry_matches
+           WHERE tournament_id = ? AND member_id = ?`,
+        ).bind(entry.tournamentId, entry.memberId),
+        ...entry.matches.map((match) => env.DB.prepare(
+          `INSERT INTO tournament_entry_matches (
+            tournament_id, member_id, round_number, outcome,
+            score_difference, result_note, opponent_name, opponent_affiliation,
+            source_sheet_name, source_cell_reference,
+            updated_by_email, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).bind(
+          entry.tournamentId,
+          entry.memberId,
+          match.roundNumber,
+          match.outcome,
+          match.scoreDifference,
+          match.resultNote,
+          match.opponentName,
+          match.opponentAffiliation,
+          match.sourceSheetName,
+          match.sourceCellReference,
+          changedByEmail,
+          now,
+          now,
+        )),
+      ];
+      await env.DB.batch(statements);
+      matchesSavedCount += entry.matches.length;
+    }
   }
-  return { entryCount: entries.length, changedCount };
+  return { entryCount: entries.length, changedCount, matchesSavedCount };
 }
 
 function archiveGroupKey(tournaments: EditableTournamentRow[]): string {
@@ -1429,9 +1579,9 @@ export async function saveConfirmationRoster(
   if (!(file instanceof File) || file.size === 0) {
     throw new DocumentUploadError("申込確認名簿を選択してください。");
   }
-  const extensionMatch = file.name.toLowerCase().match(/\.(pdf|doc|docx|xls|xlsx)$/);
+  const extensionMatch = file.name.toLowerCase().match(/\.(pdf|doc|docx|xls|xlsx|xlsm)$/);
   if (!extensionMatch) {
-    throw new DocumentUploadError("申込確認名簿はPDF・Word・Excel（.xls/.xlsx）のみ登録できます。");
+    throw new DocumentUploadError("申込確認名簿はPDF・Word・Excel（.xls/.xlsx/.xlsm）のみ登録できます。");
   }
   const tournaments = await tournamentIdsFromForm(form, env);
   if (tournaments.some((tournament) => tournament.status !== "applied")) {
@@ -1449,7 +1599,7 @@ export async function saveConfirmationRoster(
     tournaments[0].title,
     grades,
     eventDates,
-    extensionMatch[1] as "pdf" | "doc" | "docx" | "xls" | "xlsx",
+    extensionMatch[1] as "pdf" | "doc" | "docx" | "xls" | "xlsx" | "xlsm",
   );
   const stored = await storeParticipantGuidanceDocument(file, env, uploadedBy, fileName);
   const revision = Number(current?.revision ?? 0) + 1;
@@ -1520,6 +1670,267 @@ export async function queueConfirmationRoster(
   );
 }
 
+interface ResultExtractionCandidateRow {
+  tournament_id: string;
+  member_id: string;
+  display_name: string;
+  result_grade: string;
+}
+
+export async function extractTournamentResultsFromUpload(
+  env: AdminEnv,
+  request: Request,
+): Promise<ResultExtractionReport> {
+  const form = await request.formData();
+  const file = form.get("file");
+  if (!(file instanceof File) || file.size === 0) {
+    throw new DocumentUploadError("大会結果のExcelファイルを選択してください。");
+  }
+  if (file.size > MAX_GUIDANCE_BYTES) {
+    throw new DocumentUploadError("大会結果ファイルは20MB以下にしてください。");
+  }
+  const extension = file.name.toLowerCase().match(/\.(xls|xlsx)$/)?.[1] as
+    | "xls"
+    | "xlsx"
+    | undefined;
+  if (!extension) {
+    throw new DocumentUploadError(
+      "個人成績の自動読取はExcel（.xls・.xlsx）に対応しています。PDFは手入力してください。",
+    );
+  }
+
+  let tournamentIds: string[];
+  try {
+    const parsed = JSON.parse(String(form.get("tournamentIds") ?? "")) as unknown;
+    if (!Array.isArray(parsed)) throw new Error();
+    tournamentIds = parsed.map(String);
+  } catch {
+    throw new DocumentUploadError("対象大会が不正です。");
+  }
+  try {
+    await loadEditableTournaments(env, tournamentIds, tournamentIds.length > 1);
+  } catch (error) {
+    if (error instanceof AdminRequestError) throw new DocumentUploadError(error.message);
+    throw error;
+  }
+  const normalizedTournamentIds = normalizeTournamentIds(tournamentIds);
+  const placeholders = normalizedTournamentIds.map(() => "?").join(", ");
+  const rows = await env.DB.prepare(
+    `SELECT
+      tournament_entries.tournament_id,
+      tournament_entries.member_id,
+      COALESCE(
+        NULLIF(members.display_name, ''),
+        TRIM(members.last_name || members.first_name)
+      ) AS display_name,
+      CASE WHEN tournaments.all_grades = 1 THEN members.grade ELSE tournaments.grade END AS result_grade
+     FROM tournament_entries
+     INNER JOIN tournaments
+       ON tournaments.tournament_id = tournament_entries.tournament_id
+     INNER JOIN members
+       ON members.member_id = tournament_entries.member_id
+     WHERE tournament_entries.tournament_id IN (${placeholders})
+       AND tournament_entries.status IN ('submitted', 'selected')
+       AND tournaments.status <> 'deleted'
+     ORDER BY result_grade, display_name`,
+  ).bind(...normalizedTournamentIds).all<ResultExtractionCandidateRow>();
+  if (rows.results.length === 0) {
+    throw new DocumentUploadError("個人成績を読み取る出場者がいません。");
+  }
+  if (rows.results.length > 100) {
+    throw new DocumentUploadError("個人成績の自動読取は100人までです。");
+  }
+  const candidates: ResultExtractionCandidate[] = rows.results.map((row) => ({
+    tournamentId: row.tournament_id,
+    memberId: row.member_id,
+    displayName: row.display_name,
+    grade: row.result_grade,
+  }));
+
+  const uploadedBytes = new Uint8Array(await file.arrayBuffer());
+  let workbookBytes = uploadedBytes;
+  let temporarySourceKey: string | null = null;
+  let temporaryTargetKey: string | null = null;
+  if (extension === "xlsx") {
+    if (uploadedBytes[0] !== 0x50 || uploadedBytes[1] !== 0x4b) {
+      throw new DocumentUploadError("Excel（.xlsx）形式を確認できませんでした。");
+    }
+  } else {
+    const oleSignature = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1];
+    if (!oleSignature.every((value, index) => uploadedBytes[index] === value)) {
+      throw new DocumentUploadError("Excel（.xls）形式を確認できませんでした。");
+    }
+    const converter = env.DOCUMENT_CONVERTER?.convertR2LegacyExcelToXlsx;
+    if (!env.DOCUMENTS || !converter) {
+      throw new DocumentUploadError("旧式.xlsの変換サービスが設定されていません。");
+    }
+    const temporaryId = crypto.randomUUID();
+    temporarySourceKey = `temporary/result-auto-fill/${temporaryId}/source.xls`;
+    temporaryTargetKey = `temporary/result-auto-fill/${temporaryId}/converted.xlsx`;
+    await env.DOCUMENTS.put(temporarySourceKey, uploadedBytes, {
+      httpMetadata: { contentType: "application/vnd.ms-excel" },
+      customMetadata: { originalName: file.name.slice(0, 500) },
+    });
+    try {
+      await converter({
+        sourceKey: temporarySourceKey,
+        targetKey: temporaryTargetKey,
+        sourceContentType: "application/vnd.ms-excel",
+        sourceFileName: file.name,
+        targetFileName: file.name.replace(/\.xls$/i, ".xlsx"),
+      });
+      const converted = await env.DOCUMENTS.get(temporaryTargetKey);
+      if (!converted) {
+        throw new DocumentUploadError(".xls変換後のExcelファイルを取得できませんでした。");
+      }
+      workbookBytes = new Uint8Array(await converted.arrayBuffer());
+    } finally {
+      await Promise.allSettled([
+        env.DOCUMENTS.delete(temporarySourceKey),
+        env.DOCUMENTS.delete(temporaryTargetKey),
+      ]);
+    }
+  }
+
+  try {
+    return extractTournamentResults(workbookBytes, candidates);
+  } catch (error) {
+    if (error instanceof ResultAutoFillError) {
+      throw new DocumentUploadError(error.message);
+    }
+    throw error;
+  }
+}
+
+type RosterExtractionMode = "application" | "lottery";
+
+export async function extractRosterFromUpload(
+  env: AdminEnv,
+  request: Request,
+  mode: RosterExtractionMode,
+): Promise<ApplicationRosterReport | LotteryRosterReport> {
+  const form = await request.formData();
+  const file = form.get("file");
+  if (!(file instanceof File) || file.size === 0) {
+    throw new DocumentUploadError("名簿のExcelファイルを選択してください。");
+  }
+  if (file.size > MAX_GUIDANCE_BYTES) {
+    throw new DocumentUploadError("名簿ファイルは20MB以下にしてください。");
+  }
+  const extension = file.name.toLowerCase().match(/\.(xls|xlsx|xlsm)$/)?.[1] as
+    | "xls"
+    | "xlsx"
+    | "xlsm"
+    | undefined;
+  if (!extension) {
+    throw new DocumentUploadError(
+      "名簿の自動確認はExcel（.xls・.xlsx・.xlsm）に対応しています。PDF・Wordは目視確認してください。",
+    );
+  }
+
+  let tournamentIds: string[];
+  try {
+    const parsed = JSON.parse(String(form.get("tournamentIds") ?? "")) as unknown;
+    if (!Array.isArray(parsed)) throw new Error();
+    tournamentIds = parsed.map(String);
+  } catch {
+    throw new DocumentUploadError("対象大会が不正です。");
+  }
+  try {
+    await loadEditableTournaments(env, tournamentIds, tournamentIds.length > 1);
+  } catch (error) {
+    if (error instanceof AdminRequestError) throw new DocumentUploadError(error.message);
+    throw error;
+  }
+  const normalizedTournamentIds = normalizeTournamentIds(tournamentIds);
+  const placeholders = normalizedTournamentIds.map(() => "?").join(", ");
+  const rows = await env.DB.prepare(
+    `SELECT
+      tournament_entries.tournament_id,
+      tournament_entries.member_id,
+      COALESCE(
+        NULLIF(members.display_name, ''),
+        TRIM(members.last_name || members.first_name)
+      ) AS display_name,
+      CASE WHEN tournaments.all_grades = 1 THEN members.grade ELSE tournaments.grade END AS result_grade
+     FROM tournament_entries
+     INNER JOIN tournaments
+       ON tournaments.tournament_id = tournament_entries.tournament_id
+     INNER JOIN members
+       ON members.member_id = tournament_entries.member_id
+     WHERE tournament_entries.tournament_id IN (${placeholders})
+       AND tournament_entries.status IN ('submitted', 'selected', 'not_selected')
+       AND tournaments.status <> 'deleted'
+     ORDER BY result_grade, display_name`,
+  ).bind(...normalizedTournamentIds).all<ResultExtractionCandidateRow>();
+  if (rows.results.length === 0) {
+    throw new DocumentUploadError("名簿と照合する申込者がいません。");
+  }
+  if (rows.results.length > 100) {
+    throw new DocumentUploadError("名簿の自動確認は100人までです。");
+  }
+  const candidates: RosterExtractionCandidate[] = rows.results.map((row) => ({
+    tournamentId: row.tournament_id,
+    memberId: row.member_id,
+    displayName: row.display_name,
+    grade: row.result_grade,
+  }));
+
+  const uploadedBytes = new Uint8Array(await file.arrayBuffer());
+  let workbookBytes = uploadedBytes;
+  if (extension === "xlsx" || extension === "xlsm") {
+    if (uploadedBytes[0] !== 0x50 || uploadedBytes[1] !== 0x4b) {
+      throw new DocumentUploadError("Excel（.xlsx・.xlsm）形式を確認できませんでした。");
+    }
+  } else {
+    const oleSignature = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1];
+    if (!oleSignature.every((value, index) => uploadedBytes[index] === value)) {
+      throw new DocumentUploadError("Excel（.xls）形式を確認できませんでした。");
+    }
+    const converter = env.DOCUMENT_CONVERTER?.convertR2LegacyExcelToXlsx;
+    if (!env.DOCUMENTS || !converter) {
+      throw new DocumentUploadError("旧式.xlsの変換サービスが設定されていません。");
+    }
+    const temporaryId = crypto.randomUUID();
+    const temporarySourceKey = `temporary/roster-auto-fill/${temporaryId}/source.xls`;
+    const temporaryTargetKey = `temporary/roster-auto-fill/${temporaryId}/converted.xlsx`;
+    await env.DOCUMENTS.put(temporarySourceKey, uploadedBytes, {
+      httpMetadata: { contentType: "application/vnd.ms-excel" },
+      customMetadata: { originalName: file.name.slice(0, 500) },
+    });
+    try {
+      await converter({
+        sourceKey: temporarySourceKey,
+        targetKey: temporaryTargetKey,
+        sourceContentType: "application/vnd.ms-excel",
+        sourceFileName: file.name,
+        targetFileName: file.name.replace(/\.xls$/i, ".xlsx"),
+      });
+      const converted = await env.DOCUMENTS.get(temporaryTargetKey);
+      if (!converted) {
+        throw new DocumentUploadError(".xls変換後のExcelファイルを取得できませんでした。");
+      }
+      workbookBytes = new Uint8Array(await converted.arrayBuffer());
+    } finally {
+      await Promise.allSettled([
+        env.DOCUMENTS.delete(temporarySourceKey),
+        env.DOCUMENTS.delete(temporaryTargetKey),
+      ]);
+    }
+  }
+
+  try {
+    return mode === "application"
+      ? checkApplicationRoster(workbookBytes, candidates)
+      : extractLotteryRoster(workbookBytes, candidates);
+  } catch (error) {
+    if (error instanceof ResultAutoFillError) {
+      throw new DocumentUploadError(error.message);
+    }
+    throw error;
+  }
+}
+
 export async function uploadTournamentArchiveDocument(
   env: AdminEnv,
   request: Request,
@@ -1536,8 +1947,8 @@ export async function uploadTournamentArchiveDocument(
   }
   const extensionMatch = file.name.toLowerCase().match(/\.([a-z0-9]+)$/);
   const extension = extensionMatch?.[1] ?? "";
-  if (documentType === "roster" && !["pdf", "xls", "xlsx"].includes(extension)) {
-    throw new DocumentUploadError("確定名簿はPDF・Excel（.xls/.xlsx）のみ登録できます。");
+  if (documentType === "roster" && !["pdf", "xls", "xlsx", "xlsm"].includes(extension)) {
+    throw new DocumentUploadError("確定名簿はPDF・Excel（.xls/.xlsx/.xlsm）のみ登録できます。");
   }
   if (documentType === "results" && !["pdf", "xls", "xlsx"].includes(extension)) {
     throw new DocumentUploadError("大会結果はPDF・Excel（.xls/.xlsx）のみ登録できます。");
@@ -2866,7 +3277,7 @@ function isSameOrigin(request: Request): boolean {
 type AdminPage = "todo" | "register" | "tournaments" | "members" | "settings";
 type AdminSection = "tournament-management" | "members" | "settings";
 
-function adminHtml(page: AdminPage): string {
+function adminHtml(page: AdminPage, environment?: string): string {
   const pageTitle = {
     todo: "TODO",
     register: "大会新規登録",
@@ -2887,13 +3298,16 @@ function adminHtml(page: AdminPage): string {
     tab === page ? ' aria-current="page"' : "";
   const hiddenPage = (tab: AdminPage): string =>
     tab === page ? "" : " hidden";
+  const portalName = environment === "development"
+    ? "運営管理ポータル（開発版）"
+    : "運営管理ポータル";
 
   return String.raw`<!doctype html>
 <html lang="ja">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>${pageTitle} | 埼玉大学かるた会 運営管理ポータル</title>
+  <title>${pageTitle} | 埼玉大学かるた会 ${portalName}</title>
   <style>
     :root {
       color-scheme: light;
@@ -3054,6 +3468,8 @@ function adminHtml(page: AdminPage): string {
     .todo-payment-amount { color: #263550; font-weight: 700; white-space: nowrap; }
     .todo-payment-total { color: #172033; font-weight: 800; white-space: nowrap; }
     .todo-resource-link { color: #294796; font-weight: 750; text-underline-offset: 2px; white-space: nowrap; }
+    .todo-roster-generate { appearance: none; border: 0; border-bottom: 1px solid currentColor; background: transparent; color: #294796; padding: 0; font: inherit; font-weight: 750; cursor: pointer; }
+    .todo-roster-generate:disabled { color: #8993a6; cursor: wait; }
     .todo-action { min-width: 170px; }
     .todo-link { display: inline-flex; align-items: center; justify-content: center; min-width: 160px; padding: 8px 12px; border-radius: var(--control-radius); color: white; background: #3658b2; text-decoration: none; font-size: var(--font-size-control); font-weight: 700; }
     .todo-link:hover { background: #294796; }
@@ -3091,6 +3507,28 @@ function adminHtml(page: AdminPage): string {
     .result-row select { padding-block: 6px; }
     .result-row button { padding: 6px 10px; white-space: nowrap; }
     .result-row .entry-result { grid-column: 1 / -1; }
+    .result-auto-fill-status { grid-column: 1 / -1; min-height: 1.2em; color: #697386; font-size: var(--font-size-meta); line-height: 1.35; }
+    .result-auto-fill-status:empty { display: none; }
+    .result-auto-fill-status.matched { color: #187746; }
+    .result-auto-fill-status.needs-review { color: #a55d00; }
+    .roster-check-summary { color: #596579; font-size: var(--font-size-meta); line-height: 1.4; }
+    .roster-check-summary.matched { color: #187746; }
+    .roster-check-summary.needs-review { color: #a55d00; }
+    .roster-check-list { display: grid; gap: 3px; margin: 0; padding: 0; list-style: none; font-size: var(--font-size-meta); }
+    .roster-check-list li { display: flex; align-items: baseline; gap: 6px; }
+    .roster-check-list .matched { color: #187746; }
+    .roster-check-list .needs-review { color: #a55d00; }
+    .match-editor { grid-column: 1 / -1; margin: 2px 0 5px; }
+    .match-editor > summary { cursor: pointer; color: #294796; font-size: var(--font-size-note); font-weight: 750; }
+    .match-editor-list { display: grid; gap: 6px; margin-top: 7px; }
+    .match-edit-row { display: grid; grid-template-columns: 4.5em 5.5em 5em minmax(95px, .8fr) minmax(130px, 1fr) minmax(150px, 1.15fr) auto; gap: 6px; align-items: center; }
+    .match-round { color: #465166; font-size: var(--font-size-note); font-weight: 750; white-space: nowrap; }
+    .match-edit-row input, .match-edit-row select { min-width: 0; padding: 5px 7px; font-size: var(--font-size-note); }
+    .match-edit-row .match-remove { width: auto; padding: 5px 8px; color: #a12822; background: #fdecea; font-size: var(--font-size-note); }
+    .match-editor-empty { color: #8992a3; font-size: var(--font-size-note); }
+    .match-editor-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 7px 10px; margin-top: 7px; }
+    .match-add, .match-save { width: auto; padding: 5px 9px; font-size: var(--font-size-note); }
+    .match-save-status { color: #697386; font-size: var(--font-size-note); }
     .guidance-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; align-items: start; }
     .guidance-subsection { display: grid; gap: 9px; min-width: 0; max-width: 100%; padding: 10px 0; border: 0; border-radius: 0; background: transparent; }
     .guidance-subsection h6 { margin: 0; color: #263550; font-size: var(--font-size-body); }
@@ -3161,7 +3599,15 @@ function adminHtml(page: AdminPage): string {
     .member-link { color: #596579; font-size: var(--font-size-note); }
     .member-history-link { appearance: none; width: auto; padding: 0; color: #294796; background: transparent; border: 0; border-radius: 0; font-size: var(--font-size-body); font-weight: 750; text-decoration: underline; text-underline-offset: 3px; }
     .member-history-link:hover { color: #1f397c; background: transparent; }
-    .member-history-summary { margin: 0 0 14px; color: #465166; font-weight: 700; }
+    .member-history-period { display: grid; grid-template-columns: max-content auto max-content max-content; gap: 6px 8px; align-items: end; justify-content: start; margin: 10px 0; padding: 8px 0; border-top: 1px solid #e7eaf0; border-bottom: 1px solid #e7eaf0; }
+    .member-history-date-group { min-width: 0; margin: 0; padding: 0; border: 0; }
+    .member-history-date-group legend { margin-bottom: 3px; padding: 0; color: #596579; font-size: var(--font-size-meta); font-weight: 750; }
+    .member-history-date-selects { display: grid; grid-template-columns: 78px 58px 58px; gap: 4px; }
+    .member-history-date-selects select { width: 100%; min-width: 0; min-height: 34px; padding: 4px 5px; font-size: var(--font-size-note); }
+    .member-history-period-separator { padding-bottom: 6px; color: #697386; font-size: var(--font-size-note); font-weight: 750; }
+    .member-history-period-actions { display: flex; align-items: center; gap: 5px; }
+    .member-history-period-action { flex: 0 0 auto; min-height: 34px; padding: 5px 7px; font-size: var(--font-size-meta); white-space: nowrap; }
+    .member-history-summary { margin: 0 0 10px; color: #465166; font-size: var(--font-size-body); font-weight: 700; }
     .member-history-table-wrap { overflow-x: auto; }
     .member-history-table { width: 100%; border-collapse: collapse; white-space: nowrap; }
     .member-history-table th, .member-history-table td { padding: 9px 10px; border-bottom: 1px solid #e7eaf0; text-align: left; }
@@ -3169,6 +3615,14 @@ function adminHtml(page: AdminPage): string {
     .member-history-table td { font-size: var(--font-size-body); }
     .member-history-table tr:last-child td { border-bottom: 0; }
     .member-history-loading { padding: 24px 0; color: #697386; text-align: center; }
+    .member-history-detail { appearance: none; width: auto; padding: 1px 0; border: 0; border-bottom: 1px solid currentColor; border-radius: 0; color: #294796; background: transparent; font-size: var(--font-size-note); font-weight: 750; }
+    .member-match-list { display: grid; gap: 0; margin: 12px 0 0; padding: 0; list-style: none; }
+    .member-match-list li { display: grid; grid-template-columns: 5em 3.5em minmax(100px, .8fr) minmax(140px, 1fr); gap: 8px; align-items: baseline; padding: 9px 0; border-bottom: 1px solid #e7eaf0; }
+    .member-match-mark { font-weight: 850; }
+    .member-match-mark.win { color: #17643a; }
+    .member-match-mark.loss { color: #b42318; }
+    .member-match-affiliation { color: #697386; font-size: var(--font-size-note); }
+    .member-match-final { margin: 14px 0 0; font-weight: 800; }
     #request-status { color: #697386; margin-bottom: 12px; }
     #request-list { display: grid; gap: 12px; }
     .request-card { border: 1px solid #dce1eb; border-radius: 10px; padding: 16px; }
@@ -3276,6 +3730,8 @@ function adminHtml(page: AdminPage): string {
     .manual-troubles dd { margin: 3px 0 0; color: #596579; font-size: var(--font-size-note); line-height: 1.65; }
     @media (max-width: 680px) {
       .grid, .grade-date-grid, .application-method-fields, .response-sections, .member-grid, .request-comparison, .entry-row, .archive-documents, .guidance-fields, .guidance-guide-grid, .payment-setup-grid, .result-row, .settings-layout, .message-settings-workspace, main.tournament-workspace { grid-template-columns: minmax(0, 1fr); }
+      .match-edit-row { grid-template-columns: 4.5em minmax(0, 1fr) minmax(0, 1fr); padding-bottom: 7px; border-bottom: 1px solid #edf0f5; }
+      .match-edit-row .match-opponent, .match-edit-row .match-affiliation { grid-column: 1 / -1; }
       input, select, textarea { min-height: 44px; font-size: var(--font-size-touch-control); }
       button, .todo-link { min-height: 44px; }
       #member-list.has-members { overflow: visible; border: 0; border-radius: 0; display: grid; gap: 10px; }
@@ -3285,6 +3741,10 @@ function adminHtml(page: AdminPage): string {
       .member-summary-item::before { content: attr(data-label); display: block; margin-bottom: 3px; color: #697386; font-size: var(--font-size-meta); font-weight: 650; }
       .member-summary-item:nth-child(-n + 2) { grid-column: 1 / -1; }
       .member-row-actions { grid-column: 1 / -1; display: flex; align-items: center; gap: 10px; }
+      .member-history-period { grid-template-columns: minmax(0, 1fr); }
+      .member-history-period-separator { display: none; }
+      .member-history-period-actions { justify-content: flex-start; }
+      .member-history-date-selects select { min-height: 38px; font-size: var(--font-size-note); }
       .entry-row, .entry-row.has-waitlist, .entry-row.has-payment { grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 8px; }
       .entry-name { grid-column: 1 / -1; min-width: 0; overflow-wrap: anywhere; }
       .entry-status-field { grid-column: 1; }
@@ -3344,7 +3804,7 @@ function adminHtml(page: AdminPage): string {
   </style>
 </head>
 <body data-page="${page}">
-  <header><div class="header-inner"><div class="admin-brand"><span class="admin-brand-name">埼玉大学かるた会</span><h1>運営管理ポータル</h1></div><span class="identity-wrap"><span id="identity">認証情報を確認中…</span><a id="logout" href="/auth/logout" hidden>ログアウト</a></span></div></header>
+  <header><div class="header-inner"><div class="admin-brand"><span class="admin-brand-name">埼玉大学かるた会</span><h1>${portalName}</h1></div><span class="identity-wrap"><span id="identity">認証情報を確認中…</span><a id="logout" href="/auth/logout" hidden>ログアウト</a></span></div></header>
   <div class="tab-bar">
     <nav class="tabs" aria-label="管理画面メニュー">
       <a class="${tabClass("tournament-management")}" href="/register"${section === "tournament-management" ? ' aria-current="true"' : ""}>大会管理<span id="tournament-todo-count-badge" class="request-badge" role="status" aria-live="polite" hidden>0</span></a>
@@ -3559,6 +4019,13 @@ function adminHtml(page: AdminPage): string {
       <div class="dialog-actions"><button id="close-member-history" type="button" class="secondary">閉じる</button></div>
     </div>
   </dialog>
+  <dialog id="member-match-dialog">
+    <div class="dialog-form">
+      <h2 id="member-match-title">対戦詳細</h2>
+      <div id="member-match-content"></div>
+      <div class="dialog-actions"><button id="close-member-match" type="button" class="secondary">閉じる</button></div>
+    </div>
+  </dialog>
   <script>
     const currentPage = document.body.dataset.page;
     const settingsMenuItems = [...document.querySelectorAll('[data-settings-view]')];
@@ -3624,6 +4091,10 @@ function adminHtml(page: AdminPage): string {
     const memberHistoryTitle = document.querySelector('#member-history-title');
     const memberHistoryContent = document.querySelector('#member-history-content');
     const closeMemberHistory = document.querySelector('#close-member-history');
+    const memberMatchDialog = document.querySelector('#member-match-dialog');
+    const memberMatchTitle = document.querySelector('#member-match-title');
+    const memberMatchContent = document.querySelector('#member-match-content');
+    const closeMemberMatch = document.querySelector('#close-member-match');
     const requestList = document.querySelector('#request-list');
     const requestStatus = document.querySelector('#request-status');
     const pendingRequestBadge = document.querySelector('#pending-request-badge');
@@ -4335,6 +4806,26 @@ function adminHtml(page: AdminPage): string {
       }
     }
 
+    async function generateTodoRoster(item, button) {
+      button.disabled = true;
+      todoActionStatus.textContent = item.title + 'の申込名簿を自動入力中…';
+      try {
+        const response = await fetch('/api/application-roster/generate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ tournamentId: item.tournamentIds[0] }),
+        });
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.error || '申込名簿を生成できませんでした。');
+        const warning = body.warnings?.length ? '手動確認: ' + body.warnings.join(' / ') : '';
+        todoActionStatus.textContent = item.title + 'の申込名簿を' + body.participantCount + '名分生成しました。' + warning;
+        await loadTodos();
+      } catch (error) {
+        todoActionStatus.textContent = error instanceof Error ? error.message : '申込名簿を生成できませんでした。';
+        button.disabled = false;
+      }
+    }
+
     function renderTodo(item) {
       const card = element('article', 'todo-card' + (item.urgency === 'urgent' ? ' urgent' : ''));
       const main = element('div', 'todo-main');
@@ -4371,6 +4862,12 @@ function adminHtml(page: AdminPage): string {
           details.append(link);
         };
         addResourceLink(item.applicationRosterUrl, item.applicationRosterFileName || '申込名簿を開く');
+        if (item.applicationRosterUrl) {
+          const generateButton = element('button', 'todo-roster-generate', '名簿を自動入力／再生成');
+          generateButton.type = 'button';
+          generateButton.addEventListener('click', () => generateTodoRoster(item, generateButton));
+          details.append(generateButton);
+        }
         if (item.applicationEmailUrl) addResourceLink(item.applicationEmailUrl, '申込メールを作成');
         else addResourceLink(item.applicationFormUrl, '申込フォームを開く');
       } else if (item.kind === 'payment') {
@@ -4548,7 +5045,7 @@ function adminHtml(page: AdminPage): string {
       confirmationBox.append(element('h5', '', '申込確認名簿'));
       const confirmationFile = document.createElement('input');
       confirmationFile.type = 'file';
-      confirmationFile.accept = 'application/pdf,.pdf,application/msword,.doc,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.docx,application/vnd.ms-excel,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,.xlsx';
+      confirmationFile.accept = 'application/pdf,.pdf,application/msword,.doc,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.docx,application/vnd.ms-excel,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,.xlsx,application/vnd.ms-excel.sheet.macroEnabled.12,.xlsm';
       const confirmationCurrent = element('div', 'guidance-current');
       if (confirmation?.document_url) {
         const link = element('a', '', confirmation.file_name || '登録済み確認名簿を開く');
@@ -4566,6 +5063,56 @@ function adminHtml(page: AdminPage): string {
       sendConfirmation.type = 'button';
       sendConfirmation.disabled = !confirmation;
       const confirmationMessage = element('span', 'entry-result', '');
+      const confirmationCheckSummary = element('div', 'roster-check-summary', 'Excel名簿を選択すると、申込者の氏名と級を保存前に照合します。');
+      const confirmationCheckList = element('ul', 'roster-check-list');
+      let confirmationAnalysisSequence = 0;
+      confirmationFile.addEventListener('change', async () => {
+        const sequence = ++confirmationAnalysisSequence;
+        confirmationCheckList.replaceChildren();
+        const selected = confirmationFile.files?.[0];
+        if (!selected) {
+          confirmationCheckSummary.className = 'roster-check-summary';
+          confirmationCheckSummary.textContent = 'Excel名簿を選択すると、申込者の氏名と級を保存前に照合します。';
+          return;
+        }
+        if (!/\.(?:xls|xlsx|xlsm)$/i.test(selected.name)) {
+          confirmationCheckSummary.className = 'roster-check-summary needs-review';
+          confirmationCheckSummary.textContent = 'PDF・Wordは自動照合の対象外です。保存前に目視で確認してください。';
+          return;
+        }
+        saveConfirmation.disabled = true;
+        confirmationCheckSummary.className = 'roster-check-summary';
+        confirmationCheckSummary.textContent = '申込者の記載を確認中…';
+        try {
+          const form = new FormData();
+          form.append('file', selected);
+          form.append('tournamentIds', JSON.stringify(tournaments.map((item) => item.tournament_id)));
+          const response = await fetch('/api/rosters/application-check', { method: 'POST', body: form });
+          const result = await response.json();
+          if (!response.ok) throw new Error(result.error || '申込者を照合できませんでした。');
+          if (sequence !== confirmationAnalysisSequence) return;
+          (result.predictions || []).forEach((prediction) => {
+            const matched = prediction.status === 'matched';
+            const item = element('li', matched ? 'matched' : 'needs-review');
+            item.textContent = (matched ? '✓ ' : '⚠ ') + prediction.grade + '級 ' + prediction.displayName + ' — ' + prediction.evidence;
+            if (prediction.sheetName && prediction.cellReference) {
+              item.title = prediction.sheetName + ' ' + prediction.cellReference;
+            }
+            confirmationCheckList.append(item);
+          });
+          const remaining = Number(result.reviewCount || 0) + Number(result.notFoundCount || 0);
+          confirmationCheckSummary.className = 'roster-check-summary ' + (remaining ? 'needs-review' : 'matched');
+          confirmationCheckSummary.textContent = remaining
+            ? result.matchedCount + '名を確認、' + remaining + '名は要確認です。内容を目視確認してから保存してください。'
+            : '全' + result.matchedCount + '名の氏名と級を確認しました。内容を目視確認してから保存してください。';
+        } catch (error) {
+          if (sequence !== confirmationAnalysisSequence) return;
+          confirmationCheckSummary.className = 'roster-check-summary needs-review';
+          confirmationCheckSummary.textContent = error instanceof Error ? error.message : '申込者を照合できませんでした。';
+        } finally {
+          if (sequence === confirmationAnalysisSequence) saveConfirmation.disabled = false;
+        }
+      });
       saveConfirmation.addEventListener('click', async () => {
         const selected = confirmationFile.files?.[0];
         if (!selected) { confirmationMessage.textContent = '名簿ファイルを選択してください。'; return; }
@@ -4606,7 +5153,13 @@ function adminHtml(page: AdminPage): string {
         }
       });
       confirmationActions.append(saveConfirmation, sendConfirmation, confirmationMessage);
-      confirmationBox.append(confirmationFile, confirmationCurrent, confirmationActions);
+      confirmationBox.append(
+        confirmationFile,
+        confirmationCheckSummary,
+        confirmationCheckList,
+        confirmationCurrent,
+        confirmationActions,
+      );
       body.append(confirmationBox);
 
       return section;
@@ -4680,6 +5233,7 @@ function adminHtml(page: AdminPage): string {
           row.classList.toggle('has-waitlist', waitlisted);
           row.classList.toggle('has-payment', showsPayment);
         };
+        const autoFillStatus = element('span', 'result-auto-fill-status');
         select.addEventListener('change', refreshEntryState);
         refreshEntryState();
         entryControls.push({
@@ -4687,11 +5241,16 @@ function adminHtml(page: AdminPage): string {
           memberId: person.member_id,
           displayName: person.display_name,
           initialStatus: person.entry_status || 'submitted',
+          initialWaitlistNumber: person.waitlist_number ? Number(person.waitlist_number) : null,
           select,
           waitlistInput,
           paymentSelect,
+          refreshEntryState,
+          autoFillStatus,
+          lastAutoFilledStatus: null,
+          lastAutoFilledWaitlistNumber: null,
         });
-        row.append(name, statusField, waitlistField, paymentField);
+        row.append(name, statusField, waitlistField, paymentField, autoFillStatus);
         body.append(row);
       });
 
@@ -4722,15 +5281,127 @@ function adminHtml(page: AdminPage): string {
       }
       const rosterFile = document.createElement('input');
       rosterFile.type = 'file';
-      rosterFile.accept = 'application/pdf,.pdf,application/vnd.ms-excel,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,.xlsx';
+      rosterFile.accept = 'application/pdf,.pdf,application/vnd.ms-excel,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,.xlsx,application/vnd.ms-excel.sheet.macroEnabled.12,.xlsm';
+      const rosterSelectionNote = element('span', 'entry-result', '選択したファイルは一括保存または送信時にアップロードします。');
+      const rosterAnalysisSummary = element('div', 'roster-check-summary', 'Excel名簿を選択すると、当落とキャンセル待ち番号を仮入力します。');
       rosterBox.append(
         rosterFile,
-        element('span', 'entry-result', '選択したファイルは送信時にまとめてアップロードします。'),
+        rosterSelectionNote,
+        rosterAnalysisSummary,
       );
       body.append(rosterBox);
       const lotteryManagement = renderLotteryManagement(tournaments);
       if (lotteryManagement) body.append(lotteryManagement);
       const lotteryControls = lotteryManagement?.entryControls || [];
+      let rosterAnalysisSequence = 0;
+      const resetAutoFilledLotteryResults = () => {
+        lotteryControls.forEach((control) => {
+          let restoredStatus = false;
+          if (control.lastAutoFilledStatus && control.select.value === control.lastAutoFilledStatus) {
+            control.select.value = control.initialStatus;
+            control.waitlistInput.value = control.initialWaitlistNumber
+              ? String(control.initialWaitlistNumber)
+              : '';
+            restoredStatus = true;
+          }
+          if (
+            !restoredStatus &&
+            control.lastAutoFilledWaitlistNumber !== null &&
+            control.waitlistInput.value === String(control.lastAutoFilledWaitlistNumber)
+          ) {
+            control.waitlistInput.value = control.initialWaitlistNumber
+              ? String(control.initialWaitlistNumber)
+              : '';
+          }
+          control.lastAutoFilledStatus = null;
+          control.lastAutoFilledWaitlistNumber = null;
+          control.autoFillStatus.className = 'result-auto-fill-status';
+          control.autoFillStatus.textContent = '';
+          control.autoFillStatus.removeAttribute('title');
+          control.refreshEntryState();
+        });
+      };
+      rosterFile.addEventListener('change', async () => {
+        const sequence = ++rosterAnalysisSequence;
+        resetAutoFilledLotteryResults();
+        const selected = rosterFile.files?.[0];
+        if (!selected) {
+          rosterAnalysisSummary.className = 'roster-check-summary';
+          rosterAnalysisSummary.textContent = 'Excel名簿を選択すると、当落とキャンセル待ち番号を仮入力します。';
+          return;
+        }
+        if (!/\.(?:xls|xlsx|xlsm)$/i.test(selected.name)) {
+          rosterAnalysisSummary.className = 'roster-check-summary needs-review';
+          rosterAnalysisSummary.textContent = 'PDFは自動判定の対象外です。選手ごとの当落を手動で入力してください。';
+          return;
+        }
+        if (!lotteryControls.length) {
+          rosterAnalysisSummary.className = 'roster-check-summary needs-review';
+          rosterAnalysisSummary.textContent = '自動判定の対象となる申込者がいません。';
+          return;
+        }
+        rosterFile.disabled = true;
+        rosterAnalysisSummary.className = 'roster-check-summary';
+        rosterAnalysisSummary.textContent = '名簿から当落を読み取り中…';
+        try {
+          const form = new FormData();
+          form.append('file', selected);
+          form.append('tournamentIds', JSON.stringify(tournaments.map((item) => item.tournament_id)));
+          const response = await fetch('/api/rosters/lottery-predict', { method: 'POST', body: form });
+          const result = await response.json();
+          if (!response.ok) throw new Error(result.error || '名簿から当落を読み取れませんでした。');
+          if (sequence !== rosterAnalysisSequence) return;
+          const predictions = new Map((result.predictions || []).map((prediction) => [
+            prediction.tournamentId + ':' + prediction.memberId,
+            prediction,
+          ]));
+          lotteryControls.forEach((control) => {
+            const prediction = predictions.get(control.tournamentId + ':' + control.memberId);
+            if (
+              prediction?.status === 'matched' &&
+              (prediction.entryStatus === 'selected' || prediction.entryStatus === 'not_selected')
+            ) {
+              control.select.value = prediction.entryStatus;
+              control.lastAutoFilledStatus = prediction.entryStatus;
+              if (prediction.entryStatus === 'not_selected' && prediction.waitlistNumber) {
+                control.waitlistInput.value = String(prediction.waitlistNumber);
+                control.lastAutoFilledWaitlistNumber = Number(prediction.waitlistNumber);
+              } else {
+                control.waitlistInput.value = '';
+              }
+              control.refreshEntryState();
+              control.autoFillStatus.className = 'result-auto-fill-status matched';
+              control.autoFillStatus.textContent = '仮入力：' + (
+                prediction.entryStatus === 'selected'
+                  ? '出場確定'
+                  : 'キャンセル待ち ' + prediction.waitlistNumber + '番'
+              );
+            } else {
+              control.autoFillStatus.className = 'result-auto-fill-status needs-review';
+              control.autoFillStatus.textContent = prediction?.status === 'not_found'
+                ? '名簿上で確認できません。手動で選択してください。'
+                : '当落を自動判定できません。手動で選択してください。';
+            }
+            if (prediction?.evidence) {
+              const source = prediction.sheetName && prediction.cellReference
+                ? prediction.sheetName + ' ' + prediction.cellReference
+                : '';
+              control.autoFillStatus.title = [prediction.evidence, source].filter(Boolean).join(' / ');
+            }
+          });
+          const remaining = Number(result.reviewCount || 0) + Number(result.notFoundCount || 0);
+          rosterAnalysisSummary.className = 'roster-check-summary ' + (remaining ? 'needs-review' : 'matched');
+          rosterAnalysisSummary.textContent = remaining
+            ? result.matchedCount + '名を仮入力しました。残り' + remaining + '名を目視確認してください。まだ保存はされていません。'
+            : '全' + result.matchedCount + '名を仮入力しました。内容を目視確認し、一括保存または送信を押してください。';
+        } catch (error) {
+          if (sequence !== rosterAnalysisSequence) return;
+          rosterAnalysisSummary.className = 'roster-check-summary needs-review';
+          rosterAnalysisSummary.textContent = error instanceof Error ? error.message : '名簿から当落を読み取れませんでした。';
+        } finally {
+          if (sequence === rosterAnalysisSequence) rosterFile.disabled = false;
+        }
+      });
       let guidance = tournaments[0].participant_guidance;
       const guidanceBox = element('section', 'guidance-management');
       guidanceBox.append(element('h5', '', '参加費・当日案内'));
@@ -4918,6 +5589,7 @@ function adminHtml(page: AdminPage): string {
           if (guidance) guidance.organizer_payment_status = result.status;
           refreshOrganizerStatus();
           organizerStatusMessage.textContent = result.status === 'paid' ? '振込済みとして保存しました。' : '未振込へ戻しました。';
+          await loadTodoCount();
         } catch (error) {
           organizerStatusMessage.textContent = error instanceof Error ? error.message : '振込状態を保存できませんでした。';
         } finally {
@@ -4955,8 +5627,8 @@ function adminHtml(page: AdminPage): string {
         currentGuidance.textContent = '案内ファイルは未登録です。';
       }
       const guidanceActions = element('div', 'guidance-actions');
-      const saveGuidance = element('button', 'secondary', guidance ? '参加費・案内を更新' : '参加費・案内を保存');
-      saveGuidance.type = 'button';
+      const saveAll = element('button', 'secondary', '確定名簿・抽選結果・参加費・当日案内を一括保存');
+      saveAll.type = 'button';
       const sendGuidance = element('button', 'success', '抽選結果・確定名簿・参加費・当日案内を保存して送信');
       sendGuidance.type = 'button';
       sendGuidance.disabled = false;
@@ -5024,35 +5696,20 @@ function adminHtml(page: AdminPage): string {
         return result;
       };
 
-      saveGuidance.addEventListener('click', async () => {
-        saveGuidance.disabled = true;
-        guidanceMessage.textContent = '保存中…';
-        try {
-          await persistGuidance();
-          guidanceMessage.textContent = '参加費・当日案内を保存しました。入力中の確定名簿と当落結果はそのままです。';
-        } catch (error) {
-          guidanceMessage.textContent = error instanceof Error ? error.message : '案内を保存できませんでした。';
-        } finally {
-          saveGuidance.disabled = false;
-        }
-      });
-      sendGuidance.addEventListener('click', async () => {
+      const collectLotteryChanges = () => {
         const selectedRosterFile = rosterFile.files?.[0];
         if (!selectedRosterFile && !currentRosterDocument) {
-          guidanceMessage.textContent = 'PDFまたはExcelの確定名簿を選択してください。';
           rosterFile.focus();
-          return;
+          throw new Error('PDFまたはExcelの確定名簿を選択してください。');
         }
         if (!lotteryControls.length) {
-          guidanceMessage.textContent = '抽選結果を登録できる参加希望者がいません。';
-          return;
+          throw new Error('抽選結果を登録できる参加希望者がいません。');
         }
         const changes = [];
         for (const control of lotteryControls) {
           if (control.select.value === 'submitted') {
-            guidanceMessage.textContent = control.displayName + 'の抽選結果を選択してください。';
             control.select.focus();
-            return;
+            throw new Error(control.displayName + 'の抽選結果を選択してください。');
           }
           const waitlistNumber = control.select.value === 'not_selected'
             ? Number(control.waitlistInput.value)
@@ -5061,9 +5718,8 @@ function adminHtml(page: AdminPage): string {
             control.select.value === 'not_selected' &&
             (!Number.isInteger(waitlistNumber) || waitlistNumber < 1 || waitlistNumber > 9999)
           ) {
-            guidanceMessage.textContent = control.displayName + 'のキャンセル待ち番号を1〜9999の整数で入力してください。';
             control.waitlistInput.focus();
-            return;
+            throw new Error(control.displayName + 'のキャンセル待ち番号を1〜9999の整数で入力してください。');
           }
           changes.push({
             tournamentId: control.tournamentId,
@@ -5075,46 +5731,104 @@ function adminHtml(page: AdminPage): string {
         }
         const selectedCount = new Set(changes.filter((entry) => entry.status === 'selected').map((entry) => entry.memberId)).size;
         if (!selectedCount) {
-          guidanceMessage.textContent = '出場確定者を1人以上登録してください。';
-          return;
+          throw new Error('出場確定者を1人以上登録してください。');
         }
         const promotedControls = lotteryControls.filter((control) =>
           control.initialStatus === 'not_selected' && control.select.value === 'selected');
         const promotionOnly = promotedControls.length > 0 &&
           lotteryControls.every((control) => control.initialStatus !== 'submitted');
+        return { selectedRosterFile, changes, selectedCount, promotionOnly };
+      };
+
+      const setPostLotteryControlsDisabled = (disabled) => {
+        saveAll.disabled = disabled;
+        sendGuidance.disabled = disabled;
+        rosterFile.disabled = disabled;
+        lotteryControls.forEach((control) => {
+          control.select.disabled = disabled;
+          const waitlisted = control.select.value === 'not_selected';
+          control.waitlistInput.disabled = disabled || !waitlisted;
+          control.paymentSelect.disabled = disabled || control.select.value !== 'selected';
+        });
+      };
+
+      const persistRoster = async (selectedRosterFile) => {
+        if (!selectedRosterFile) return null;
+        const rosterForm = new FormData();
+        rosterForm.append('file', selectedRosterFile);
+        rosterForm.append('documentType', 'roster');
+        rosterForm.append('tournamentIds', JSON.stringify(tournaments.map((item) => item.tournament_id)));
+        const rosterResponse = await fetch('/api/archive-documents', { method: 'POST', body: rosterForm });
+        const rosterBody = await rosterResponse.json();
+        if (!rosterResponse.ok) throw new Error(rosterBody.error || '確定名簿をアップロードできませんでした。');
+        if (rosterBody.document?.conversion_status === 'failed') {
+          window.alert('確定名簿の原本は保存しましたが、閲覧用PDFを生成できませんでした。現在は原本のダウンロードリンクを使用します。');
+        }
+        return rosterBody.document;
+      };
+
+      const persistLotteryChanges = async (changes) => {
+        const response = await fetch('/api/tournament-entries/batch', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ entries: changes }),
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || '全員分の抽選結果を保存できませんでした。');
+        return result;
+      };
+
+      saveAll.addEventListener('click', async () => {
+        let values;
+        try {
+          values = collectLotteryChanges();
+          prepareGuidanceForm();
+        } catch (error) {
+          guidanceMessage.textContent = error instanceof Error ? error.message : '入力内容を確認してください。';
+          return;
+        }
+        if (!confirm('確定名簿、全選手の抽選結果、参加費、当日案内をまとめて保存します。大会お知らせと通常の結果DMは送信しません。キャンセル待ちから繰り上げる選手がいる場合のみ、その選手へDMを送信します。')) return;
+        setPostLotteryControlsDisabled(true);
+        try {
+          guidanceMessage.textContent = '1/3 参加費・当日案内を保存中…';
+          await persistGuidance();
+          guidanceMessage.textContent = '2/3 確定名簿を保存中…';
+          await persistRoster(values.selectedRosterFile);
+          guidanceMessage.textContent = '3/3 抽選結果を保存中…';
+          const entriesBody = await persistLotteryChanges(values.changes);
+          await loadTournaments();
+          const promotedCount = Number(entriesBody.promotionDmQueued || 0);
+          window.alert(promotedCount > 0
+            ? '2番の入力内容を一括保存しました。大会お知らせと通常の結果DMは送信していません。繰り上げ対象者' + promotedCount + '人へのDMだけ予約しました。'
+            : '2番の入力内容を一括保存しました。通知は送信していません。');
+        } catch (error) {
+          guidanceMessage.textContent = error instanceof Error ? error.message : '2番の入力内容を保存できませんでした。';
+          setPostLotteryControlsDisabled(false);
+        }
+      });
+
+      sendGuidance.addEventListener('click', async () => {
+        let values;
+        try {
+          values = collectLotteryChanges();
+          prepareGuidanceForm();
+        } catch (error) {
+          guidanceMessage.textContent = error instanceof Error ? error.message : '入力内容を確認してください。';
+          return;
+        }
+        const { selectedRosterFile, changes, selectedCount, promotionOnly } = values;
         const paymentDescription = paymentMethod.value === 'onsite_cash' ? '当日現金の案内' : '級別参加費と事前支払い案内';
         if (!confirm('参加費・当日案内の保存、確定名簿のアップロード、全選手の抽選結果保存、チャンネル告知、出場確定者' + selectedCount + '人への当日案内・' + paymentDescription + 'のDM送信をまとめて実行しますか？')) return;
-        sendGuidance.disabled = true;
-        rosterFile.disabled = true;
-        lotteryControls.forEach((control) => {
-          control.select.disabled = true;
-          control.waitlistInput.disabled = true;
-          control.paymentSelect.disabled = true;
-        });
+        setPostLotteryControlsDisabled(true);
         try {
           guidanceMessage.textContent = selectedRosterFile ? '1/4 参加費・当日案内を保存中…' : '1/3 参加費・当日案内を保存中…';
           await persistGuidance();
           if (selectedRosterFile) {
             guidanceMessage.textContent = '2/4 確定名簿をアップロード中…';
-            const rosterForm = new FormData();
-            rosterForm.append('file', selectedRosterFile);
-            rosterForm.append('documentType', 'roster');
-            rosterForm.append('tournamentIds', JSON.stringify(tournaments.map((item) => item.tournament_id)));
-            const rosterResponse = await fetch('/api/archive-documents', { method: 'POST', body: rosterForm });
-            const rosterBody = await rosterResponse.json();
-            if (!rosterResponse.ok) throw new Error(rosterBody.error || '確定名簿をアップロードできませんでした。');
-            if (rosterBody.document?.conversion_status === 'failed') {
-              window.alert('確定名簿の原本は保存しましたが、閲覧用PDFを生成できませんでした。現在は原本のダウンロードリンクを使用します。');
-            }
+            await persistRoster(selectedRosterFile);
           }
           guidanceMessage.textContent = selectedRosterFile ? '3/4 抽選結果を保存中…' : '2/3 抽選結果を保存中…';
-          const entriesResponse = await fetch('/api/tournament-entries/batch', {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ entries: changes }),
-          });
-          const entriesBody = await entriesResponse.json();
-          if (!entriesResponse.ok) throw new Error(entriesBody.error || '全員分の抽選結果を保存できませんでした。');
+          const entriesBody = await persistLotteryChanges(changes);
           if (promotionOnly) {
             guidanceMessage.textContent = '繰り上げ対象者 ' + Number(entriesBody.promotionDmQueued || 0) + '人にだけDMを予約しました。' + (entriesBody.promotionDmUnavailable ? ' DM対象外 ' + entriesBody.promotionDmUnavailable + '件。' : '');
             await loadTournaments();
@@ -5133,17 +5847,10 @@ function adminHtml(page: AdminPage): string {
           guidanceMessage.textContent = '大会お知らせ ' + result.channelQueued + '件、担当者向け参加費情報 ' + result.managerPaymentQueued + '件、確定者DM ' + dmQueued + '件、キャンセル待ちDM ' + Number(result.waitlistDmQueued || 0) + '件を予約しました。' + (dmUnavailable || result.waitlistDmUnavailable ? ' DM対象外 ' + (dmUnavailable + Number(result.waitlistDmUnavailable || 0)) + '件。' : '');
         } catch (error) {
           guidanceMessage.textContent = error instanceof Error ? error.message : '抽選結果と確定者案内を予約できませんでした。';
-          sendGuidance.disabled = false;
-          rosterFile.disabled = false;
-          lotteryControls.forEach((control) => {
-            control.select.disabled = false;
-            const waitlisted = control.select.value === 'not_selected';
-            control.waitlistInput.disabled = !waitlisted;
-            control.paymentSelect.disabled = control.select.value !== 'selected';
-          });
+          setPostLotteryControlsDisabled(false);
         }
       });
-      guidanceActions.append(saveGuidance, sendGuidance, guidanceMessage);
+      guidanceActions.append(saveAll, sendGuidance, guidanceMessage);
 
       const guidanceSection = element('section', 'guidance-subsection');
       const guidanceTextLabel = element('label', '', '当日案内本文');
@@ -5199,7 +5906,7 @@ function adminHtml(page: AdminPage): string {
       resultFile.accept = 'application/pdf,.pdf,application/vnd.ms-excel,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,.xlsx';
       resultDocumentUpload.append(
         resultFile,
-        element('span', 'entry-result', '選択したファイルは公開時にまとめてアップロードします。'),
+        element('span', 'entry-result', 'Excelは選択すると個人成績を自動入力します。保存時のファイル名は大会名・級・開催月から自動設定します。ファイルの保存は公開時に行います。PDFは個人成績を手入力してください。'),
       );
       body.append(resultDocumentUpload);
 
@@ -5210,6 +5917,75 @@ function adminHtml(page: AdminPage): string {
         .map((person) => ({ ...person, tournament })));
       const resultList = element('div', 'result-list');
       const resultControls = [];
+      function renderMatchEditor(control, matches, open = false) {
+        control.matchList.replaceChildren();
+        control.matchEditor.open = open;
+        control.matchEditorSummary.textContent = '対戦詳細（' + matches.length + '試合）';
+        if (!matches.length) {
+          control.matchList.append(element('span', 'match-editor-empty', '対戦詳細は未登録です。'));
+        }
+        matches.forEach((match, index) => {
+          const matchRow = element('div', 'match-edit-row');
+          matchRow.dataset.sourceSheetName = match.sourceSheetName || match.sheetName || '';
+          matchRow.dataset.sourceCellReference = match.sourceCellReference || match.cellReference || '';
+          const round = element('span', 'match-round', (index + 1) + '回戦');
+          const outcome = document.createElement('select');
+          outcome.className = 'match-outcome';
+          outcome.innerHTML = '<option value="win">○ 勝ち</option><option value="loss">× 負け</option>';
+          outcome.value = match.outcome === 'loss' ? 'loss' : 'win';
+          const score = document.createElement('input');
+          score.className = 'match-score';
+          score.type = 'number';
+          score.min = '0';
+          score.max = '50';
+          score.inputMode = 'numeric';
+          score.placeholder = '枚数差';
+          score.value = match.scoreDifference == null ? '' : String(match.scoreDifference);
+          const note = document.createElement('input');
+          note.className = 'match-note';
+          note.maxLength = 50;
+          note.placeholder = '不戦勝・譲り';
+          note.value = match.resultNote || '';
+          const opponent = document.createElement('input');
+          opponent.className = 'match-opponent';
+          opponent.maxLength = 100;
+          opponent.placeholder = '対戦相手';
+          opponent.value = match.opponentName || '';
+          const affiliation = document.createElement('input');
+          affiliation.className = 'match-affiliation';
+          affiliation.maxLength = 200;
+          affiliation.placeholder = '対戦相手の所属';
+          affiliation.value = match.opponentAffiliation || '';
+          const remove = element('button', 'match-remove', '削除');
+          remove.type = 'button';
+          remove.addEventListener('click', () => {
+            matchRow.remove();
+            [...control.matchList.querySelectorAll('.match-edit-row')].forEach((item, rowIndex) => {
+              item.querySelector('.match-round').textContent = (rowIndex + 1) + '回戦';
+            });
+            control.matchEditorSummary.textContent = '対戦詳細（' + control.matchList.querySelectorAll('.match-edit-row').length + '試合）';
+            if (!control.matchList.querySelector('.match-edit-row')) {
+              control.matchList.append(element('span', 'match-editor-empty', '対戦詳細は未登録です。'));
+            }
+          });
+          matchRow.append(round, outcome, score, note, opponent, affiliation, remove);
+          control.matchList.append(matchRow);
+        });
+      }
+      function collectMatchEditor(control) {
+        return [...control.matchList.querySelectorAll('.match-edit-row')].map((row, index) => ({
+          roundNumber: index + 1,
+          outcome: row.querySelector('.match-outcome').value,
+          scoreDifference: row.querySelector('.match-score').value === ''
+            ? null
+            : Number(row.querySelector('.match-score').value),
+          resultNote: row.querySelector('.match-note').value.trim() || null,
+          opponentName: row.querySelector('.match-opponent').value.trim() || null,
+          opponentAffiliation: row.querySelector('.match-affiliation').value.trim() || null,
+          sourceSheetName: row.dataset.sourceSheetName || null,
+          sourceCellReference: row.dataset.sourceCellReference || null,
+        }));
+      }
       if (!resultEntries.length) {
         resultList.append(element('div', 'response-empty', '成績を登録できる出場者はいません。'));
       }
@@ -5237,14 +6013,74 @@ function adminHtml(page: AdminPage): string {
           option.selected = value === person.result_text;
           input.append(option);
         });
-        resultControls.push({
+        const autoFillStatus = element('span', 'result-auto-fill-status');
+        const matchEditor = document.createElement('details');
+        matchEditor.className = 'match-editor';
+        const matchEditorSummary = document.createElement('summary');
+        const matchList = element('div', 'match-editor-list');
+        const addMatch = element('button', 'secondary match-add', '対戦を追加');
+        addMatch.type = 'button';
+        const saveMatches = element('button', 'secondary match-save', '対戦詳細だけを保存');
+        saveMatches.type = 'button';
+        saveMatches.disabled = !person.result_text;
+        const matchSaveStatus = element('span', 'match-save-status', person.result_text ? '' : '最終結果の保存後に利用できます。');
+        const matchActions = element('div', 'match-editor-actions');
+        matchActions.append(addMatch, saveMatches, matchSaveStatus);
+        matchEditor.append(matchEditorSummary, matchList, matchActions);
+        const control = {
           tournamentId: tournament.tournament_id,
           memberId: person.member_id,
           displayName: person.display_name,
           input,
           resultOptions,
+          autoFillStatus,
+          originalValue: input.value,
+          lastAutoFilledValue: null,
+          originalMatches: structuredClone(person.matches || []),
+          autoFilledMatches: false,
+          matchEditor,
+          matchEditorSummary,
+          matchList,
+          saveMatches,
+          matchSaveStatus,
+        };
+        addMatch.addEventListener('click', () => {
+          const current = collectMatchEditor(control);
+          current.push({ outcome: 'win' });
+          renderMatchEditor(control, current, true);
         });
-        row.append(name, input);
+        saveMatches.addEventListener('click', async () => {
+          if (!control.originalValue || !control.resultOptions.includes(control.originalValue)) {
+            control.matchSaveStatus.textContent = '先に最終結果を保存・公開してください。';
+            return;
+          }
+          saveMatches.disabled = true;
+          control.matchSaveStatus.textContent = '保存中…';
+          try {
+            const response = await fetch('/api/tournament-results/batch', {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ entries: [{
+                tournamentId: control.tournamentId,
+                memberId: control.memberId,
+                resultText: control.originalValue,
+                matches: collectMatchEditor(control),
+              }] }),
+            });
+            const responseBody = await response.json();
+            if (!response.ok) throw new Error(responseBody.error || '対戦詳細を保存できませんでした。');
+            control.originalMatches = structuredClone(collectMatchEditor(control));
+            control.autoFilledMatches = false;
+            control.matchSaveStatus.textContent = '対戦詳細を保存しました。';
+          } catch (error) {
+            control.matchSaveStatus.textContent = error instanceof Error ? error.message : '対戦詳細を保存できませんでした。';
+          } finally {
+            saveMatches.disabled = false;
+          }
+        });
+        renderMatchEditor(control, control.originalMatches);
+        resultControls.push(control);
+        row.append(name, input, autoFillStatus, matchEditor);
         resultList.append(row);
       });
       resultBox.append(resultList);
@@ -5255,6 +6091,87 @@ function adminHtml(page: AdminPage): string {
       const publish = element('button', 'success', published ? '変更を保存して公開を更新' : '結果を保存して公開');
       publish.type = 'button';
       const message = element('span', 'status-message', published ? '公開中' : '未公開');
+      function resetAutoFilledResults() {
+        resultControls.forEach((control) => {
+          if (control.lastAutoFilledValue && control.input.value === control.lastAutoFilledValue) {
+            control.input.value = control.originalValue;
+          }
+          if (control.autoFilledMatches) {
+            renderMatchEditor(control, structuredClone(control.originalMatches));
+            control.autoFilledMatches = false;
+          }
+          control.lastAutoFilledValue = null;
+          control.autoFillStatus.className = 'result-auto-fill-status';
+          control.autoFillStatus.textContent = '';
+          control.autoFillStatus.removeAttribute('title');
+        });
+      }
+      resultFile.addEventListener('change', async () => {
+        resetAutoFilledResults();
+        const selectedFile = resultFile.files?.[0];
+        if (!selectedFile) {
+          message.textContent = published ? '公開中' : '未公開';
+          return;
+        }
+        if (!/\.xlsx?$/i.test(selectedFile.name)) {
+          message.textContent = 'PDFの個人成績は手動で選択してください。';
+          return;
+        }
+        if (!resultControls.length) {
+          message.textContent = '個人成績を自動入力できる出場者がいません。';
+          return;
+        }
+        publish.disabled = true;
+        resultFile.disabled = true;
+        message.textContent = 'Excelから個人成績を読み取り中…';
+        try {
+          const form = new FormData();
+          form.append('file', selectedFile);
+          form.append('tournamentIds', JSON.stringify(tournaments.map((item) => item.tournament_id)));
+          const response = await fetch('/api/tournament-results/extract', { method: 'POST', body: form });
+          const responseBody = await response.json();
+          if (!response.ok) throw new Error(responseBody.error || '個人成績を自動読取できませんでした。');
+          const predictions = new Map((responseBody.predictions || []).map((prediction) => [
+            prediction.tournamentId + ':' + prediction.memberId,
+            prediction,
+          ]));
+          resultControls.forEach((control) => {
+            const prediction = predictions.get(control.tournamentId + ':' + control.memberId);
+            if (prediction && Array.isArray(prediction.matches)) {
+              renderMatchEditor(control, prediction.matches, false);
+              control.autoFilledMatches = true;
+            }
+            if (prediction?.status === 'matched' && control.resultOptions.includes(prediction.resultText)) {
+              control.input.value = prediction.resultText;
+              control.lastAutoFilledValue = prediction.resultText;
+              control.autoFillStatus.className = 'result-auto-fill-status matched';
+              const detailNote = prediction.matches?.length
+                ? '・対戦詳細' + prediction.matches.length + '試合'
+                : '・対戦詳細は要確認';
+              control.autoFillStatus.textContent = '自動入力：' + prediction.resultText + detailNote;
+              const source = prediction.sheetName && prediction.cellReference
+                ? prediction.sheetName + ' ' + prediction.cellReference
+                : '';
+              control.autoFillStatus.title = [prediction.evidence, source].filter(Boolean).join(' / ');
+              return;
+            }
+            control.autoFillStatus.className = 'result-auto-fill-status needs-review';
+            control.autoFillStatus.textContent = prediction?.status === 'needs_review'
+              ? '要確認：複数の候補があるため手動で選択してください。'
+              : '自動判定できませんでした。手動で選択してください。';
+            if (prediction?.evidence) control.autoFillStatus.title = prediction.evidence;
+          });
+          const remaining = Number(responseBody.reviewCount || 0) + Number(responseBody.notFoundCount || 0);
+          message.textContent = remaining > 0
+            ? responseBody.matchedCount + '名を自動入力しました。残り' + remaining + '名を確認してください。'
+            : responseBody.matchedCount + '名を自動入力しました。内容を確認して保存・公開してください。';
+        } catch (error) {
+          message.textContent = error instanceof Error ? error.message : '個人成績を自動読取できませんでした。';
+        } finally {
+          publish.disabled = false;
+          resultFile.disabled = false;
+        }
+      });
       publish.addEventListener('click', async () => {
         const selectedFile = resultFile.files?.[0];
         if (!selectedFile && !currentResultDocument) {
@@ -5277,9 +6194,10 @@ function adminHtml(page: AdminPage): string {
             tournamentId: control.tournamentId,
             memberId: control.memberId,
             resultText: control.input.value,
+            matches: collectMatchEditor(control),
           });
         }
-        if (!confirm('結果ファイルのアップロード、全選手の個人成績保存、メンバーポータルへの公開をまとめて実行しますか？')) return;
+        if (!confirm('個人成績の内容を確認しましたか？OKを押すと、結果ファイルの保存、全選手の個人成績保存、メンバーポータルへの公開をまとめて実行します。')) return;
         publish.disabled = true;
         resultFile.disabled = true;
         resultControls.forEach((control) => { control.input.disabled = true; });
@@ -5546,9 +6464,41 @@ function adminHtml(page: AdminPage): string {
       return header;
     }
 
-    function eventMonthLabel(value) {
-      const [year, month] = value.split('-').map(Number);
-      return year + '年' + month + '月';
+    function eventDateLabel(value) {
+      const [year, month, day] = value.split('-').map(Number);
+      return year + '年' + month + '月' + day + '日';
+    }
+
+    let loadedMemberHistory = null;
+    function memberMatchMark(match) {
+      const mark = match.outcome === 'win' ? '○' : '×';
+      const score = match.scoreDifference != null
+        ? String(match.scoreDifference)
+        : match.resultNote || '';
+      return mark + score;
+    }
+
+    function openMemberMatch(index) {
+      const appearance = loadedMemberHistory?.appearances?.[index];
+      if (!appearance) return;
+      memberMatchTitle.textContent = appearance.title + ' 対戦詳細';
+      const list = element('ul', 'member-match-list');
+      (appearance.matches || []).forEach((match) => {
+        const row = document.createElement('li');
+        const mark = element('span', 'member-match-mark ' + (match.outcome === 'win' ? 'win' : 'loss'), memberMatchMark(match));
+        row.append(
+          element('strong', '', match.roundNumber + '回戦'),
+          mark,
+          element('span', '', match.opponentName || '対戦相手記録なし'),
+          element('span', 'member-match-affiliation', match.opponentAffiliation || '所属記録なし'),
+        );
+        list.append(row);
+      });
+      memberMatchContent.replaceChildren(
+        list,
+        element('p', 'member-match-final', '結果：' + (appearance.resultText || '未登録')),
+      );
+      memberMatchDialog.showModal();
     }
 
     async function openMemberHistory(member) {
@@ -5561,35 +6511,166 @@ function adminHtml(page: AdminPage): string {
         const body = await response.json();
         if (!response.ok) throw new Error(body.error || '出場歴を取得できませんでした。');
         const history = body.history;
-        const countItems = ['A', 'B', 'C', 'D', 'E', 'F', 'beginner']
-          .filter((grade) => Number(history.gradeCounts[grade] || 0) > 0)
-          .map((grade) => gradeLabel(grade) + Number(history.gradeCounts[grade]) + '回');
-        const summary = element('p', 'member-history-summary', history.fiscalYear + '年度：' + (countItems.length ? countItems.join('、') : '出場なし'));
+        loadedMemberHistory = history;
+        const today = dateValue(new Date());
+        const todayYear = Number(today.slice(0, 4));
+        const appearanceYears = history.appearances.map((appearance) => Number(appearance.eventDate.slice(0, 4)));
+        const earliestYear = Math.min(history.fiscalYear, ...appearanceYears);
+        const padHistoryDatePart = (value) => String(value).padStart(2, '0');
+        const createHistoryDateSelector = (labelText, initialValue) => {
+          const fieldset = element('fieldset', 'member-history-date-group');
+          fieldset.append(element('legend', '', labelText));
+          const selects = element('div', 'member-history-date-selects');
+          const yearSelect = document.createElement('select');
+          const monthSelect = document.createElement('select');
+          const daySelect = document.createElement('select');
+          yearSelect.setAttribute('aria-label', labelText + 'の年');
+          monthSelect.setAttribute('aria-label', labelText + 'の月');
+          daySelect.setAttribute('aria-label', labelText + 'の日');
+          for (let year = earliestYear; year <= todayYear; year += 1) {
+            const option = document.createElement('option');
+            option.value = String(year);
+            option.textContent = year + '年';
+            yearSelect.append(option);
+          }
+          for (let month = 1; month <= 12; month += 1) {
+            const option = document.createElement('option');
+            option.value = String(month);
+            option.textContent = month + '月';
+            monthSelect.append(option);
+          }
+          const initialParts = initialValue.split('-').map(Number);
+          yearSelect.value = String(initialParts[0]);
+          monthSelect.value = String(initialParts[1]);
+          const updateDays = (preferredDay) => {
+            const requestedDay = Number(preferredDay || daySelect.value || initialParts[2] || 1);
+            const lastDay = new Date(Number(yearSelect.value), Number(monthSelect.value), 0).getDate();
+            daySelect.replaceChildren();
+            for (let day = 1; day <= lastDay; day += 1) {
+              const option = document.createElement('option');
+              option.value = String(day);
+              option.textContent = day + '日';
+              daySelect.append(option);
+            }
+            daySelect.value = String(Math.min(requestedDay, lastDay));
+          };
+          updateDays(initialParts[2]);
+          selects.append(yearSelect, monthSelect, daySelect);
+          fieldset.append(selects);
+          return {
+            element: fieldset,
+            value: () => yearSelect.value + '-' + padHistoryDatePart(monthSelect.value) + '-' + padHistoryDatePart(daySelect.value),
+            setValue: (value) => {
+              const parts = value.split('-').map(Number);
+              yearSelect.value = String(parts[0]);
+              monthSelect.value = String(parts[1]);
+              updateDays(parts[2]);
+            },
+            onChange: (callback) => {
+              yearSelect.addEventListener('change', () => { updateDays(); callback(); });
+              monthSelect.addEventListener('change', () => { updateDays(); callback(); });
+              daySelect.addEventListener('change', callback);
+            },
+          };
+        };
+        const period = element('div', 'member-history-period');
+        const fiscalStart = history.fiscalYear + '-04-01';
+        const fullPeriodStart = history.appearances.reduce(
+          (earliest, appearance) => appearance.eventDate < earliest ? appearance.eventDate : earliest,
+          history.appearances[0]?.eventDate || fiscalStart,
+        );
+        const startSelector = createHistoryDateSelector('集計開始日', fiscalStart);
+        const endSelector = createHistoryDateSelector('集計終了日（大会案内発表日）', today);
+        const periodActions = element('div', 'member-history-period-actions');
+        const resetPeriod = element('button', 'secondary member-history-period-action', '当年度に戻す');
+        resetPeriod.type = 'button';
+        const showAllPeriod = element('button', 'secondary member-history-period-action', '全期間表示');
+        showAllPeriod.type = 'button';
+        periodActions.append(resetPeriod, showAllPeriod);
+        period.append(
+          startSelector.element,
+          element('span', 'member-history-period-separator', '〜'),
+          endSelector.element,
+          periodActions,
+        );
+        const summary = element('p', 'member-history-summary');
+        summary.setAttribute('role', 'status');
+        summary.setAttribute('aria-live', 'polite');
         const wrap = element('div', 'member-history-table-wrap');
         const table = element('table', 'member-history-table');
         const head = document.createElement('thead');
         const headRow = document.createElement('tr');
-        ['開催月', '大会名', '出場級', '戦績'].forEach((label) => headRow.append(element('th', '', label)));
+        ['開催日', '大会名', '出場級', '戦績', '対戦詳細'].forEach((label) => headRow.append(element('th', '', label)));
         head.append(headRow);
         const tbody = document.createElement('tbody');
-        if (!history.appearances.length) {
-          const row = document.createElement('tr');
-          const cell = element('td', 'empty', '出場履歴はありません。');
-          cell.colSpan = 4;
-          row.append(cell);
-          tbody.append(row);
-        } else {
-          history.appearances.forEach((appearance) => {
+        const renderPeriod = () => {
+          tbody.replaceChildren();
+          const startDate = startSelector.value();
+          const endDate = endSelector.value();
+          if (!startDate || !endDate || startDate > endDate || endDate > today) {
+            summary.textContent = endDate > today
+              ? '終了日は本日以前の日付にしてください。'
+              : '開始日は終了日以前の日付にしてください。';
             const row = document.createElement('tr');
-            [eventMonthLabel(appearance.eventDate), appearance.title, gradeLabel(appearance.grade), appearance.resultText || '未登録']
+            const cell = element('td', 'empty', '集計期間を確認してください。');
+            cell.colSpan = 5;
+            row.append(cell);
+            tbody.append(row);
+            return;
+          }
+          const filtered = history.appearances
+            .map((appearance, index) => ({ appearance, index }))
+            .filter(({ appearance }) => appearance.eventDate >= startDate && appearance.eventDate <= endDate);
+          const gradeCounts = {};
+          filtered.forEach(({ appearance }) => {
+            gradeCounts[appearance.grade] = Number(gradeCounts[appearance.grade] || 0) + 1;
+          });
+          const countItems = ['A', 'B', 'C', 'D', 'E', 'F', 'beginner']
+            .filter((grade) => Number(gradeCounts[grade] || 0) > 0)
+            .map((grade) => gradeLabel(grade) + Number(gradeCounts[grade]) + '回');
+          summary.textContent = eventDateLabel(startDate) + '〜' + eventDateLabel(endDate) + '：' + (countItems.length ? countItems.join('、') : '出場なし');
+          if (!filtered.length) {
+            const row = document.createElement('tr');
+            const cell = element('td', 'empty', '指定期間の出場履歴はありません。');
+            cell.colSpan = 5;
+            row.append(cell);
+            tbody.append(row);
+            return;
+          }
+          filtered.forEach(({ appearance, index }) => {
+            const row = document.createElement('tr');
+            [eventDateLabel(appearance.eventDate), appearance.title, gradeLabel(appearance.grade), appearance.resultText || '未登録']
               .forEach((value) => row.append(element('td', '', value)));
+            const detailCell = document.createElement('td');
+            if ((appearance.matches || []).length) {
+              const detail = element('button', 'member-history-detail', '詳細');
+              detail.type = 'button';
+              detail.addEventListener('click', () => openMemberMatch(index));
+              detailCell.append(detail);
+            } else {
+              detailCell.textContent = '—';
+            }
+            row.append(detailCell);
             tbody.append(row);
           });
-        }
+        };
         table.append(head, tbody);
         wrap.append(table);
         memberHistoryContent.className = '';
-        memberHistoryContent.replaceChildren(summary, wrap);
+        memberHistoryContent.replaceChildren(period, summary, wrap);
+        startSelector.onChange(renderPeriod);
+        endSelector.onChange(renderPeriod);
+        resetPeriod.addEventListener('click', () => {
+          startSelector.setValue(fiscalStart);
+          endSelector.setValue(today);
+          renderPeriod();
+        });
+        showAllPeriod.addEventListener('click', () => {
+          startSelector.setValue(fullPeriodStart);
+          endSelector.setValue(today);
+          renderPeriod();
+        });
+        renderPeriod();
       } catch (error) {
         memberHistoryContent.className = 'member-history-loading';
         memberHistoryContent.textContent = error instanceof Error ? error.message : '出場歴を取得できませんでした。';
@@ -6154,6 +7235,10 @@ function adminHtml(page: AdminPage): string {
     memberHistoryDialog.addEventListener('click', (event) => {
       if (event.target === memberHistoryDialog) memberHistoryDialog.close();
     });
+    closeMemberMatch.addEventListener('click', () => memberMatchDialog.close());
+    memberMatchDialog.addEventListener('click', (event) => {
+      if (event.target === memberMatchDialog) memberMatchDialog.close();
+    });
     editTournamentForm.addEventListener('submit', async (event) => {
       event.preventDefault();
       if (!editingTournaments.length) return;
@@ -6309,7 +7394,7 @@ export async function handleAdminRequest(
     "/settings": "settings",
   }[url.pathname] as AdminPage | undefined;
   if (request.method === "GET" && page) {
-    return new Response(adminHtml(page), {
+    return new Response(adminHtml(page, env.ENVIRONMENT), {
       headers: { ...securityHeaders, "Content-Type": "text/html; charset=utf-8" },
     });
   }
@@ -6452,6 +7537,73 @@ export async function handleAdminRequest(
       }
       console.error("申込名簿Excelの保存エラー", error);
       return json({ error: "申込名簿を保存できませんでした。" }, 500);
+    }
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/application-roster/generate") {
+    if (!isSameOrigin(request)) {
+      return json({ error: "不正な送信元です。" }, 403);
+    }
+    if (!request.headers.get("Content-Type")?.toLowerCase().startsWith("application/json")) {
+      return json({ error: "JSON形式で送信してください。" }, 415);
+    }
+    try {
+      const body = (await request.json()) as { tournamentId?: unknown };
+      if (typeof body.tournamentId !== "string") {
+        throw new ApplicationRosterGenerationError("大会IDを指定してください。");
+      }
+      return json(await createFilledApplicationRoster(
+        env,
+        body.tournamentId,
+        actor,
+      ), 201);
+    } catch (error: unknown) {
+      if (error instanceof ApplicationRosterGenerationError) {
+        return json({ error: error.message }, error.statusCode);
+      }
+      console.error("Excel申込名簿の自動生成エラー", error);
+      return json({ error: "Excel申込名簿を生成できませんでした。" }, 500);
+    }
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/tournament-results/extract") {
+    if (!isSameOrigin(request)) {
+      return json({ error: "不正な送信元です。" }, 403);
+    }
+    if (!request.headers.get("Content-Type")?.toLowerCase().startsWith("multipart/form-data")) {
+      return json({ error: "大会結果をフォーム形式で送信してください。" }, 415);
+    }
+    try {
+      return json(await extractTournamentResultsFromUpload(env, request));
+    } catch (error: unknown) {
+      if (error instanceof DocumentUploadError) {
+        return json({ error: error.message }, 400);
+      }
+      console.error("大会結果の自動読取エラー", error);
+      return json({ error: "大会結果を自動読取できませんでした。" }, 500);
+    }
+  }
+
+  if (
+    request.method === "POST" &&
+    (url.pathname === "/api/rosters/application-check" ||
+      url.pathname === "/api/rosters/lottery-predict")
+  ) {
+    if (!isSameOrigin(request)) {
+      return json({ error: "不正な送信元です。" }, 403);
+    }
+    if (!request.headers.get("Content-Type")?.toLowerCase().startsWith("multipart/form-data")) {
+      return json({ error: "名簿をフォーム形式で送信してください。" }, 415);
+    }
+    try {
+      const mode = url.pathname.endsWith("application-check") ? "application" : "lottery";
+      return json(await extractRosterFromUpload(env, request, mode));
+    } catch (error: unknown) {
+      if (error instanceof DocumentUploadError) {
+        return json({ error: error.message }, 400);
+      }
+      console.error("名簿の自動確認エラー", error);
+      return json({ error: "名簿を自動確認できませんでした。" }, 500);
     }
   }
 
@@ -6962,10 +8114,36 @@ export async function handleAdminRequest(
         const entry = value && typeof value === "object"
           ? value as Record<string, unknown>
           : {};
+        const matches = Array.isArray(entry.matches)
+          ? entry.matches.map((value) => {
+            const match = value && typeof value === "object"
+              ? value as Record<string, unknown>
+              : {};
+            return {
+              roundNumber: Number(match.roundNumber),
+              outcome: String(match.outcome ?? "") as "win" | "loss",
+              scoreDifference: match.scoreDifference === null || match.scoreDifference === ""
+                ? null
+                : Number(match.scoreDifference),
+              resultNote: typeof match.resultNote === "string" ? match.resultNote : null,
+              opponentName: typeof match.opponentName === "string" ? match.opponentName : null,
+              opponentAffiliation: typeof match.opponentAffiliation === "string"
+                ? match.opponentAffiliation
+                : null,
+              sourceSheetName: typeof match.sourceSheetName === "string"
+                ? match.sourceSheetName
+                : null,
+              sourceCellReference: typeof match.sourceCellReference === "string"
+                ? match.sourceCellReference
+                : null,
+            };
+          })
+          : undefined;
         return {
           tournamentId: typeof entry.tournamentId === "string" ? entry.tournamentId : "",
           memberId: typeof entry.memberId === "string" ? entry.memberId : "",
           resultText: typeof entry.resultText === "string" ? entry.resultText : "",
+          matches,
         };
       });
       return json(await updateTournamentEntryResultsBatch(env, entries, actor));

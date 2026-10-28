@@ -20,6 +20,7 @@
 - 管理画面での大会一覧、回答者別集計、ステータス確認・変更
 - 管理画面での大会情報編集と、回答受付中大会の更新告知・対象メンバーDM再送
 - Excel名簿のメール・フォーム送信、またはフォーム直接入力による大会申込方法の登録
+- サークル内締切後のExcel申込名簿自動入力、管理画面からの手動生成・再生成
 - 実際の参加希望者の級・人数を反映した申込メール下書きの自動作成
 - 同時登録した複数級の一括申込完了と、参加者一覧付きの告知チャンネル通知
 - サークル内締切時点で参加希望者が0人の大会を「参加者なし終了」へ自動変更
@@ -99,11 +100,72 @@ npx wrangler secret put DISCORD_CLIENT_SECRET --config wrangler.admin.jsonc
 npx wrangler secret put SESSION_SECRET --config wrangler.admin.jsonc
 ```
 
+Excel申込名簿へ入力する申込責任者情報は、Bot Workerと管理画面Workerの両方へ
+同じ値をSecretとして登録します。電話番号はテンプレートで必要になるため、運用開始前に必ず設定します。
+`EXCEL_ASSOCIATION_MEMBERSHIP` は大会テンプレートで連盟・協会の加盟状況を求められる場合だけ設定します。
+
+```sh
+npx wrangler secret put EXCEL_CONTACT_NAME
+npx wrangler secret put EXCEL_CONTACT_PHONE
+npx wrangler secret put EXCEL_CONTACT_EMAIL
+npx wrangler secret put EXCEL_REMITTER_NAME
+npx wrangler secret put EXCEL_ASSOCIATION_MEMBERSHIP
+
+npx wrangler secret put EXCEL_CONTACT_NAME --config wrangler.admin.jsonc
+npx wrangler secret put EXCEL_CONTACT_PHONE --config wrangler.admin.jsonc
+npx wrangler secret put EXCEL_CONTACT_EMAIL --config wrangler.admin.jsonc
+npx wrangler secret put EXCEL_REMITTER_NAME --config wrangler.admin.jsonc
+npx wrangler secret put EXCEL_ASSOCIATION_MEMBERSHIP --config wrangler.admin.jsonc
+```
+
 Discord Developer PortalのOAuth2 Redirectsには、次を登録します。
 
 ```text
 https://sukc-tournament-portal.saitama-univ-karuta-club.workers.dev/auth/discord/callback
 https://sukc-tournament-admin.saitama-univ-karuta-club.workers.dev/auth/discord/callback
+```
+
+## 開発環境
+
+開発用Discord Botは本番から独立したCloudflare環境へ接続します。
+
+- Discord Application ID: `1563106568722063410`
+- Discord Guild ID: `1561041857952223352`
+- D1: `sukc-tournament-discord-db-development`
+- R2: `sukc-tournament-documents-development`
+- Bot: `https://sukc-tournament-discord-bot-development.saitama-univ-karuta-club.workers.dev`
+- 管理画面: `https://sukc-tournament-admin-development.saitama-univ-karuta-club.workers.dev`
+- メンバーポータル: `https://sukc-tournament-portal-development.saitama-univ-karuta-club.workers.dev`
+
+Developer Portalでは、開発用Applicationに次を登録します。
+
+```text
+Interactions Endpoint URL:
+https://sukc-tournament-discord-bot-development.saitama-univ-karuta-club.workers.dev/interactions
+
+OAuth2 Redirects:
+https://sukc-tournament-admin-development.saitama-univ-karuta-club.workers.dev/auth/discord/callback
+https://sukc-tournament-portal-development.saitama-univ-karuta-club.workers.dev/auth/discord/callback
+```
+
+秘密情報はリポジトリへ保存せず、開発環境へ直接登録します。
+
+```sh
+npx wrangler secret put DISCORD_BOT_TOKEN --env development
+npx wrangler secret put DISCORD_CLIENT_SECRET --config wrangler.admin.jsonc --env development
+npx wrangler secret put SESSION_SECRET --config wrangler.admin.jsonc --env development
+npx wrangler secret put DISCORD_CLIENT_SECRET --config wrangler.portal.jsonc --env development
+npx wrangler secret put SESSION_SECRET --config wrangler.portal.jsonc --env development
+```
+
+開発用D1へマイグレーションを適用し、各Workerを配備します。
+
+```sh
+npm run db:migrate:development
+npm run deploy:backup:development
+npm run deploy:development
+npm run deploy:admin:development
+npm run deploy:portal:development
 ```
 
 ## 開発コマンド

@@ -12,14 +12,20 @@
     "deploy:admin": "wrangler deploy --config wrangler.admin.jsonc",
     "deploy:portal": "wrangler deploy --config wrangler.portal.jsonc",
     "deploy:backup": "wrangler deploy --config wrangler.backup.jsonc",
+    "deploy:development": "wrangler deploy --env development",
+    "deploy:admin:development": "wrangler deploy --config wrangler.admin.jsonc --env development",
+    "deploy:portal:development": "wrangler deploy --config wrangler.portal.jsonc --env development",
+    "deploy:backup:development": "wrangler deploy --config wrangler.backup.jsonc --env development",
     "db:migrate:local": "wrangler d1 migrations apply DB --local",
     "db:migrate:remote": "wrangler d1 migrations apply DB --remote",
+    "db:migrate:development": "wrangler d1 migrations apply DB --remote --env development",
     "register:commands": "tsx scripts/register-commands.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "discord-interactions": "4.4.0"
+    "discord-interactions": "4.4.0",
+    "fflate": "^0.8.2"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "latest",

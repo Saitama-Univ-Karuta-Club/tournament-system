@@ -1,0 +1,699 @@
+{
+  "version": 1,
+  "mapped_at": "2026-10-23",
+  "scope": {
+    "source_directory": "../excel-auto-fill-samples/originals",
+    "source_workbooks": 24,
+    "xlsx_workbooks": 23,
+    "xls_workbooks": 1,
+    "originals_modified": false
+  },
+  "write_rules": {
+    "merged_cells": "write_only_top_left_cell",
+    "existing_formulas": "preserve",
+    "numbering_columns": "preserve",
+    "example_rows": "preserve",
+    "overflow": "stop_and_require_manual_review",
+    "unknown_layout": "do_not_write",
+    "blank_manual_fields": "leave_existing_template_value_unchanged"
+  },
+  "source_fields": {
+    "club_prefecture": "埼玉県",
+    "club_name": "埼玉大学かるた会",
+    "school_name": "埼玉大学",
+    "contact_name": "設定値",
+    "contact_phone": "設定値",
+    "contact_email": "設定値",
+    "remitter_name": "設定値",
+    "association_membership": "設定値",
+    "participant_grade": "大会参加希望データ",
+    "participant_rank": "メンバー登録情報",
+    "participant_last_name": "メンバー登録情報",
+    "participant_first_name": "メンバー登録情報",
+    "participant_last_name_kana": "メンバー登録情報",
+    "participant_first_name_kana": "メンバー登録情報",
+    "participant_appearance_count": "申込開始日時点の大会出場履歴",
+    "participant_notes": "自動判定できる場合のみ。通常は空欄"
+  },
+  "layouts": [
+    {
+      "id": "all_japan_standard_20",
+      "status": "mapped",
+      "sample_files": [
+        "?10?????(DE 級)参加申込書.xlsx",
+        "【登録会名】大阪なにはえ大会 ?A???????.xlsx",
+        "第31回益田大会（E級２回目）参加申込書.xlsx",
+        "第56回全国競技かるた松山大会DE級②申込書.xlsx",
+        "香川大会CDE級申込み.xlsx",
+        "（会名）第16回全国競技かるた ????_?????.xlsx"
+      ],
+      "match": {
+        "sheet_name": "Sheet1",
+        "anchors": {
+          "A3": "都道府県",
+          "A4": "所属会名",
+          "B11": "参加級",
+          "E11": "段位",
+          "F11": "氏",
+          "G11": "名"
+        }
+      },
+      "sheets": [
+        {
+          "name": "Sheet1",
+          "static_cells": {
+            "F3": "club_prefecture",
+            "F4": "club_name",
+            "F5": "contact_name",
+            "F6": "contact_phone",
+            "F7": "contact_email",
+            "F8": "remitter_name_if_present"
+          },
+          "participant_blocks": [
+            {
+              "rows": "12:31",
+              "capacity": 20,
+              "columns": {
+                "B": { "field": "participant_grade", "transform": "grade_with_suffix" },
+                "E": { "field": "participant_rank", "transform": "rank_to_arabic_dan" },
+                "F": { "field": "participant_last_name" },
+                "G": { "field": "participant_first_name" },
+                "H": { "field": "participant_full_name_kana", "transform": "join_full_width_space" },
+                "I": { "field": "participant_appearance_count" },
+                "J": { "field": "participant_notes" }
+              },
+              "preserve_columns": ["A", "C", "D"]
+            }
+          ]
+        }
+      ],
+      "sample_overrides": {
+        "香川大会CDE級申込み.xlsx": {
+          "do_not_write": ["F8:F8"],
+          "reason": "振込名義欄がないため8行目には自動入力しない"
+        },
+        "第31回益田大会（E級２回目）参加申込書.xlsx": {
+          "do_not_write": ["E12:E31", "I12:I31"],
+          "reason": "段位は空欄指定で、出場回数欄も存在しない"
+        },
+        "（会名）第16回全国競技かるた ????_?????.xlsx": {
+          "manual_cells": ["K12:K31"],
+          "reason": "C級の希望日は大会ごとの選択が必要"
+        }
+      }
+    },
+    {
+      "id": "all_japan_aichi_20",
+      "status": "mapped",
+      "sample_files": ["karuta_aichi_tournament26th_karutakaimei_entry-AB.xlsx"],
+      "match": {
+        "sheet_name": "シート1",
+        "anchors": { "A5": "都道府県", "A6": "所属会名1", "B14": "参加級", "I14": "出場回数" }
+      },
+      "sheets": [
+        {
+          "name": "シート1",
+          "static_cells": {
+            "B5": "club_prefecture",
+            "B6": "club_name",
+            "B7": "school_name",
+            "B8": "contact_name",
+            "B9": "contact_phone",
+            "B10": "contact_email",
+            "B11": "remitter_name"
+          },
+          "participant_blocks": [
+            {
+              "rows": "15:34",
+              "capacity": 20,
+              "columns": {
+                "B": { "field": "participant_grade", "transform": "grade_with_suffix" },
+                "E": { "field": "participant_rank", "transform": "rank_to_arabic_dan" },
+                "F": { "field": "participant_last_name" },
+                "G": { "field": "participant_first_name" },
+                "H": { "field": "participant_full_name_kana", "transform": "join_full_width_space" },
+                "I": { "field": "participant_appearance_count" },
+                "J": { "field": "participant_notes" }
+              },
+              "preserve_columns": ["A", "C", "D"]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "all_japan_wakayama_20",
+      "status": "mapped",
+      "sample_files": ["第65回和歌山大会参加申込書.xlsx"],
+      "match": {
+        "sheet_name": "Sheet1",
+        "anchors": { "A3": "都道府県", "B11": "参加級", "J11": "会員番号", "L11": "備考" }
+      },
+      "sheets": [
+        {
+          "name": "Sheet1",
+          "static_cells": {
+            "B3": "club_prefecture",
+            "B4": "club_name",
+            "B5": "contact_name",
+            "B6": "contact_phone",
+            "B7": "contact_email",
+            "B8": "remitter_name"
+          },
+          "participant_blocks": [
+            {
+              "rows": "12:31",
+              "capacity": 20,
+              "columns": {
+                "B": { "field": "participant_grade", "transform": "grade_with_suffix" },
+                "E": { "field": "participant_rank", "transform": "rank_to_arabic_dan" },
+                "F": { "field": "participant_last_name" },
+                "G": { "field": "participant_first_name" },
+                "I": { "field": "participant_full_name_kana", "transform": "join_full_width_space" },
+                "K": { "field": "participant_appearance_count" },
+                "L": { "field": "participant_notes" }
+              },
+              "manual_columns": { "J": "全日本かるた協会会員番号" },
+              "preserve_columns": ["A", "C", "D", "H"]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "all_japan_hokuriku_25",
+      "status": "mapped",
+      "sample_files": ["第85回北國大会参加申込書.xlsx"],
+      "match": {
+        "sheet_name": "Sheet1",
+        "anchors": { "A3": "都道府県", "B11": "参加級", "K11": "備考" }
+      },
+      "sheets": [
+        {
+          "name": "Sheet1",
+          "static_cells": {
+            "B3": "club_prefecture",
+            "B4": "club_name",
+            "B5": "contact_name",
+            "B6": "contact_phone",
+            "B7": "contact_email",
+            "B8": "remitter_name"
+          },
+          "participant_blocks": [
+            {
+              "rows": "12:36",
+              "capacity": 25,
+              "columns": {
+                "B": { "field": "participant_grade", "transform": "grade_with_suffix" },
+                "E": { "field": "participant_rank", "transform": "rank_to_arabic_dan" },
+                "F": { "field": "participant_last_name" },
+                "G": { "field": "participant_first_name" },
+                "I": { "field": "participant_full_name_kana", "transform": "join_full_width_space" },
+                "J": { "field": "participant_appearance_count" },
+                "K": { "field": "participant_notes" }
+              },
+              "preserve_columns": ["A", "C", "D", "H"]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "kumamoto_cd_20",
+      "status": "mapped",
+      "sample_files": ["(???)?42????? CD級参加申込書.xlsx"],
+      "match": {
+        "sheet_name": "Sheet1",
+        "anchors": { "A3": "都道府県", "B10": "参加級", "D10": "氏", "G10": "出場回数" }
+      },
+      "sheets": [
+        {
+          "name": "Sheet1",
+          "static_cells": {
+            "D3": "club_prefecture",
+            "D4": "club_name",
+            "D5": "contact_name",
+            "D6": "contact_phone",
+            "D7": "contact_email"
+          },
+          "participant_blocks": [
+            {
+              "rows": "11:30",
+              "capacity": 20,
+              "columns": {
+                "B": { "field": "participant_grade", "transform": "grade_with_suffix" },
+                "C": { "field": "participant_rank", "transform": "rank_to_arabic_dan" },
+                "D": { "field": "participant_last_name" },
+                "E": { "field": "participant_first_name" },
+                "F": { "field": "participant_full_name_kana", "transform": "join_full_width_space" },
+                "G": { "field": "participant_appearance_count" },
+                "H": { "field": "participant_notes" }
+              },
+              "preserve_columns": ["A"]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "sapporo_20",
+      "status": "mapped",
+      "sample_files": [
+        "261103????????? かるた札幌大会BDE級.xlsx",
+        "261129????????? かるた札幌大会AC級.xlsx"
+      ],
+      "match": {
+        "sheet_name": "Sheet1",
+        "anchors": { "A3": "都道府県", "B12": "参加級", "D12": "氏", "G12": "出場回数" }
+      },
+      "sheets": [
+        {
+          "name": "Sheet1",
+          "static_cells": {
+            "D3": "club_prefecture",
+            "D4": "club_name",
+            "D5": "contact_name",
+            "D6": "contact_phone",
+            "D7": "contact_email",
+            "D8": "remitter_name"
+          },
+          "participant_blocks": [
+            {
+              "rows": "13:32",
+              "capacity": 20,
+              "columns": {
+                "B": { "field": "participant_grade", "transform": "grade_with_suffix" },
+                "C": { "field": "participant_rank", "transform": "rank_to_arabic_dan" },
+                "D": { "field": "participant_last_name" },
+                "E": { "field": "participant_first_name" },
+                "F": { "field": "participant_full_name_kana", "transform": "join_full_width_space" },
+                "G": { "field": "participant_appearance_count" }
+              },
+              "preserve_columns": ["A"]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "all_japan_protected_100",
+      "status": "mapped_protected",
+      "sample_files": ["?76??????? 出場申込書.xlsx"],
+      "match": {
+        "sheet_name": "申込者用",
+        "anchors": { "B3": "都道府県", "C16": "級", "D16": "段位", "E15": "出場回数", "J15": "都道府県名" }
+      },
+      "sheets": [
+        {
+          "name": "申込者用",
+          "protected": true,
+          "static_cells": {
+            "H3": "club_prefecture",
+            "H4": "club_name",
+            "H5": "contact_name",
+            "H6": "contact_phone",
+            "H7": "contact_email",
+            "H8": "remitter_name",
+            "H9": { "field": "association_membership", "transform": "membership_to_template_choice" }
+          },
+          "participant_blocks": [
+            {
+              "rows": "17:116",
+              "capacity": 100,
+              "columns": {
+                "C": { "field": "participant_grade", "transform": "grade_without_suffix" },
+                "D": { "field": "participant_rank", "transform": "rank_to_arabic_dan_allow_unranked" },
+                "E": { "field": "participant_appearance_count" },
+                "F": { "field": "participant_last_name" },
+                "G": { "field": "participant_first_name" },
+                "H": { "field": "participant_full_name_kana", "transform": "join_full_width_space" },
+                "I": { "field": "club_name" },
+                "K": { "field": "participant_notes" }
+              },
+              "manual_columns": { "J": "地域制限対象者のみ在住・在学・在勤の都道府県" },
+              "preserve_columns": ["B"]
+            }
+          ]
+        }
+      ],
+      "notes": ["シート保護を維持したまま、入力可能セルだけを書き換えること"]
+    },
+    {
+      "id": "yamaguchi_two_page_45",
+      "status": "mapped",
+      "sample_files": ["??????14??? 大会参加申込書.xlsx"],
+      "match": {
+        "sheet_name": "Sheet1",
+        "anchors": { "A3": "都道府県", "D10": "氏 名", "H10": "都道府県 番号", "D43": "氏 名" }
+      },
+      "sheets": [
+        {
+          "name": "Sheet1",
+          "static_cells": {
+            "D3": "club_prefecture",
+            "D4": "club_name",
+            "D5": "contact_name",
+            "D6": "contact_phone",
+            "D7": "contact_email"
+          },
+          "participant_blocks": [
+            {
+              "rows": "11:30",
+              "capacity": 20,
+              "columns": {
+                "B": { "field": "participant_grade", "transform": "grade_with_suffix" },
+                "C": { "field": "participant_rank", "transform": "rank_to_arabic_dan" },
+                "D": { "field": "participant_full_name", "transform": "join_half_width_space" },
+                "E": { "field": "participant_full_name_kana", "transform": "join_half_width_space" },
+                "F": { "field": "participant_appearance_count" },
+                "G": { "field": "participant_notes" }
+              },
+              "preserve_columns": ["A", "H"]
+            },
+            {
+              "rows": "44:68",
+              "capacity": 25,
+              "columns": {
+                "B": { "field": "participant_grade", "transform": "grade_with_suffix" },
+                "C": { "field": "participant_rank", "transform": "rank_to_arabic_dan" },
+                "D": { "field": "participant_full_name", "transform": "join_half_width_space" },
+                "E": { "field": "participant_full_name_kana", "transform": "join_half_width_space" },
+                "F": { "field": "participant_appearance_count" },
+                "G": { "field": "participant_notes" }
+              },
+              "preserve_columns": ["A", "H"]
+            }
+          ]
+        }
+      ],
+      "notes": ["E3とH列は数式のため絶対に上書きしない"]
+    },
+    {
+      "id": "hogyoku_grade_sheets_30",
+      "status": "mapped",
+      "sample_files": [
+        "??????29????? CDE級  申込書.xlsx",
+        "??????30????? CDE級  申込書.xlsx"
+      ],
+      "match": {
+        "sheet_names": ["C級申込書", "D級申込書", "E級申込書"],
+        "anchors": { "E3": "代表者名", "C6": "級", "E6": "氏 名", "G6": "所属会" }
+      },
+      "sheets": [
+        {
+          "names": ["C級申込書", "D級申込書", "E級申込書"],
+          "grade_from_sheet_name": true,
+          "static_cells": {
+            "B4": "club_name",
+            "E4": "contact_name",
+            "F4": "contact_phone",
+            "G4": "contact_email"
+          },
+          "participant_blocks": [
+            {
+              "rows": "8:37",
+              "capacity": 30,
+              "columns": {
+                "C": { "field": "participant_grade", "transform": "grade_without_suffix" },
+                "D": { "field": "participant_rank", "transform": "rank_template_specific" },
+                "E": { "field": "participant_full_name", "transform": "join_full_width_space" },
+                "F": { "field": "participant_full_name_kana", "transform": "join_full_width_space" },
+                "G": { "field": "club_name" }
+              },
+              "manual_columns": { "H": "大会固有の過去入賞歴" },
+              "preserve_columns": ["B"]
+            }
+          ]
+        }
+      ],
+      "notes": ["7行目は記入例のため保持する"]
+    },
+    {
+      "id": "niigata_32",
+      "status": "mapped",
+      "sample_files": [
+        "??????8? ???????? 潟大会（CDE級）申込書.xlsx",
+        "【○○会】第8回全国競技かるた新潟大会申込書_AB級.xlsx"
+      ],
+      "match": {
+        "sheet_name": "申込書",
+        "anchors": { "B3": "所属会名", "E3": "当日代表者名", "C6": "級", "I6": "所属" }
+      },
+      "sheets": [
+        {
+          "name": "申込書",
+          "static_cells": {
+            "B4": "club_name",
+            "E4": "contact_name",
+            "G4": "contact_phone",
+            "I4": "contact_email",
+            "J4": "remitter_name"
+          },
+          "manual_cells": { "K4": "臨時バス乗車人数" },
+          "participant_blocks": [
+            {
+              "rows": "8:39",
+              "capacity": 32,
+              "columns": {
+                "C": { "field": "participant_grade", "transform": "grade_without_suffix" },
+                "D": { "field": "participant_rank", "transform": "rank_to_kanji_short" },
+                "E": { "field": "participant_last_name" },
+                "F": { "field": "participant_first_name" },
+                "G": { "field": "participant_last_name_kana" },
+                "H": { "field": "participant_first_name_kana" },
+                "I": { "field": "club_or_school_name" },
+                "J": { "field": "participant_appearance_count" }
+              },
+              "manual_columns": { "K": "地域条件による抽選優先条件" },
+              "preserve_columns": ["B"]
+            }
+          ]
+        }
+      ],
+      "notes": ["7行目は記入例のため保持する"]
+    },
+    {
+      "id": "student_championship_e_25",
+      "status": "mapped",
+      "sample_files": ["??????97 ????????? 生選手権大会E級参加申込書.xlsx"],
+      "match": {
+        "sheet_name": "Sheet1",
+        "anchors": { "A3": "所属会名", "B10": "参加級", "H10": "学校名", "I10": "都道府県" }
+      },
+      "sheets": [
+        {
+          "name": "Sheet1",
+          "static_cells": {
+            "B3": "club_name",
+            "B4": "contact_name",
+            "B5": "contact_phone",
+            "B6": "contact_email",
+            "B7": "remitter_name"
+          },
+          "participant_blocks": [
+            {
+              "rows": "12:36",
+              "capacity": 25,
+              "columns": {
+                "B": { "field": "participant_grade", "transform": "grade_with_suffix" },
+                "C": { "field": "participant_rank", "transform": "rank_to_arabic_dan_allow_unranked" },
+                "D": { "field": "participant_last_name" },
+                "E": { "field": "participant_first_name" },
+                "F": { "field": "participant_last_name_kana" },
+                "G": { "field": "participant_first_name_kana" },
+                "H": { "field": "school_name" },
+                "I": { "field": "club_prefecture" },
+                "J": { "field": "participant_notes" }
+              },
+              "preserve_columns": ["A"]
+            }
+          ]
+        }
+      ],
+      "notes": ["11行目は記入例のため保持する"]
+    },
+    {
+      "id": "takinogawa_ef_15",
+      "status": "mapped",
+      "sample_files": ["???????????(EF 級共通)_参加申込書.xlsx"],
+      "match": {
+        "sheet_name": "参加申込書",
+        "anchors": { "B3": "登録会名", "B18": "氏名", "D18": "所属会", "G18": "級" }
+      },
+      "sheets": [
+        {
+          "name": "参加申込書",
+          "static_cells": {
+            "D3": "club_name",
+            "D4": "contact_name",
+            "D5": "contact_phone"
+          },
+          "participant_blocks": [
+            {
+              "rows": "20:34",
+              "capacity": 15,
+              "columns": {
+                "B": { "field": "participant_full_name", "transform": "join_full_width_space" },
+                "C": { "field": "participant_full_name_kana", "transform": "join_full_width_space" },
+                "D": { "field": "club_name" },
+                "G": { "field": "participant_grade", "transform": "grade_with_suffix" }
+              },
+              "manual_columns": { "H": "大会固有の抽選優先条件" },
+              "preserve_columns": ["A", "E", "F"]
+            }
+          ]
+        }
+      ],
+      "notes": ["19行目は記入例のため保持する"]
+    },
+    {
+      "id": "akita_konohana_10",
+      "status": "mapped",
+      "sample_files": ["ãããä¼ãç¬¬2åç§ç°ãã®ã¯ãªæ¯ç³è¾¼æ¸.xlsx"],
+      "match": {
+        "sheet_name": "申込書",
+        "anchors": { "A2": "所属会", "A3": "申込代表者名", "B7": "級位", "D7": "氏名" }
+      },
+      "sheets": [
+        {
+          "name": "申込書",
+          "static_cells": {
+            "C2": "club_name",
+            "C3": "contact_name",
+            "D4": "contact_email",
+            "D5": "contact_phone"
+          },
+          "participant_blocks": [
+            {
+              "rows": "9:18",
+              "capacity": 10,
+              "columns": {
+                "B": { "field": "participant_grade", "transform": "grade_with_suffix" },
+                "C": { "field": "participant_rank", "transform": "rank_to_kanji_dan_allow_unranked" },
+                "D": { "field": "participant_full_name", "transform": "join_no_space" },
+                "E": { "field": "participant_full_name_kana", "transform": "join_no_space" }
+              },
+              "preserve_columns": ["A"]
+            }
+          ]
+        }
+      ],
+      "notes": ["8行目は記入例のため保持する"]
+    },
+    {
+      "id": "hiroshima_de_60",
+      "status": "mapped",
+      "sample_files": ["【○○会】第35回広島大会申込 ?DE?11.8??.xlsx"],
+      "match": {
+        "sheet_name": "申込書",
+        "anchors": { "A3": "所属会", "B25": "出場級", "H25": "登録会名", "I25": "都道府県" }
+      },
+      "sheets": [
+        {
+          "name": "申込書",
+          "static_cells": {
+            "C3": "club_name",
+            "C4": "contact_name",
+            "C5": "contact_phone",
+            "C6": "contact_email"
+          },
+          "participant_blocks": [
+            {
+              "rows": "29:88",
+              "capacity": 60,
+              "columns": {
+                "B": { "field": "participant_grade", "transform": "grade_without_suffix" },
+                "C": { "field": "participant_rank", "transform": "rank_template_specific" },
+                "D": { "field": "participant_last_name" },
+                "E": { "field": "participant_first_name" },
+                "F": { "field": "participant_last_name_kana" },
+                "G": { "field": "participant_first_name_kana" },
+                "H": { "field": "club_or_school_name" },
+                "I": { "field": "club_prefecture" },
+                "J": { "field": "participant_notes" }
+              },
+              "preserve_columns": ["A"]
+            }
+          ]
+        }
+      ],
+      "ignored_sheets": ["（編集不可）"],
+      "notes": ["26～28行目は地域制限の記入例のため保持する", "E級の地域制限該当可否は自動判定せず要確認"]
+    },
+    {
+      "id": "hyogo_19",
+      "status": "mapped",
+      "sample_files": ["兵庫県大会2026申込書.xlsx"],
+      "match": {
+        "sheet_name": "Sheet1",
+        "anchors": { "B3": "会名", "C8": "氏名", "D8": "ふりがな", "E8": "申込級" }
+      },
+      "sheets": [
+        {
+          "name": "Sheet1",
+          "static_cells": {
+            "E3": "club_name",
+            "E4": "contact_name",
+            "E5": "contact_email",
+            "E6": "contact_phone"
+          },
+          "participant_blocks": [
+            {
+              "rows": "11:29",
+              "capacity": 19,
+              "columns": {
+                "C": { "field": "participant_full_name", "transform": "join_full_width_space" },
+                "D": { "field": "participant_full_name_kana", "transform": "join_full_width_space" },
+                "E": { "field": "participant_grade", "transform": "grade_without_suffix" },
+                "F": { "field": "participant_rank", "transform": "rank_without_suffix" },
+                "G": { "field": "participant_notes" }
+              },
+              "preserve_columns": ["B"]
+            }
+          ]
+        }
+      ],
+      "ignored_sheets": ["Sheet2", "Sheet3"],
+      "notes": ["9～10行目は記入例のため保持する"]
+    },
+    {
+      "id": "ashikaga_legacy_xls_20",
+      "status": "mapped_requires_xls_support",
+      "sample_files": ["第16回足利大会申込書.xls"],
+      "match": {
+        "workbook_type": "xls",
+        "sheet_name": "申込書",
+        "anchors": { "A3": "所属会・学校名", "F3": "代表者", "B6": "姓", "F6": "出場級" }
+      },
+      "sheets": [
+        {
+          "name": "申込書",
+          "static_cells": {
+            "C3": "club_or_school_name",
+            "G3": "contact_name",
+            "C4": "contact_email",
+            "G4": "contact_phone"
+          },
+          "participant_blocks": [
+            {
+              "rows": "7:26",
+              "capacity": 20,
+              "columns": {
+                "B": { "field": "participant_last_name" },
+                "C": { "field": "participant_first_name" },
+                "D": { "field": "participant_last_name_kana" },
+                "E": { "field": "participant_first_name_kana" },
+                "F": { "field": "participant_grade", "transform": "grade_template_specific" },
+                "G": { "field": "participant_rank", "transform": "rank_template_specific" },
+                "I": { "field": "participant_notes" }
+              },
+              "manual_columns": { "H": "学年" },
+              "preserve_columns": ["A"]
+            }
+          ]
+        }
+      ],
+      "notes": ["実装時は.xlsを.xlsxへ変換してから書き込むか、BIFF8対応ライブラリを用いる"]
+    }
+  ]
+}

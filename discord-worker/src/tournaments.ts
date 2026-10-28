@@ -84,6 +84,7 @@ export interface TournamentRow {
   application_method?: TournamentApplicationMethod | null;
   application_roster_url?: string | null;
   application_roster_file_name?: string | null;
+  application_roster_content_type?: string | null;
   application_form_url?: string | null;
   application_email?: string | null;
 }
@@ -143,6 +144,9 @@ export interface ApplicationEmailTemplate {
   subject: string;
   body: string;
   mailto: string;
+  attachmentUrl: string | null;
+  attachmentFileName: string | null;
+  attachmentContentType: string | null;
 }
 
 export interface ReminderParticipant {
@@ -972,7 +976,7 @@ function buildApplicationMethodFields(tournament: TournamentRow) {
     if (composerUrl) {
       fields.push({
         name: "申込メール作成",
-        value: `[宛先・件名・本文入力済みのメールを作成](${composerUrl})\n※申込名簿はメーラーで添付してください。`,
+        value: `[宛先・件名・本文・申込名簿を入力済みのメールを作成](${composerUrl})`,
         inline: false,
       });
     }
@@ -1022,6 +1026,9 @@ export function buildApplicationEmailTemplate(
     subject,
     body,
     mailto: `mailto:${tournament.application_email}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`,
+    attachmentUrl: tournament.application_roster_url ?? null,
+    attachmentFileName: tournament.application_roster_file_name ?? null,
+    attachmentContentType: tournament.application_roster_content_type ?? null,
   };
 }
 
@@ -1328,6 +1335,7 @@ export async function loadApplicationEmailTemplate(
       tournament_application_methods.application_method,
       tournament_application_methods.roster_document_url AS application_roster_url,
       tournament_application_methods.roster_file_name AS application_roster_file_name,
+      tournament_application_methods.roster_content_type AS application_roster_content_type,
       tournament_application_methods.application_email
      FROM tournaments
      INNER JOIN tournament_application_methods

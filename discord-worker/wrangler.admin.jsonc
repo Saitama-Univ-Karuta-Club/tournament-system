@@ -39,5 +39,37 @@
       "service": "sukc-tournament-backup",
       "entrypoint": "DocumentConverter"
     }
-  ]
+  ],
+  "env": {
+    "development": {
+      "vars": {
+        "ENVIRONMENT": "development",
+        "DISCORD_APPLICATION_ID": "1563106568722063410",
+        "DOCUMENT_PUBLIC_BASE_URL": "https://sukc-tournament-discord-bot-development.saitama-univ-karuta-club.workers.dev",
+        "DISCORD_GUILD_ID": "1561041857952223352",
+        "DISCORD_REDIRECT_URI": "https://sukc-tournament-admin-development.saitama-univ-karuta-club.workers.dev/auth/discord/callback"
+      },
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "sukc-tournament-discord-db-development",
+          "database_id": "86c04659-78f6-4bdb-909f-c7de05ad4246",
+          "migrations_dir": "migrations"
+        }
+      ],
+      "r2_buckets": [
+        {
+          "binding": "DOCUMENTS",
+          "bucket_name": "sukc-tournament-documents-development"
+        }
+      ],
+      "services": [
+        {
+          "binding": "DOCUMENT_CONVERTER",
+          "service": "sukc-tournament-backup-development",
+          "entrypoint": "DocumentConverter"
+        }
+      ]
+    }
+  }
 }

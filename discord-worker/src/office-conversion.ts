@@ -2,6 +2,8 @@ const GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
 const DRIVE_UPLOAD_ENDPOINT = "https://www.googleapis.com/upload/drive/v3/files";
 const DRIVE_FILES_ENDPOINT = "https://www.googleapis.com/drive/v3/files";
 const MAX_EXPORTED_PDF_BYTES = 10 * 1024 * 1024;
+const MAX_EXPORTED_XLSX_BYTES = 20 * 1024 * 1024;
+const XLSX_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 
 export interface OfficeConversionEnv {
   DOCUMENTS: R2Bucket;
@@ -32,13 +34,18 @@ function googleWorkspaceMimeType(sourceContentType: string): string {
   ) return "application/vnd.google-apps.document";
   if (
     sourceContentType === "application/vnd.ms-excel" ||
-    sourceContentType === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    sourceContentType === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" ||
+    sourceContentType === "application/vnd.ms-excel.sheet.macroEnabled.12"
   ) return "application/vnd.google-apps.spreadsheet";
   throw new OfficeConversionError("PDF変換に対応していないファイル形式です。");
 }
 
 function inlinePdfDisposition(fileName: string): string {
   return `inline; filename="document.pdf"; filename*=UTF-8''${encodeURIComponent(fileName)}`;
+}
+
+function attachmentDisposition(fileName: string): string {
+  return `attachment; filename="document.xlsx"; filename*=UTF-8''${encodeURIComponent(fileName)}`;
 }
 
 async function errorResponse(response: Response, label: string): Promise<OfficeConversionError> {
@@ -129,6 +136,28 @@ async function exportPdf(
   return bytes;
 }
 
+async function exportXlsx(
+  fileId: string,
+  accessToken: string,
+  fetcher: typeof fetch,
+): Promise<ArrayBuffer> {
+  const response = await fetcher(
+    `${DRIVE_FILES_ENDPOINT}/${encodeURIComponent(fileId)}/export?mimeType=${encodeURIComponent(XLSX_CONTENT_TYPE)}`,
+    { headers: { Authorization: `Bearer ${accessToken}` } },
+  );
+  if (!response.ok) throw await errorResponse(response, "Excel書き出しエラー");
+  const bytes = await response.arrayBuffer();
+  if (bytes.byteLength === 0) throw new OfficeConversionError("書き出されたExcelファイルが空です。");
+  if (bytes.byteLength > MAX_EXPORTED_XLSX_BYTES) {
+    throw new OfficeConversionError("書き出されたExcelファイルが20MBを超えています。");
+  }
+  const signature = new Uint8Array(bytes.slice(0, 2));
+  if (signature[0] !== 0x50 || signature[1] !== 0x4b) {
+    throw new OfficeConversionError("Google Driveから.xlsx以外のデータが返されました。");
+  }
+  return bytes;
+}
+
 async function deleteTemporaryFile(
   fileId: string,
   accessToken: string,
@@ -173,6 +202,45 @@ export async function convertStoredOfficeDocumentToPdf(
       },
     });
     return { targetKey: request.targetKey, size: pdf.byteLength };
+  } finally {
+    if (temporaryFileId) {
+      await deleteTemporaryFile(temporaryFileId, accessToken, fetcher);
+    }
+  }
+}
+
+export async function convertStoredLegacyExcelToXlsx(
+  env: OfficeConversionEnv,
+  request: OfficeConversionRequest,
+  fetcher: typeof fetch = fetch,
+): Promise<OfficeConversionResult> {
+  if (request.sourceContentType !== "application/vnd.ms-excel") {
+    throw new OfficeConversionError(".xls形式だけがExcel変換の対象です。");
+  }
+  const source = await env.DOCUMENTS.get(request.sourceKey);
+  if (!source) throw new OfficeConversionError("変換元ファイルが見つかりません。");
+  const accessToken = await googleAccessToken(env, fetcher);
+  let temporaryFileId: string | null = null;
+  try {
+    temporaryFileId = await importOfficeFile(
+      await source.arrayBuffer(),
+      request,
+      "application/vnd.google-apps.spreadsheet",
+      accessToken,
+      fetcher,
+    );
+    const xlsx = await exportXlsx(temporaryFileId, accessToken, fetcher);
+    await env.DOCUMENTS.put(request.targetKey, xlsx, {
+      httpMetadata: {
+        contentType: XLSX_CONTENT_TYPE,
+        contentDisposition: attachmentDisposition(request.targetFileName),
+      },
+      customMetadata: {
+        convertedFrom: request.sourceKey,
+        originalName: request.sourceFileName.slice(0, 500),
+      },
+    });
+    return { targetKey: request.targetKey, size: xlsx.byteLength };
   } finally {
     if (temporaryFileId) {
       await deleteTemporaryFile(temporaryFileId, accessToken, fetcher);

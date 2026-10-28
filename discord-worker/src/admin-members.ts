@@ -22,11 +22,22 @@ interface MemberDatabaseRow {
 }
 
 interface MemberAppearanceDatabaseRow {
+  tournament_id: string;
   group_key: string;
   title: string;
   event_start_date: string;
   grade: string;
   result_text: string | null;
+}
+
+interface MemberMatchDatabaseRow {
+  tournament_id: string;
+  round_number: number;
+  outcome: "win" | "loss";
+  score_difference: number | null;
+  result_note: string | null;
+  opponent_name: string | null;
+  opponent_affiliation: string | null;
 }
 
 interface RegistrationRequestDatabaseRow {
@@ -73,10 +84,19 @@ export interface AdminMember {
 }
 
 export interface AdminMemberAppearance {
+  tournamentId: string;
   title: string;
   eventDate: string;
   grade: string;
   resultText: string | null;
+  matches: Array<{
+    roundNumber: number;
+    outcome: "win" | "loss";
+    scoreDifference: number | null;
+    resultNote: string | null;
+    opponentName: string | null;
+    opponentAffiliation: string | null;
+  }>;
 }
 
 export interface AdminMemberAppearanceHistory {
@@ -273,8 +293,10 @@ export async function listAdminMemberAppearances(
   const today = currentJstDate();
   const [year, month] = today.split("-").map(Number);
   const fiscalYear = month >= 4 ? year : year - 1;
-  const rows = await env.DB.prepare(
+  const [rows, matchRows] = await Promise.all([
+    env.DB.prepare(
     `SELECT
+      tournaments.tournament_id,
       COALESCE(tournaments.registration_group_id, tournaments.tournament_id) AS group_key,
       tournaments.title,
       tournaments.event_start_date,
@@ -294,7 +316,29 @@ export async function listAdminMemberAppearances(
       AND tournaments.event_start_date <= ?
       AND tournaments.status NOT IN ('canceled', 'deleted')
     ORDER BY tournaments.event_start_date DESC, tournaments.created_at DESC`,
-  ).bind(memberId, today).all<MemberAppearanceDatabaseRow>();
+    ).bind(memberId, today).all<MemberAppearanceDatabaseRow>(),
+    env.DB.prepare(
+      `SELECT tournament_id, round_number, outcome, score_difference,
+        result_note, opponent_name, opponent_affiliation
+       FROM tournament_entry_matches
+       WHERE member_id = ?
+       ORDER BY tournament_id, round_number`,
+    ).bind(memberId).all<MemberMatchDatabaseRow>(),
+  ]);
+
+  const matchesByTournament = new Map<string, AdminMemberAppearance["matches"]>();
+  for (const match of matchRows.results) {
+    const current = matchesByTournament.get(match.tournament_id) ?? [];
+    current.push({
+      roundNumber: Number(match.round_number),
+      outcome: match.outcome,
+      scoreDifference: match.score_difference === null ? null : Number(match.score_difference),
+      resultNote: match.result_note,
+      opponentName: match.opponent_name,
+      opponentAffiliation: match.opponent_affiliation,
+    });
+    matchesByTournament.set(match.tournament_id, current);
+  }
 
   const seenGroups = new Set<string>();
   const appearances = rows.results
@@ -304,10 +348,12 @@ export async function listAdminMemberAppearances(
       return true;
     })
     .map((row) => ({
+      tournamentId: row.tournament_id,
       title: row.title,
       eventDate: row.event_start_date,
       grade: row.grade,
       resultText: row.result_text,
+      matches: matchesByTournament.get(row.tournament_id) ?? [],
     }));
   const fiscalStart = `${fiscalYear}-04-01`;
   const fiscalEnd = `${fiscalYear + 1}-03-31`;
