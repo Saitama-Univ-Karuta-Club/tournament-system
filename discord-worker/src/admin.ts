@@ -85,6 +85,7 @@ import {
   type RosterExtractionCandidate,
 } from "./roster-auto-fill";
 import {
+  cancelPracticeSchedule,
   createPracticeSchedules,
   listPracticeSchedules,
   updatePracticeSchedule,
@@ -4624,7 +4625,10 @@ function adminHtml(
           edit.type = 'button';
           edit.dataset.schedule = schedule.schedule_id;
           edit.addEventListener('click', openPracticeScheduleEdit);
-          actions.append(edit);
+          const remove = element('button', 'danger', '削除');
+          remove.type = 'button';
+          remove.addEventListener('click', () => deleteRegisteredPracticeSchedule(schedule, remove));
+          actions.append(edit, remove);
         }
         card.append(details, actions);
         practiceScheduleList.append(card);
@@ -4676,6 +4680,24 @@ function adminHtml(
         practiceScheduleEditResult.textContent = error instanceof Error ? error.message : '練習日程を編集できませんでした。';
       } finally {
         practiceScheduleEditSave.disabled = false;
+      }
+    }
+
+    async function deleteRegisteredPracticeSchedule(schedule, button) {
+      if (!confirm(schedule.practice_date.replaceAll('-', '/') + ' ' + schedule.title + 'を削除しますか？\nDiscordの同月カレンダーも自動的に更新されます。')) return;
+      button.disabled = true;
+      practiceScheduleListStatus.className = 'status-message';
+      practiceScheduleListStatus.textContent = '削除しています…';
+      try {
+        const response = await fetch('/api/practice/schedules/' + encodeURIComponent(schedule.schedule_id), { method: 'DELETE' });
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.error || '練習日程を削除できませんでした。');
+        renderPracticeSchedules(body.schedules || []);
+        practiceScheduleListStatus.textContent = '練習日程を削除しました。Discordカレンダーを更新します。';
+      } catch (error) {
+        button.disabled = false;
+        practiceScheduleListStatus.className = 'status-message error';
+        practiceScheduleListStatus.textContent = error instanceof Error ? error.message : '練習日程を削除できませんでした。';
       }
     }
 
@@ -8091,6 +8113,20 @@ export async function handleAdminRequest(
       if (error instanceof PracticeError) return json({ error: error.message }, error.status);
       console.error("練習日程の編集エラー", error);
       return json({ error: "練習日程を編集できませんでした。" }, 500);
+    }
+  }
+
+  if (request.method === "DELETE" && practiceSchedulePath) {
+    if (!isSameOrigin(request)) {
+      return json({ error: "不正な送信元です。" }, 403);
+    }
+    try {
+      await cancelPracticeSchedule(env, practiceSchedulePath[1]);
+      return json({ schedules: await listPracticeSchedules(env) });
+    } catch (error: unknown) {
+      if (error instanceof PracticeError) return json({ error: error.message }, error.status);
+      console.error("練習日程の削除エラー", error);
+      return json({ error: "練習日程を削除できませんでした。" }, 500);
     }
   }
 

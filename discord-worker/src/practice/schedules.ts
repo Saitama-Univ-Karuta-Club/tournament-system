@@ -1,4 +1,7 @@
 import {
+  deleteChannelMessage,
+  DiscordApiError,
+  editChannelMessageWithFiles,
   sendChannelMessage,
   sendChannelMessageWithFiles,
   type DiscordMessagePayload,
@@ -35,6 +38,13 @@ interface MemberResponseRow {
   member_id: string;
   display_name: string;
   response: PracticeScheduleResponse | null;
+}
+
+interface MonthAnnouncementRow {
+  guild_id: string;
+  practice_month: string;
+  channel_id: string;
+  message_id: string;
 }
 
 export interface PracticeScheduleNotificationEnv extends PracticeEnv {
@@ -121,10 +131,12 @@ export function buildPracticeScheduleBatchAnnouncement(input: {
   portalUrl?: string;
 }): DiscordMessagePayload {
   const portalUrl = input.portalUrl?.replace(/\/$/, "");
+  const [year, month] = (input.schedules[0]?.practice_date ?? "").slice(0, 7).split("-");
+  const monthLabel = year && month ? `${Number(year)}年${Number(month)}月` : "練習日程";
   return {
-    content: "【かるた練習帖】練習日程をまとめてお知らせします。",
+    content: `【かるた練習帖】${monthLabel}の練習日程をお知らせします。`,
     embeds: [{
-      title: `練習日程（${input.schedules.length}件）`,
+      title: `${monthLabel} 練習日程（${input.schedules.length}件）`,
       description: input.schedules.map(batchScheduleLine).join("\n\n"),
       color: 0x4262ad,
       image: { url: "attachment://practice-schedule-calendar.png" },
@@ -280,13 +292,18 @@ export async function createPracticeSchedules(
       creatorAdminIdentity,
       registrationBatchId,
     ));
-  statements.push(
-    env.DB.prepare(
+  const monthAnchors = new Map<string, string>();
+  schedules.forEach((schedule) => {
+    const month = schedule.practiceDate.slice(0, 7);
+    if (!monthAnchors.has(month)) monthAnchors.set(month, schedule.scheduleId);
+  });
+  monthAnchors.forEach((scheduleId, month) => {
+    statements.push(env.DB.prepare(
       `INSERT INTO practice_schedule_notification_queue (
-         idempotency_key, schedule_id, notification_type
-       ) VALUES (?, ?, 'announcement')`,
-    ).bind(`practice-schedule-batch:${registrationBatchId}:announcement`, schedules[0].scheduleId),
-  );
+         idempotency_key, schedule_id, notification_type, target_month
+       ) VALUES (?, ?, 'announcement', ?)`,
+    ).bind(`practice-schedule-month:${month}:${registrationBatchId}`, scheduleId, month));
+  });
   await env.DB.batch(statements);
   return { scheduleIds: schedules.map((schedule) => schedule.scheduleId) };
 }
@@ -297,30 +314,79 @@ export async function updatePracticeSchedule(
   input: Record<string, unknown>,
 ): Promise<void> {
   if (!SCHEDULE_ID.test(scheduleId)) throw new PracticeError("練習日程を確認できませんでした。", 404);
+  const existing = await env.DB.prepare(
+    `SELECT practice_date FROM practice_schedules
+     WHERE schedule_id = ? AND status = 'scheduled'`,
+  ).bind(scheduleId).first<{ practice_date: string }>();
+  if (!existing) {
+    throw new PracticeError("終了済み、または存在しない練習日程は編集できません。", 409);
+  }
+  const practiceDate = date(input.practiceDate);
   const startTime = time(input.startTime, "開始時刻");
   const endTime = time(input.endTime, "終了時刻");
   if (startTime && endTime && endTime <= startTime) {
     throw new PracticeError("終了時刻は開始時刻より後にしてください。");
   }
-  const result = await env.DB.prepare(
+  const months = new Set([existing.practice_date.slice(0, 7), practiceDate.slice(0, 7)]);
+  const revision = crypto.randomUUID();
+  const statements: D1PreparedStatement[] = [env.DB.prepare(
     `UPDATE practice_schedules
      SET practice_date = ?, start_time = ?, end_time = ?, title = ?,
          location = ?, note = ?,
          updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
      WHERE schedule_id = ? AND status = 'scheduled'`,
   ).bind(
-    date(input.practiceDate),
+    practiceDate,
     startTime,
     endTime,
     text(input.title ?? "通常練習", "練習名", 100, true),
     text(input.location, "会場", 100),
     text(input.note, "連絡事項", 500),
     scheduleId,
-  ).run();
-  if (Number(result.meta?.changes ?? 0) !== 1) {
+  )];
+  months.forEach((month) => {
+    statements.push(env.DB.prepare(
+      `INSERT INTO practice_schedule_notification_queue (
+         idempotency_key, schedule_id, notification_type, target_month
+       ) VALUES (?, ?, 'announcement', ?)`,
+    ).bind(`practice-schedule-month:${month}:edit:${revision}`, scheduleId, month));
+  });
+  const results = await env.DB.batch(statements);
+  if (Number(results[0]?.meta?.changes ?? 0) !== 1) {
     throw new PracticeError("終了済み、または存在しない練習日程は編集できません。", 409);
   }
   await completeExpiredPracticeSchedules(env);
+}
+
+export async function cancelPracticeSchedule(
+  env: PracticeEnv,
+  scheduleId: string,
+): Promise<void> {
+  if (!SCHEDULE_ID.test(scheduleId)) throw new PracticeError("練習日程を確認できませんでした。", 404);
+  const existing = await env.DB.prepare(
+    `SELECT practice_date FROM practice_schedules
+     WHERE schedule_id = ? AND status = 'scheduled'`,
+  ).bind(scheduleId).first<{ practice_date: string }>();
+  if (!existing) {
+    throw new PracticeError("終了済み、または存在しない練習日程は削除できません。", 409);
+  }
+  const month = existing.practice_date.slice(0, 7);
+  const results = await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE practice_schedules
+       SET status = 'canceled',
+           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+       WHERE schedule_id = ? AND status = 'scheduled'`,
+    ).bind(scheduleId),
+    env.DB.prepare(
+      `INSERT INTO practice_schedule_notification_queue (
+         idempotency_key, schedule_id, notification_type, target_month
+       ) VALUES (?, ?, 'announcement', ?)`,
+    ).bind(`practice-schedule-month:${month}:cancel:${crypto.randomUUID()}`, scheduleId, month),
+  ]);
+  if (Number(results[0]?.meta?.changes ?? 0) !== 1) {
+    throw new PracticeError("終了済み、または存在しない練習日程は削除できません。", 409);
+  }
 }
 
 export async function upsertPracticeScheduleChannel(
@@ -412,33 +478,18 @@ export async function loadPracticeScheduleReminder(
 
 export async function loadAnnouncementSchedules(
   env: PracticeEnv,
-  schedule: ScheduleRow,
+  month: string,
 ): Promise<ScheduleRow[]> {
-  let addedSchedules = [schedule];
-  if (schedule.registration_batch_id) {
-    const batch = await env.DB.prepare(
-      `SELECT schedule_id, practice_date, start_time, end_time, title, location,
-              note, status, created_by_member_id, created_by_admin_identity,
-              registration_batch_id, announcement_message_id
-       FROM practice_schedules
-       WHERE registration_batch_id = ? AND status = 'scheduled'
-       ORDER BY practice_date, COALESCE(start_time, '99:99'), created_at`,
-    ).bind(schedule.registration_batch_id).all<ScheduleRow>();
-    if (batch.results.length) addedSchedules = batch.results;
-  }
-
-  const months = [...new Set(addedSchedules.map((item) => item.practice_date.slice(0, 7)))];
-  const placeholders = months.map(() => "?").join(", ");
   const current = await env.DB.prepare(
     `SELECT schedule_id, practice_date, start_time, end_time, title, location,
             note, status, created_by_member_id, created_by_admin_identity,
             registration_batch_id, announcement_message_id
      FROM practice_schedules
-     WHERE status = 'scheduled'
-       AND substr(practice_date, 1, 7) IN (${placeholders})
+     WHERE status <> 'canceled'
+       AND substr(practice_date, 1, 7) = ?
      ORDER BY practice_date, COALESCE(start_time, '99:99'), created_at`,
-  ).bind(...months).all<ScheduleRow>();
-  return current.results.length ? current.results : addedSchedules;
+  ).bind(month).all<ScheduleRow>();
+  return current.results;
 }
 
 export async function enqueuePracticeScheduleReminders(
@@ -471,7 +522,9 @@ export async function processPracticeScheduleNotifications(
     `SELECT practice_schedule_notification_queue.delivery_id,
             practice_schedule_notification_queue.schedule_id,
             practice_schedule_notification_queue.notification_type,
+            practice_schedule_notification_queue.target_month,
             practice_schedule_notification_queue.attempts,
+            practice_discord_settings.guild_id,
             practice_discord_settings.schedule_channel_id
      FROM practice_schedule_notification_queue
      CROSS JOIN practice_discord_settings
@@ -485,21 +538,23 @@ export async function processPracticeScheduleNotifications(
     delivery_id: number;
     schedule_id: string;
     notification_type: "announcement" | "reminder";
+    target_month: string | null;
     attempts: number;
+    guild_id: string;
     schedule_channel_id: string;
   }>();
   let sent = 0;
   for (const delivery of deliveries.results) {
     try {
       const data = await loadSchedulePayloadData(env, delivery.schedule_id);
-      if (data.schedule.status !== "scheduled") {
+      if (delivery.notification_type === "reminder" && data.schedule.status !== "scheduled") {
         await env.DB.prepare(
           `UPDATE practice_schedule_notification_queue SET status = 'skipped'
            WHERE delivery_id = ?`,
         ).bind(delivery.delivery_id).run();
         continue;
       }
-      let message;
+      let message: { id: string };
       if (delivery.notification_type === "reminder") {
         message = await sendChannelMessage(
           env.DISCORD_BOT_TOKEN,
@@ -508,24 +563,97 @@ export async function processPracticeScheduleNotifications(
           fetcher,
         );
       } else {
-        const schedules = await loadAnnouncementSchedules(env, data.schedule);
+        const month = delivery.target_month ?? data.schedule.practice_date.slice(0, 7);
+        const [schedules, existing] = await Promise.all([
+          loadAnnouncementSchedules(env, month),
+          env.DB.prepare(
+            `SELECT guild_id, practice_month, channel_id, message_id
+             FROM practice_schedule_month_announcements
+             WHERE guild_id = ? AND practice_month = ?`,
+          ).bind(delivery.guild_id, month).first<MonthAnnouncementRow>(),
+        ]);
+        if (!schedules.length) {
+          if (existing) {
+            await deleteChannelMessage(
+              env.DISCORD_BOT_TOKEN,
+              existing.channel_id,
+              existing.message_id,
+              fetcher,
+            );
+          }
+          await env.DB.batch([
+            env.DB.prepare(
+              `UPDATE practice_schedule_notification_queue
+               SET status = 'sent', attempts = attempts + 1, discord_message_id = ?,
+                   error_message = NULL, sent_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+               WHERE delivery_id = ?`,
+            ).bind(existing?.message_id ?? null, delivery.delivery_id),
+            env.DB.prepare(
+              `DELETE FROM practice_schedule_month_announcements
+               WHERE guild_id = ? AND practice_month = ?`,
+            ).bind(delivery.guild_id, month),
+          ]);
+          sent += 1;
+          continue;
+        }
         const calendar = await generatePracticeScheduleCalendarPng(schedules);
         const calendarData = calendar.slice().buffer as ArrayBuffer;
-        message = await sendChannelMessageWithFiles(
-          env.DISCORD_BOT_TOKEN,
-          delivery.schedule_channel_id,
-          buildPracticeScheduleBatchAnnouncement({
-            schedules,
-            portalUrl: env.MEMBER_PORTAL_URL,
-          }),
-          [{
-            data: calendarData,
-            filename: "practice-schedule-calendar.png",
-            contentType: "image/png",
-            description: "練習日程カレンダー",
-          }],
-          fetcher,
-        );
+        const payload = buildPracticeScheduleBatchAnnouncement({
+          schedules,
+          portalUrl: env.MEMBER_PORTAL_URL,
+        });
+        const attachments = [{
+          data: calendarData,
+          filename: "practice-schedule-calendar.png",
+          contentType: "image/png",
+          description: "練習日程カレンダー",
+        }];
+        if (existing && existing.channel_id === delivery.schedule_channel_id) {
+          try {
+            message = await editChannelMessageWithFiles(
+              env.DISCORD_BOT_TOKEN,
+              existing.channel_id,
+              existing.message_id,
+              payload,
+              attachments,
+              fetcher,
+            );
+          } catch (error) {
+            if (!(error instanceof DiscordApiError) || error.status !== 404) throw error;
+            message = await sendChannelMessageWithFiles(
+              env.DISCORD_BOT_TOKEN,
+              delivery.schedule_channel_id,
+              payload,
+              attachments,
+              fetcher,
+            );
+          }
+        } else {
+          message = await sendChannelMessageWithFiles(
+            env.DISCORD_BOT_TOKEN,
+            delivery.schedule_channel_id,
+            payload,
+            attachments,
+            fetcher,
+          );
+          if (existing) {
+            deleteChannelMessage(
+              env.DISCORD_BOT_TOKEN,
+              existing.channel_id,
+              existing.message_id,
+              fetcher,
+            ).catch((error) => console.error("以前の練習日程メッセージを削除できませんでした。", error));
+          }
+        }
+        await env.DB.prepare(
+          `INSERT INTO practice_schedule_month_announcements (
+             guild_id, practice_month, channel_id, message_id, updated_at
+           ) VALUES (?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+           ON CONFLICT(guild_id, practice_month) DO UPDATE SET
+             channel_id = excluded.channel_id,
+             message_id = excluded.message_id,
+             updated_at = excluded.updated_at`,
+        ).bind(delivery.guild_id, month, delivery.schedule_channel_id, message.id).run();
       }
       const updates = [env.DB.prepare(
         `UPDATE practice_schedule_notification_queue
@@ -534,11 +662,12 @@ export async function processPracticeScheduleNotifications(
          WHERE delivery_id = ?`,
       ).bind(message.id, delivery.delivery_id)];
       if (delivery.notification_type === "announcement") {
+        const month = delivery.target_month ?? data.schedule.practice_date.slice(0, 7);
         updates.push(env.DB.prepare(
           `UPDATE practice_schedules
            SET announcement_message_id = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-           WHERE schedule_id = ?`,
-        ).bind(message.id, delivery.schedule_id));
+           WHERE substr(practice_date, 1, 7) = ? AND status <> 'canceled'`,
+        ).bind(message.id, month));
       }
       await env.DB.batch(updates);
       sent += 1;

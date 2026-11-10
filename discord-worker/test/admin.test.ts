@@ -267,6 +267,8 @@ describe("Admin Worker", () => {
     expect(html).toContain("fetch('/api/practice/schedules'");
     expect(html).toContain("method: 'POST'");
     expect(html).toContain("method: 'PATCH'");
+    expect(html).toContain("method: 'DELETE'");
+    expect(html).toContain("Discordの同月カレンダーも自動的に更新されます。");
     expect(html).toContain("practiceScheduleField('開始', 'time', 'startTime', { value: '18:00' })");
     expect(html).toContain("practiceScheduleField('終了', 'time', 'endTime', { value: '21:30' })");
     expect(html).toContain("value: '大久保東公民館'");
@@ -318,9 +320,14 @@ describe("Admin Worker", () => {
       prepare(sql: string) {
         prepared.push(sql);
         return {
-          bind: (..._values: unknown[]) => ({ run, all }),
+          bind: (..._values: unknown[]) => sql.includes("SELECT practice_date")
+            ? { first: vi.fn().mockResolvedValue({ practice_date: "2026-11-01" }) }
+            : { run, all, sql },
           all,
         };
+      },
+      async batch(statements: Array<{ sql?: string }>) {
+        return statements.map((_, index) => ({ meta: { changes: index === 0 ? 1 : 0 } }));
       },
     };
     const response = await handleAdminRequest(
@@ -345,6 +352,37 @@ describe("Admin Worker", () => {
 
     expect(response.status).toBe(200);
     expect(prepared.some((sql) => sql.includes("SET practice_date = ?"))).toBe(true);
+    await expect(response.json()).resolves.toMatchObject({ schedules: [] });
+  });
+
+  it("cancels a practice schedule through the practice administrator API", async () => {
+    const prepared: string[] = [];
+    const all = vi.fn().mockResolvedValue({ results: [] });
+    const adminDb = {
+      prepare(sql: string) {
+        prepared.push(sql);
+        return {
+          bind: (..._values: unknown[]) => sql.includes("SELECT practice_date")
+            ? { first: vi.fn().mockResolvedValue({ practice_date: "2026-11-03" }) }
+            : { sql },
+          all,
+        };
+      },
+      async batch(statements: Array<{ sql?: string }>) {
+        return statements.map(() => ({ meta: { changes: 1 } }));
+      },
+    };
+    const response = await handleAdminRequest(
+      new Request("https://admin.example.com/api/practice/schedules/PS-11111111-1111-4111-8111-111111111111", {
+        method: "DELETE",
+        headers: { Origin: "https://admin.example.com" },
+      }),
+      { ...env, DB: adminDb as unknown as D1Database },
+      authenticatedContext(),
+    );
+
+    expect(response.status).toBe(200);
+    expect(prepared.some((sql) => sql.includes("status = 'canceled'"))).toBe(true);
     await expect(response.json()).resolves.toMatchObject({ schedules: [] });
   });
 

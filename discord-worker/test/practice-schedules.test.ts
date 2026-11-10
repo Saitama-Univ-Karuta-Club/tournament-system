@@ -2,10 +2,12 @@ import { describe, expect, it, vi } from "vitest";
 import {
   buildPracticeScheduleBatchAnnouncement,
   buildPracticeScheduleReminder,
+  cancelPracticeSchedule,
   completeExpiredPracticeSchedules,
   createPracticeSchedules,
   enqueuePracticeScheduleReminders,
   loadAnnouncementSchedules,
+  processPracticeScheduleNotifications,
   savePracticeScheduleMemberResponse,
   updatePracticeSchedule,
 } from "../src/practice/schedules";
@@ -31,7 +33,7 @@ describe("practice schedule Discord messages", () => {
     const secondSchedule = {
       ...schedule,
       schedule_id: "PS-22222222-2222-4222-8222-222222222222",
-      practice_date: "2026-11-01",
+      practice_date: "2026-10-31",
       title: "休日練習",
     };
     const message = buildPracticeScheduleBatchAnnouncement({
@@ -40,7 +42,8 @@ describe("practice schedule Discord messages", () => {
     });
 
     expect(message.embeds?.[0]?.description).toContain("2026-10-30");
-    expect(message.embeds?.[0]?.description).toContain("2026-11-01");
+    expect(message.content).toContain("2026年10月");
+    expect(message.embeds?.[0]?.description).toContain("2026-10-31");
     expect(message.embeds?.[0]?.image?.url).toBe("attachment://practice-schedule-calendar.png");
     expect(message.components?.[0]?.components).toEqual([expect.objectContaining({
       style: 5,
@@ -88,32 +91,23 @@ describe("practice schedule Discord messages", () => {
 });
 
 describe("practice schedule persistence", () => {
-  it("loads the latest calendar with existing schedules in every newly added month", async () => {
-    const added = {
-      ...schedule,
-      schedule_id: "PS-33333333-3333-4333-8333-333333333333",
-      practice_date: "2026-11-15",
-      registration_batch_id: "PSB-33333333-3333-4333-8333-333333333333",
-    };
+  it("loads every non-canceled schedule in the target month", async () => {
     const existing = [
       { ...schedule, practice_date: "2026-11-12" },
       { ...schedule, schedule_id: "PS-22222222-2222-4222-8222-222222222222", practice_date: "2026-11-13" },
-      added,
+      { ...schedule, schedule_id: "PS-33333333-3333-4333-8333-333333333333", practice_date: "2026-11-15" },
     ];
-    const all = vi.fn()
-      .mockResolvedValueOnce({ results: [added] })
-      .mockResolvedValueOnce({ results: existing });
+    const all = vi.fn().mockResolvedValue({ results: existing });
     const bind = vi.fn(() => ({ all }));
     const prepare = vi.fn(() => ({ bind }));
 
     await expect(loadAnnouncementSchedules(
       { DB: { prepare } as unknown as D1Database },
-      added,
+      "2026-11",
     )).resolves.toEqual(existing);
 
-    expect(bind).toHaveBeenNthCalledWith(1, added.registration_batch_id);
-    expect(bind).toHaveBeenNthCalledWith(2, "2026-11");
-    expect(prepare).toHaveBeenNthCalledWith(2, expect.stringContaining("substr(practice_date, 1, 7) IN (?)"));
+    expect(bind).toHaveBeenCalledWith("2026-11");
+    expect(prepare).toHaveBeenCalledWith(expect.stringContaining("status <> 'canceled'"));
   });
 
   it("marks schedules completed after their JST end time", async () => {
@@ -131,14 +125,26 @@ describe("practice schedule persistence", () => {
   });
 
   it("updates an upcoming schedule and rechecks its completion", async () => {
-    const updateRun = vi.fn().mockResolvedValue({ meta: { changes: 1 } });
     const completionRun = vi.fn().mockResolvedValue({ meta: { changes: 0 } });
-    const prepare = vi.fn()
-      .mockReturnValueOnce({ bind: vi.fn(() => ({ run: updateRun })) })
-      .mockReturnValueOnce({ bind: vi.fn(() => ({ run: completionRun })) });
+    const batched: Array<{ sql: string; values: unknown[] }> = [];
+    const db = {
+      prepare(sql: string) {
+        return {
+          bind: (...values: unknown[]) => {
+            if (sql.includes("SELECT practice_date")) return { first: vi.fn().mockResolvedValue({ practice_date: "2026-10-30" }) };
+            if (sql.includes("UPDATE practice_schedules") && sql.includes("practice_date < ?")) return { run: completionRun };
+            return { sql, values };
+          },
+        };
+      },
+      async batch(statements: Array<{ sql: string; values: unknown[] }>) {
+        batched.push(...statements);
+        return statements.map((_, index) => ({ meta: { changes: index === 0 ? 1 : 0 } }));
+      },
+    };
 
     await updatePracticeSchedule(
-      { DB: { prepare } as unknown as D1Database },
+      { DB: db as unknown as D1Database },
       schedule.schedule_id,
       {
         practiceDate: "2026-11-03",
@@ -150,12 +156,13 @@ describe("practice schedule persistence", () => {
       },
     );
 
-    expect(prepare).toHaveBeenNthCalledWith(1, expect.stringContaining("UPDATE practice_schedules"));
-    expect(updateRun).toHaveBeenCalledOnce();
+    expect(batched[0].sql).toContain("SET practice_date = ?");
+    expect(batched.filter((item) => item.sql.includes("practice_schedule_notification_queue"))).toHaveLength(2);
+    expect(batched.flatMap((item) => item.values)).toEqual(expect.arrayContaining(["2026-10", "2026-11"]));
     expect(completionRun).toHaveBeenCalledOnce();
   });
 
-  it("inserts every schedule and one announcement for the batch", async () => {
+  it("inserts every schedule and one monthly announcement per affected month", async () => {
     type Statement = { sql: string; values: unknown[] };
     const batched: Statement[] = [];
     const db = {
@@ -180,13 +187,103 @@ describe("practice schedule persistence", () => {
     );
 
     expect(created.scheduleIds).toHaveLength(2);
-    expect(batched).toHaveLength(3);
+    expect(batched).toHaveLength(4);
     expect(batched[0].sql).toContain("INSERT INTO practice_schedules");
     expect(batched[0].values).toContain("admin@example.com");
     expect(batched[1].sql).toContain("INSERT INTO practice_schedules");
     expect(batched[2].sql).toContain("practice_schedule_notification_queue");
+    expect(batched[3].sql).toContain("practice_schedule_notification_queue");
     expect(batched[0].values.at(-1)).toBe(batched[1].values.at(-1));
-    expect(batched[2].values[0]).toMatch(/^practice-schedule-batch:PSB-/);
+    expect(batched[2].values[0]).toMatch(/^practice-schedule-month:2026-10:PSB-/);
+    expect(batched[2].values.at(-1)).toBe("2026-10");
+    expect(batched[3].values.at(-1)).toBe("2026-11");
+  });
+
+  it("cancels a schedule and queues its monthly calendar refresh", async () => {
+    const batched: Array<{ sql: string; values: unknown[] }> = [];
+    const db = {
+      prepare(sql: string) {
+        return { bind: (...values: unknown[]) => sql.includes("SELECT practice_date")
+          ? { first: vi.fn().mockResolvedValue({ practice_date: "2026-11-15" }) }
+          : { sql, values } };
+      },
+      async batch(statements: Array<{ sql: string; values: unknown[] }>) {
+        batched.push(...statements);
+        return [{ meta: { changes: 1 } }, { meta: { changes: 1 } }];
+      },
+    };
+
+    await cancelPracticeSchedule({ DB: db as unknown as D1Database }, schedule.schedule_id);
+    expect(batched[0].sql).toContain("status = 'canceled'");
+    expect(batched[1].values.at(-1)).toBe("2026-11");
+  });
+
+  it("edits the existing Discord calendar message for the month", async () => {
+    const novemberSchedule = { ...schedule, practice_date: "2026-11-15" };
+    const deliveries = [{
+      delivery_id: 7,
+      schedule_id: novemberSchedule.schedule_id,
+      notification_type: "announcement",
+      target_month: "2026-11",
+      attempts: 0,
+      guild_id: "guild-1",
+      schedule_channel_id: "channel-1",
+    }];
+    const batched: Array<{ sql: string; values: unknown[] }> = [];
+    const db = {
+      prepare(sql: string) {
+        return {
+          all: vi.fn().mockResolvedValue(sql.includes("CROSS JOIN practice_discord_settings")
+            ? { results: deliveries }
+            : { results: [] }),
+          bind: (...values: unknown[]) => {
+            if (sql.includes("practice_date < ?")) return { run: vi.fn().mockResolvedValue({ meta: { changes: 0 } }) };
+            if (sql.includes("FROM practice_schedules WHERE schedule_id")) {
+              return { first: vi.fn().mockResolvedValue(novemberSchedule) };
+            }
+            if (sql.includes("FROM members")) return { all: vi.fn().mockResolvedValue({ results: [] }) };
+            if (sql.includes("status <> 'canceled'")) {
+              return { all: vi.fn().mockResolvedValue({ results: [novemberSchedule] }) };
+            }
+            if (sql.includes("FROM practice_schedule_month_announcements")) {
+              return { first: vi.fn().mockResolvedValue({
+                guild_id: "guild-1",
+                practice_month: "2026-11",
+                channel_id: "channel-1",
+                message_id: "monthly-message-1",
+              }) };
+            }
+            if (sql.includes("INSERT INTO practice_schedule_month_announcements")) {
+              return { run: vi.fn().mockResolvedValue({ success: true }) };
+            }
+            return { sql, values };
+          },
+        };
+      },
+      async batch(statements: Array<{ sql: string; values: unknown[] }>) {
+        batched.push(...statements);
+        return statements.map(() => ({ success: true }));
+      },
+    };
+    const fetcher = vi.fn().mockResolvedValue(new Response(
+      JSON.stringify({ id: "monthly-message-1", channel_id: "channel-1" }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    ));
+
+    await expect(processPracticeScheduleNotifications(
+      {
+        DB: db as unknown as D1Database,
+        DISCORD_BOT_TOKEN: "token",
+        MEMBER_PORTAL_URL: "https://portal.example.com",
+      },
+      fetcher as typeof fetch,
+      new Date("2026-11-10T00:00:00Z"),
+    )).resolves.toBe(1);
+
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(fetcher.mock.calls[0][0]).toContain("/channels/channel-1/messages/monthly-message-1");
+    expect(fetcher.mock.calls[0][1]).toMatchObject({ method: "PATCH" });
+    expect(batched[0].sql).toContain("status = 'sent'");
   });
 
   it("saves a portal response against the authenticated member", async () => {
