@@ -11,7 +11,12 @@ import {
   savePracticeScheduleMemberResponse,
   updatePracticeSchedule,
 } from "../src/practice/schedules";
-import { generatePracticeScheduleCalendarPng } from "../src/practice/calendar-image";
+import {
+  buildPracticeScheduleCalendarSvg,
+  generatePracticeScheduleCalendarPng,
+  practiceCalendarNoteLines,
+  practiceCalendarTimeLabel,
+} from "../src/practice/calendar-image";
 
 const schedule = {
   schedule_id: "PS-11111111-1111-4111-8111-111111111111",
@@ -64,6 +69,39 @@ describe("practice schedule Discord messages", () => {
     expect(view.getUint32(16)).toBe(1600);
     expect(view.getUint32(20)).toBeGreaterThan(500);
     expect(png.byteLength).toBeLessThan(8_000_000);
+  });
+
+  it("maps start and end times to the six calendar time bands", () => {
+    const label = (start_time: string, end_time: string) => practiceCalendarTimeLabel({
+      practice_date: "2026-11-03",
+      start_time,
+      end_time,
+    });
+    expect(label("09:00", "12:00")).toBe("午前");
+    expect(label("13:00", "17:00")).toBe("午後");
+    expect(label("18:00", "21:30")).toBe("夜間");
+    expect(label("09:00", "17:00")).toBe("午前・午後");
+    expect(label("13:00", "21:30")).toBe("午後・夜間");
+    expect(label("09:00", "21:30")).toBe("全日");
+  });
+
+  it("wraps calendar notes at seven characters and truncates after thirteen", () => {
+    expect(practiceCalendarNoteLines("12345678901234")).toEqual(["1234567", "8901234"]);
+    expect(practiceCalendarNoteLines("123456789012345")).toEqual(["1234567", "890123…"]);
+  });
+
+  it("draws the date, time band, venue and compact note in four lines", () => {
+    const svg = buildPracticeScheduleCalendarSvg([{
+      practice_date: "2026-11-03",
+      start_time: "18:00",
+      end_time: "21:30",
+      location: "大久保東公民館",
+      note: "123456789012345",
+    }]);
+    expect(svg).toContain(">3日 夜間</text>");
+    expect(svg).toContain(">大久保東</text>");
+    expect(svg).toContain(">1234567</text>");
+    expect(svg).toContain(">890123…</text>");
   });
 
   it("groups the reminder by each member response", () => {

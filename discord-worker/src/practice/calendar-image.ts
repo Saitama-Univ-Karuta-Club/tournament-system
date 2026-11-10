@@ -1,5 +1,5 @@
 import { Resvg } from "@cf-wasm/resvg";
-import { getCalendarFonts } from "./calendar-fonts.generated";
+import { getGeneralFonts } from "../general/font.generated";
 
 export interface PracticeCalendarSchedule {
   practice_date: string;
@@ -33,20 +33,47 @@ function monthKeys(schedules: PracticeCalendarSchedule[]): string[] {
   return [...new Set(schedules.map((schedule) => schedule.practice_date.slice(0, 7)))].sort();
 }
 
-function timeLabel(schedule: PracticeCalendarSchedule): string {
+function timeMinutes(value: string): number {
+  const [hours, minutes] = value.split(":").map(Number);
+  return hours * 60 + minutes;
+}
+
+export function practiceCalendarTimeLabel(schedule: PracticeCalendarSchedule): string {
   if (!schedule.start_time) return "時間未定";
-  const startHour = Number(schedule.start_time.slice(0, 2));
-  const endHour = schedule.end_time ? Number(schedule.end_time.slice(0, 2)) : startHour;
-  if (startHour < 12 && endHour >= 12) return endHour >= 18 ? "午前、午後、夜間" : "午前、午後";
-  if (startHour < 17) return endHour >= 18 ? "午後、夜間" : "午後";
+  const start = timeMinutes(schedule.start_time);
+  const end = schedule.end_time ? timeMinutes(schedule.end_time) : start;
+  const startsInMorning = start < 12 * 60;
+  const reachesAfternoon = end > 12 * 60;
+  const reachesNight = end > 18 * 60;
+  if (startsInMorning) {
+    if (reachesNight) return "全日";
+    return reachesAfternoon ? "午前・午後" : "午前";
+  }
+  if (start < 18 * 60) return reachesNight ? "午後・夜間" : "午後";
   return "夜間";
+}
+
+function truncateCalendarLine(value: string, maxLength = 7): string {
+  const characters = [...value.trim()];
+  return characters.length <= maxLength
+    ? characters.join("")
+    : `${characters.slice(0, maxLength - 1).join("")}…`;
 }
 
 function venueLabel(schedule: PracticeCalendarSchedule): string {
   const location = schedule.location?.trim() ?? "";
   if (location.includes("大久保東公民館")) return "大久保東";
-  if (schedule.title?.trim() === "通常練習") return "通常練習";
-  return "会場未定";
+  return location ? truncateCalendarLine(location) : "会場未定";
+}
+
+export function practiceCalendarNoteLines(note?: string | null): string[] {
+  const normalized = (note ?? "").trim().replace(/\s+/g, " ");
+  if (!normalized) return [];
+  const characters = [...normalized];
+  const displayed = characters.length > 14
+    ? [...characters.slice(0, 13), "…"]
+    : characters.slice(0, 14);
+  return [displayed.slice(0, 7).join(""), displayed.slice(7, 14).join("")].filter(Boolean);
 }
 
 function daysInMonth(year: number, month: number): number {
@@ -80,7 +107,6 @@ function drawMonthSvg(
   const titleSize = compact ? 34 : 58;
   const weekdaySize = compact ? 13 : 18;
   const daySize = compact ? 12 : 16;
-  const eventSize = compact ? 17 : 30;
   const titleY = y + (compact ? 46 : 78);
   const parts: string[] = [text(`${month}月${year}`, x + padding, titleY, titleSize, COLORS.green, { weight: 400 })];
 
@@ -134,28 +160,34 @@ function drawMonthSvg(
         shownDay = day - currentDays;
         muted = true;
       }
-      parts.push(text(
-        String(shownDay),
-        cellX + (compact ? 6 : 10),
-        rowY + (compact ? 16 : 22),
-        daySize,
-        muted ? COLORS.muted : COLORS.ink,
-      ));
       const dayEvents = !muted ? events.get(day) : undefined;
       if (dayEvents?.length) {
         const clipId = `cell-${clipIndex}`;
         clipIndex += 1;
         const contentX = cellX + (compact ? 6 : 10);
-        const contentY = rowY + (compact ? 39 : 59);
+        const headerY = rowY + (compact ? 15 : 20);
+        const venueY = rowY + (compact ? 33 : 52);
+        const noteFirstY = rowY + (compact ? 49 : 79);
+        const noteSecondY = rowY + (compact ? 65 : 105);
+        const venueSize = compact ? 17 : 28;
+        const noteSize = compact ? 13 : 23;
         parts.push(`<clipPath id="${clipId}"><rect x="${cellX + 2}" y="${rowY + 2}" width="${cellWidth - 4}" height="${rowHeight - 4}"/></clipPath>`);
-        const labels = [...new Set(dayEvents.map(timeLabel))].join("、");
+        const labels = [...new Set(dayEvents.map(practiceCalendarTimeLabel))].join("・");
+        const noteLines = practiceCalendarNoteLines(dayEvents[0].note);
         parts.push(`<g clip-path="url(#${clipId})">`);
-        parts.push(text(labels, contentX, contentY, eventSize, COLORS.ink, { weight: 700 }));
-        parts.push(text(venueLabel(dayEvents[0]), contentX, contentY + eventSize * 1.25, eventSize, COLORS.coral, { weight: 700 }));
-        if (dayEvents.length > 1) {
-          parts.push(text(`ほか${dayEvents.length - 1}件`, contentX, contentY + eventSize * 2.25, Math.max(11, eventSize * 0.55), COLORS.muted));
-        }
+        parts.push(text(`${shownDay}日 ${labels}`, contentX, headerY, daySize, COLORS.ink, { weight: 700 }));
+        parts.push(text(venueLabel(dayEvents[0]), contentX, venueY, venueSize, COLORS.coral, { weight: 700 }));
+        if (noteLines[0]) parts.push(text(noteLines[0], contentX, noteFirstY, noteSize, COLORS.ink));
+        if (noteLines[1]) parts.push(text(noteLines[1], contentX, noteSecondY, noteSize, COLORS.ink));
         parts.push("</g>");
+      } else {
+        parts.push(text(
+          String(shownDay),
+          cellX + (compact ? 6 : 10),
+          rowY + (compact ? 16 : 22),
+          daySize,
+          muted ? COLORS.muted : COLORS.ink,
+        ));
       }
     }
   }
@@ -203,7 +235,7 @@ export async function generatePracticeScheduleCalendarPng(
 ): Promise<Uint8Array> {
   const renderer = await Resvg.async(buildPracticeScheduleCalendarSvg(schedules), {
     font: {
-      fontBuffers: getCalendarFonts(),
+      fontBuffers: getGeneralFonts(),
       defaultFontFamily: "Noto Sans JP",
       sansSerifFamily: "Noto Sans JP",
     },
