@@ -123,7 +123,26 @@ function batchScheduleLine(schedule: ScheduleRow): string {
   const title = compact(schedule.title);
   const location = compact(schedule.location);
   const details = [title, location].filter(Boolean).join("／");
-  return `**${schedule.practice_date} ${timeRange(schedule)}**${details ? `\n${details}` : ""}`;
+  const note = compact(schedule.note, 180);
+  return `**${schedule.practice_date} ${timeRange(schedule)}**${details ? `\n${details}` : ""}${note ? `\n連絡事項：${note}` : ""}`;
+}
+
+function batchScheduleDescription(schedules: ScheduleRow[]): string {
+  const lines: string[] = [];
+  let length = 0;
+  for (let index = 0; index < schedules.length; index += 1) {
+    const line = batchScheduleLine(schedules[index]);
+    const separator = lines.length ? 2 : 0;
+    const remaining = schedules.length - index;
+    const suffix = `\n\nほか${remaining}件の日程はメンバーポータルで確認できます。`;
+    if (length + separator + line.length + suffix.length > 4_000) {
+      lines.push(`ほか${remaining}件の日程はメンバーポータルで確認できます。`);
+      break;
+    }
+    lines.push(line);
+    length += separator + line.length;
+  }
+  return lines.join("\n\n");
 }
 
 export function buildPracticeScheduleBatchAnnouncement(input: {
@@ -137,7 +156,7 @@ export function buildPracticeScheduleBatchAnnouncement(input: {
     content: `【かるた練習帖】${monthLabel}の練習日程をお知らせします。`,
     embeds: [{
       title: `${monthLabel} 練習日程（${input.schedules.length}件）`,
-      description: input.schedules.map(batchScheduleLine).join("\n\n"),
+      description: batchScheduleDescription(input.schedules),
       color: 0x4262ad,
       image: { url: "attachment://practice-schedule-calendar.png" },
       fields: portalUrl

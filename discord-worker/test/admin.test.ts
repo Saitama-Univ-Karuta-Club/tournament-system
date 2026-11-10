@@ -269,6 +269,7 @@ describe("Admin Worker", () => {
     expect(html).toContain("method: 'PATCH'");
     expect(html).toContain("method: 'DELETE'");
     expect(html).toContain("Discordの同月カレンダーも自動的に更新されます。");
+    expect(html).toContain("practice-schedule-card-note");
     expect(html).toContain("practiceScheduleField('開始', 'time', 'startTime', { value: '18:00' })");
     expect(html).toContain("practiceScheduleField('終了', 'time', 'endTime', { value: '21:30' })");
     expect(html).toContain("value: '大久保東公民館'");

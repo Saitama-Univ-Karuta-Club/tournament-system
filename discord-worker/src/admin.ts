@@ -3760,6 +3760,7 @@ function adminHtml(
     .practice-schedule-card { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 12px 14px; border: 1px solid #dce1eb; border-radius: 9px; }
     .practice-schedule-card-title { font-weight: 800; }
     .practice-schedule-card-meta { margin-top: 3px; color: #596579; font-size: var(--font-size-note); }
+    .practice-schedule-card-note { margin-top: 6px; padding: 6px 8px; border-left: 3px solid var(--site-primary); border-radius: 0 6px 6px 0; color: var(--site-ink); background: var(--site-primary-light); font-size: var(--font-size-note); white-space: pre-wrap; }
     .practice-schedule-card-status { display: inline-flex; margin-left: 7px; padding: 2px 7px; border-radius: 999px; color: #596579; background: #edf0f5; font-size: var(--font-size-meta); font-weight: 750; vertical-align: middle; }
     .practice-schedule-card-status.scheduled { color: #17643a; background: #e4f7ec; }
     .practice-schedule-card-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; flex-wrap: wrap; }
@@ -4610,6 +4611,7 @@ function adminHtml(
           ? schedule.start_time + (schedule.end_time ? '〜' + schedule.end_time : '〜')
           : '時刻未定';
         details.append(element('div', 'practice-schedule-card-meta', time + (schedule.location ? '・' + schedule.location : '')));
+        if (schedule.note) details.append(element('div', 'practice-schedule-card-note', '連絡事項：' + schedule.note));
         const counts = { yes: 0, maybe: 0, no: 0 };
         schedule.responses.forEach((response) => { counts[response.response] += 1; });
         const countBox = element('div', 'practice-schedule-counts');

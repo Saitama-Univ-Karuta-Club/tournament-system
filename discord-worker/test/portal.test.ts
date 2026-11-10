@@ -135,6 +135,7 @@ describe("member portal", () => {
     expect(html).toContain('data-practice-view="results">練習結果入力</button>');
     expect(html).toContain('data-practice-view="schedules">練習日程</button>');
     expect(html).toMatch(/data-practice-view="schedules">練習日程<\/button>[\s\S]*data-practice-view="create">練習を作成<\/button>[\s\S]*data-practice-view="results">練習結果入力<\/button>/);
+    expect(html).toContain("practice-schedule-note");
     expect(html).toContain("let selectedPracticeView='schedules'");
     expect(html).toContain('id="practice-schedule-response-list"');
     expect(html).toContain('class="practice-schedule-attendees"');

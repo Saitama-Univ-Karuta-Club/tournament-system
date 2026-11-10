@@ -44,6 +44,7 @@ describe("practice schedule Discord messages", () => {
     expect(message.embeds?.[0]?.description).toContain("2026-10-30");
     expect(message.content).toContain("2026年10月");
     expect(message.embeds?.[0]?.description).toContain("2026-10-31");
+    expect(message.embeds?.[0]?.description).toContain("連絡事項：札を持参してください。");
     expect(message.embeds?.[0]?.image?.url).toBe("attachment://practice-schedule-calendar.png");
     expect(message.components?.[0]?.components).toEqual([expect.objectContaining({
       style: 5,
