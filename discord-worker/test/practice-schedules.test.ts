@@ -17,6 +17,7 @@ import {
   practiceCalendarNoteLines,
   practiceCalendarTimeLabel,
 } from "../src/practice/calendar-image";
+import { DEFAULT_PRACTICE_SCHEDULE_SETTINGS } from "../src/practice/schedule-settings";
 
 const schedule = {
   schedule_id: "PS-11111111-1111-4111-8111-111111111111",
@@ -83,6 +84,31 @@ describe("practice schedule Discord messages", () => {
     expect(label("09:00", "17:00")).toBe("午前・午後");
     expect(label("13:00", "21:30")).toBe("午後・夜間");
     expect(label("09:00", "21:30")).toBe("全日");
+  });
+
+  it("uses configured time periods and venue abbreviations", () => {
+    const settings = {
+      ...DEFAULT_PRACTICE_SCHEDULE_SETTINGS,
+      morningStartTime: "08:30",
+      morningEndTime: "11:30",
+      afternoonStartTime: "12:30",
+      afternoonEndTime: "16:30",
+      eveningStartTime: "17:30",
+      eveningEndTime: "20:30",
+      venues: [{ name: "中央市民会館", shortName: "中央会館" }],
+      defaultVenue: "中央市民会館",
+    };
+    expect(practiceCalendarTimeLabel({
+      practice_date: "2026-11-03",
+      start_time: "12:30",
+      end_time: "20:30",
+    }, settings)).toBe("午後・夜間");
+    expect(buildPracticeScheduleCalendarSvg([{
+      practice_date: "2026-11-03",
+      start_time: "17:30",
+      end_time: "20:30",
+      location: "中央市民会館",
+    }], settings)).toContain(">中央会館</text>");
   });
 
   it("wraps calendar notes at seven characters and truncates after thirteen", () => {
@@ -272,6 +298,7 @@ describe("practice schedule persistence", () => {
     const db = {
       prepare(sql: string) {
         return {
+          first: vi.fn().mockResolvedValue(null),
           all: vi.fn().mockResolvedValue(sql.includes("CROSS JOIN practice_discord_settings")
             ? { results: deliveries }
             : { results: [] }),

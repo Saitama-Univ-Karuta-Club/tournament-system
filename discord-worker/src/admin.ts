@@ -90,6 +90,12 @@ import {
   listPracticeSchedules,
   updatePracticeSchedule,
 } from "./practice/schedules";
+import {
+  getPracticeScheduleSettings,
+  PracticeScheduleSettingError,
+  resetPracticeScheduleSettings,
+  savePracticeScheduleSettings,
+} from "./practice/schedule-settings";
 import { PracticeError } from "./practice/service";
 import {
   getSiteDesignSetting,
@@ -3306,6 +3312,7 @@ function pagePermission(page: AdminPage): AdminPermission | null {
 function apiPermission(pathname: string): AdminPermission | null {
   if (pathname === "/api/session") return null;
   if (pathname === "/api/settings/design") return null;
+  if (pathname === "/api/settings/practice-schedules") return "practice";
   if (pathname.startsWith("/api/practice/")) return "practice";
   if (pathname === "/api/members" || pathname.startsWith("/api/members/")) return null;
   if (pathname === "/api/member-requests" || pathname.startsWith("/api/member-requests/")) return null;
@@ -3719,6 +3726,7 @@ function adminHtml(
     .settings-panel li { padding: 10px 0; border-top: 1px solid #e7eaf0; }
     .settings-panel li:first-child { border-top: 0; }
     body[data-can-manage-tournaments="false"] .tournament-setting { display: none !important; }
+    body[data-can-manage-practice="false"] .practice-setting { display: none !important; }
     .design-settings-controls { display: grid; grid-template-columns: minmax(180px, .65fr) minmax(260px, 1.35fr) auto; gap: 12px; align-items: end; }
     .design-settings-controls > label { color: #263550; font-weight: 750; }
     .design-color-controls { display: grid; grid-template-columns: 54px minmax(0, 1fr); gap: 7px; margin-top: 5px; }
@@ -3802,6 +3810,22 @@ function adminHtml(
     .deadline-settings-fixed { color: #697386; font-size: var(--font-size-note); }
     .deadline-settings-actions { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; margin-top: 14px; }
     .deadline-settings-actions .status-message { margin-left: 2px; }
+    .practice-setting-block { margin-top: 30px; padding-top: 24px; border-top: 1px solid #dce1eb; }
+    .practice-setting-block h4 { margin: 0 0 7px; font-size: var(--font-size-section); }
+    .practice-period-grid { display: grid; grid-template-columns: repeat(3, minmax(150px, 1fr)); gap: 10px; max-width: 760px; }
+    .practice-period-card { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 12px; border: 1px solid #dce1eb; border-radius: 9px; background: #f8f9fc; }
+    .practice-period-card strong { grid-column: 1 / -1; }
+    .practice-period-card label, .practice-default-grid label { color: #465166; font-size: var(--font-size-note); font-weight: 750; }
+    .practice-period-card input, .practice-default-grid select { display: block; width: 100%; margin-top: 4px; }
+    .practice-default-grid { display: grid; grid-template-columns: repeat(2, minmax(180px, 280px)); gap: 10px; margin-top: 13px; }
+    .practice-venue-settings { display: grid; gap: 8px; max-width: 760px; margin-top: 18px; }
+    .practice-venue-settings-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .practice-venue-settings-head h5 { margin: 0; font-size: var(--font-size-body); }
+    .practice-venue-row { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(100px, .55fr) auto; gap: 8px; align-items: end; }
+    .practice-venue-row label { color: #465166; font-size: var(--font-size-note); font-weight: 750; }
+    .practice-venue-row input { display: block; width: 100%; margin-top: 4px; }
+    .practice-venue-row button { min-height: 40px; }
+    @media (max-width: 760px) { .practice-period-grid, .practice-default-grid { grid-template-columns: 1fr; } .practice-venue-row { grid-template-columns: 1fr 1fr; } .practice-venue-row button { grid-column: 1 / -1; } }
     .manual-workspace { display: grid; grid-template-columns: 190px minmax(0, 1fr); min-width: 0; border-top: 1px solid #dce1eb; }
     .manual-menu { position: sticky; top: 16px; display: grid; align-content: start; gap: 13px; min-width: 0; padding: 13px 16px 13px 0; border-right: 1px solid #dce1eb; }
     .manual-menu-group { display: grid; gap: 2px; }
@@ -3920,7 +3944,7 @@ function adminHtml(
     }
   </style>
 </head>
-<body data-page="${page}" data-can-manage-tournaments="${String(canManageTournaments)}">
+<body data-page="${page}" data-can-manage-tournaments="${String(canManageTournaments)}" data-can-manage-practice="${String(canManagePractice)}">
   <header><div class="header-inner"><div class="admin-brand"><span class="admin-brand-name">埼玉大学かるた会</span><h1>${portalName}</h1></div><span class="identity-wrap"><span id="identity">認証情報を確認中…</span><a id="logout" href="/auth/logout" hidden>ログアウト</a></span></div></header>
   <div class="tab-bar">
     <nav class="tabs" aria-label="管理画面メニュー">
@@ -3995,6 +4019,7 @@ function adminHtml(
       <h2 id="practice-schedule-title">練習日程を登録</h2>
       <p class="practice-schedule-intro">複数の日程をまとめて登録し、かるた練習帖からDiscordへ案内します。</p>
       <form id="practice-schedule-form">
+        <datalist id="practice-venue-options"></datalist>
         <div id="practice-schedule-rows" class="practice-schedule-rows"></div>
         <div class="actions practice-schedule-actions"><span id="practice-schedule-result" class="status-message" role="status" aria-live="polite"></span><button id="practice-schedule-add" type="button" class="practice-schedule-add">日程を追加</button><button id="practice-schedule-submit" type="submit">まとめて登録</button></div>
       </form>
@@ -4030,7 +4055,7 @@ function adminHtml(
         <nav class="settings-menu" role="tablist" aria-label="設定項目">
           <button class="settings-menu-item" type="button" role="tab" aria-selected="true" aria-controls="design-settings" data-settings-view="design">デザイン</button>
           <button class="settings-menu-item tournament-setting" type="button" role="tab" aria-selected="false" aria-controls="message-settings" data-settings-view="messages">Discord Botメッセージ</button>
-          <button class="settings-menu-item tournament-setting" type="button" role="tab" aria-selected="false" aria-controls="deadline-settings" data-settings-view="deadlines">自動入力・期限</button>
+          <button class="settings-menu-item" type="button" role="tab" aria-selected="false" aria-controls="deadline-settings" data-settings-view="deadlines">自動入力・期限</button>
           <button class="settings-menu-item tournament-setting" type="button" role="tab" aria-selected="false" aria-controls="database-settings" data-settings-view="database">データ管理</button>
           <button class="settings-menu-item tournament-setting" type="button" role="tab" aria-selected="false" aria-controls="manual-settings" data-settings-view="manuals">運用マニュアル</button>
         </nav>
@@ -4066,11 +4091,12 @@ function adminHtml(
               </form>
             </div>
           </section>
-          <section class="settings-panel tournament-setting" id="deadline-settings" role="tabpanel" hidden>
+          <section class="settings-panel" id="deadline-settings" role="tabpanel" hidden>
             <div class="settings-panel-head"><h3>自動入力・期限</h3><span id="deadline-settings-customized" class="settings-status">読み込み中…</span></div>
-            <p>大会新規登録と参加費案内で自動入力する期限、未回答リマインダーの送信日時を設定します。保存済みの大会日時は変更されません。</p>
-            <div id="deadline-setting-status" class="status-message" role="status" aria-live="polite">読み込み中…</div>
-            <form id="deadline-settings-form">
+            <div class="tournament-setting">
+              <p>大会新規登録と参加費案内で自動入力する期限、未回答リマインダーの送信日時を設定します。保存済みの大会日時は変更されません。</p>
+              <div id="deadline-setting-status" class="status-message" role="status" aria-live="polite">読み込み中…</div>
+              <form id="deadline-settings-form">
               <div class="deadline-settings-table-wrap">
                 <table class="deadline-settings-table">
                   <thead><tr><th>自動設定する項目</th><th>基準</th><th>何日前</th><th>時刻</th></tr></thead>
@@ -4082,8 +4108,30 @@ function adminHtml(
                   </tbody>
                 </table>
               </div>
-              <div class="deadline-settings-actions"><button id="save-deadline-settings" type="submit">設定を保存</button><button id="reset-deadline-settings" type="button" class="secondary">初期値に戻す</button><span id="deadline-settings-result" class="status-message" role="status" aria-live="polite"></span></div>
-            </form>
+                <div class="deadline-settings-actions"><button id="save-deadline-settings" type="submit">設定を保存</button><button id="reset-deadline-settings" type="button" class="secondary">初期値に戻す</button><span id="deadline-settings-result" class="status-message" role="status" aria-live="polite"></span></div>
+              </form>
+            </div>
+            <div class="practice-setting practice-setting-block">
+              <h4>練習日程</h4>
+              <p>カレンダーに表示する時間帯と会場略称、新規日程の初期値を設定します。正式な時刻・会場名・連絡事項はDiscord本文とポータルにそのまま表示されます。</p>
+              <div id="practice-schedule-setting-status" class="status-message" role="status" aria-live="polite">読み込み中…</div>
+              <form id="practice-schedule-settings-form">
+                <div class="practice-period-grid">
+                  <div class="practice-period-card"><strong>午前</strong><label>開始<input type="time" name="morningStartTime" required></label><label>終了<input type="time" name="morningEndTime" required></label></div>
+                  <div class="practice-period-card"><strong>午後</strong><label>開始<input type="time" name="afternoonStartTime" required></label><label>終了<input type="time" name="afternoonEndTime" required></label></div>
+                  <div class="practice-period-card"><strong>夜間</strong><label>開始<input type="time" name="eveningStartTime" required></label><label>終了<input type="time" name="eveningEndTime" required></label></div>
+                </div>
+                <div class="practice-default-grid">
+                  <label>新規日程の既定時間帯<select name="defaultTimeBand"><option value="morning">午前</option><option value="afternoon">午後</option><option value="evening">夜間</option></select></label>
+                  <label>新規日程の既定会場<select name="defaultVenue"></select></label>
+                </div>
+                <div class="practice-venue-settings">
+                  <div class="practice-venue-settings-head"><h5>会場とカレンダー用略称</h5><button id="add-practice-venue-setting" type="button" class="secondary">会場を追加</button></div>
+                  <div id="practice-venue-setting-rows"></div>
+                </div>
+                <div class="deadline-settings-actions"><button id="save-practice-schedule-settings" type="submit">練習日程設定を保存</button><button id="reset-practice-schedule-settings" type="button" class="secondary">初期値に戻す</button><span id="practice-schedule-settings-result" class="status-message" role="status" aria-live="polite"></span></div>
+              </form>
+            </div>
           </section>
           <section class="settings-panel tournament-setting" id="database-settings" role="tabpanel" hidden>
             <div class="settings-panel-head"><h3>データ管理</h3><span class="settings-status">管理者限定</span></div>
@@ -4298,6 +4346,13 @@ function adminHtml(
     const deadlineSettingsResult = document.querySelector('#deadline-settings-result');
     const saveDeadlineSettings = document.querySelector('#save-deadline-settings');
     const resetDeadlineSettings = document.querySelector('#reset-deadline-settings');
+    const practiceScheduleSettingsForm = document.querySelector('#practice-schedule-settings-form');
+    const practiceScheduleSettingStatus = document.querySelector('#practice-schedule-setting-status');
+    const practiceScheduleSettingsResult = document.querySelector('#practice-schedule-settings-result');
+    const practiceVenueSettingRows = document.querySelector('#practice-venue-setting-rows');
+    const addPracticeVenueSetting = document.querySelector('#add-practice-venue-setting');
+    const savePracticeScheduleSettings = document.querySelector('#save-practice-schedule-settings');
+    const resetPracticeScheduleSettings = document.querySelector('#reset-practice-schedule-settings');
     const designSettingsForm = document.querySelector('#design-settings-form');
     const designPrimaryColor = document.querySelector('#design-primary-color');
     const designPrimaryCode = document.querySelector('#design-primary-code');
@@ -4310,6 +4365,7 @@ function adminHtml(
     const resetDesignSettings = document.querySelector('#reset-design-settings');
     const practiceScheduleForm = document.querySelector('#practice-schedule-form');
     const practiceScheduleRows = document.querySelector('#practice-schedule-rows');
+    const practiceVenueOptions = document.querySelector('#practice-venue-options');
     const practiceScheduleResult = document.querySelector('#practice-schedule-result');
     const practiceScheduleAdd = document.querySelector('#practice-schedule-add');
     const practiceScheduleSubmit = document.querySelector('#practice-schedule-submit');
@@ -4539,6 +4595,17 @@ function adminHtml(
       responseReminderTime: '00:00',
       customized: false,
     };
+    let practiceScheduleSettings = {
+      morningStartTime: '09:00', morningEndTime: '12:00',
+      afternoonStartTime: '13:00', afternoonEndTime: '17:00',
+      eveningStartTime: '18:00', eveningEndTime: '21:30',
+      defaultTimeBand: 'evening', defaultVenue: '大久保東公民館',
+      venues: [
+        { name: '大久保東公民館', shortName: '大久保東' },
+        { name: '栄和公民館', shortName: '栄和' },
+      ],
+      customized: false,
+    };
     const memberStatusLabels = {
       active: '有効',
       inactive: '無効',
@@ -4561,6 +4628,7 @@ function adminHtml(
       if (options.required) input.required = true;
       if (options.maxLength) input.maxLength = options.maxLength;
       if (options.value) input.value = options.value;
+      if (options.list) input.setAttribute('list', options.list);
       label.append(input);
       return label;
     }
@@ -4573,13 +4641,16 @@ function adminHtml(
     }
 
     function addPracticeScheduleRow(defaultDate = '') {
+      const timeBand = practiceScheduleSettings.defaultTimeBand;
+      const defaultStart = practiceScheduleSettings[timeBand + 'StartTime'];
+      const defaultEnd = practiceScheduleSettings[timeBand + 'EndTime'];
       const row = element('div', 'practice-schedule-row');
       row.append(
         practiceScheduleField('練習日', 'date', 'practiceDate', { required: true, value: defaultDate }),
-        practiceScheduleField('開始', 'time', 'startTime', { value: '18:00' }),
-        practiceScheduleField('終了', 'time', 'endTime', { value: '21:30' }),
+        practiceScheduleField('開始', 'time', 'startTime', { value: defaultStart }),
+        practiceScheduleField('終了', 'time', 'endTime', { value: defaultEnd }),
         practiceScheduleField('練習名', 'text', 'title', { required: true, maxLength: 100, value: '通常練習' }),
-        practiceScheduleField('会場', 'text', 'location', { maxLength: 100, value: '大久保東公民館' }),
+        practiceScheduleField('会場', 'text', 'location', { maxLength: 100, value: practiceScheduleSettings.defaultVenue, list: 'practice-venue-options' }),
         practiceScheduleField('連絡事項', 'text', 'note', { maxLength: 500 }),
       );
       const remove = element('button', 'practice-schedule-remove', '削除');
@@ -4889,8 +4960,15 @@ function adminHtml(
         deadlineSettingsForm.elements.responseReminderTime.value = deadlineAutomationSettings.responseReminderTime;
         refreshDeadlineTimeInputs();
       }
-      if (deadlineSettingsCustomized) deadlineSettingsCustomized.textContent = deadlineAutomationSettings.customized ? '変更済み' : '初期設定';
+      refreshAutomationSettingsStatus();
       if (resetDeadlineSettings) resetDeadlineSettings.disabled = !deadlineAutomationSettings.customized;
+    }
+
+    function refreshAutomationSettingsStatus() {
+      if (!deadlineSettingsCustomized) return;
+      const customized = (adminPermissions.includes('tournament') && deadlineAutomationSettings.customized)
+        || (adminPermissions.includes('practice') && practiceScheduleSettings.customized);
+      deadlineSettingsCustomized.textContent = customized ? '変更済み' : '初期設定';
     }
 
     function refreshDeadlineTimeInputs() {
@@ -4983,6 +5061,112 @@ function adminHtml(
         saveDeadlineSettings.disabled = false;
         resetDeadlineSettings.disabled = !deadlineAutomationSettings.customized;
       }
+    });
+
+    function practiceVenueValues() {
+      return [...practiceVenueSettingRows.querySelectorAll('.practice-venue-row')].map((row) => ({
+        name: row.querySelector('[data-venue-name]').value.trim(),
+        shortName: row.querySelector('[data-venue-short]').value.trim(),
+      }));
+    }
+
+    function refreshPracticeVenueDefaults(preferred) {
+      const select = practiceScheduleSettingsForm.elements.defaultVenue;
+      const current = preferred || select.value;
+      const names = practiceVenueValues().map((venue) => venue.name).filter(Boolean);
+      select.replaceChildren(...names.map((name) => {
+        const option = document.createElement('option'); option.value = name; option.textContent = name; return option;
+      }));
+      select.value = names.includes(current) ? current : names[0] || '';
+    }
+
+    function refreshPracticeVenueRemoveButtons() {
+      const rows = [...practiceVenueSettingRows.querySelectorAll('.practice-venue-row')];
+      rows.forEach((row) => { row.querySelector('button').disabled = rows.length === 1; });
+    }
+
+    function addPracticeVenueSettingRow(venue = { name: '', shortName: '' }) {
+      const row = element('div', 'practice-venue-row');
+      const nameLabel = element('label', '', '正式な会場名');
+      const nameInput = document.createElement('input'); nameInput.dataset.venueName = ''; nameInput.maxLength = 100; nameInput.required = true; nameInput.value = venue.name;
+      const shortLabel = element('label', '', 'カレンダー用略称（7文字以内）');
+      const shortInput = document.createElement('input'); shortInput.dataset.venueShort = ''; shortInput.maxLength = 7; shortInput.required = true; shortInput.value = venue.shortName;
+      nameLabel.append(nameInput); shortLabel.append(shortInput);
+      const remove = element('button', 'secondary', '削除'); remove.type = 'button';
+      remove.addEventListener('click', () => { row.remove(); refreshPracticeVenueDefaults(); refreshPracticeVenueRemoveButtons(); });
+      nameInput.addEventListener('input', () => refreshPracticeVenueDefaults());
+      row.append(nameLabel, shortLabel, remove);
+      practiceVenueSettingRows.append(row);
+      refreshPracticeVenueRemoveButtons();
+    }
+
+    function refreshPracticeVenueOptions() {
+      if (!practiceVenueOptions) return;
+      practiceVenueOptions.replaceChildren(...practiceScheduleSettings.venues.map((venue) => {
+        const option = document.createElement('option'); option.value = venue.name; return option;
+      }));
+    }
+
+    function renderPracticeScheduleSettings(settings) {
+      practiceScheduleSettings = { ...practiceScheduleSettings, ...settings };
+      refreshPracticeVenueOptions();
+      if (practiceScheduleSettingsForm) {
+        ['morningStartTime','morningEndTime','afternoonStartTime','afternoonEndTime','eveningStartTime','eveningEndTime'].forEach((name) => {
+          practiceScheduleSettingsForm.elements[name].value = practiceScheduleSettings[name];
+        });
+        practiceScheduleSettingsForm.elements.defaultTimeBand.value = practiceScheduleSettings.defaultTimeBand;
+        practiceVenueSettingRows.replaceChildren();
+        practiceScheduleSettings.venues.forEach(addPracticeVenueSettingRow);
+        refreshPracticeVenueDefaults(practiceScheduleSettings.defaultVenue);
+      }
+      refreshAutomationSettingsStatus();
+      if (resetPracticeScheduleSettings) resetPracticeScheduleSettings.disabled = !practiceScheduleSettings.customized;
+    }
+
+    async function loadPracticeScheduleSettings() {
+      if (practiceScheduleSettingStatus) { practiceScheduleSettingStatus.className = 'status-message'; practiceScheduleSettingStatus.textContent = '読み込み中…'; }
+      try {
+        const response = await fetch('/api/settings/practice-schedules'); const body = await response.json();
+        if (!response.ok) throw new Error(body.error || '練習日程設定を取得できませんでした。');
+        renderPracticeScheduleSettings(body.settings || {});
+        if (practiceScheduleSettingStatus) practiceScheduleSettingStatus.textContent = '';
+        return practiceScheduleSettings;
+      } catch (error) {
+        if (practiceScheduleSettingStatus) { practiceScheduleSettingStatus.className = 'status-message error'; practiceScheduleSettingStatus.textContent = error instanceof Error ? error.message : '練習日程設定を取得できませんでした。'; }
+        return practiceScheduleSettings;
+      }
+    }
+
+    addPracticeVenueSetting?.addEventListener('click', () => { addPracticeVenueSettingRow(); refreshPracticeVenueDefaults(); });
+    practiceScheduleSettingsForm?.addEventListener('submit', async (event) => {
+      event.preventDefault(); savePracticeScheduleSettings.disabled = true; resetPracticeScheduleSettings.disabled = true;
+      practiceScheduleSettingsResult.className = 'status-message'; practiceScheduleSettingsResult.textContent = '保存中…';
+      try {
+        const fields = practiceScheduleSettingsForm.elements;
+        const response = await fetch('/api/settings/practice-schedules', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+          morningStartTime: fields.morningStartTime.value, morningEndTime: fields.morningEndTime.value,
+          afternoonStartTime: fields.afternoonStartTime.value, afternoonEndTime: fields.afternoonEndTime.value,
+          eveningStartTime: fields.eveningStartTime.value, eveningEndTime: fields.eveningEndTime.value,
+          defaultTimeBand: fields.defaultTimeBand.value, defaultVenue: fields.defaultVenue.value,
+          venues: practiceVenueValues(),
+        }) });
+        const body = await response.json(); if (!response.ok) throw new Error(body.error || '練習日程設定を保存できませんでした。');
+        renderPracticeScheduleSettings(body.settings); practiceScheduleSettingsResult.textContent = '保存しました。新規日程の初期値とDiscordカレンダーへ反映されます。';
+      } catch (error) {
+        practiceScheduleSettingsResult.className = 'status-message error'; practiceScheduleSettingsResult.textContent = error instanceof Error ? error.message : '練習日程設定を保存できませんでした。';
+      } finally { savePracticeScheduleSettings.disabled = false; resetPracticeScheduleSettings.disabled = !practiceScheduleSettings.customized; }
+    });
+    resetPracticeScheduleSettings?.addEventListener('click', async () => {
+      if (!confirm('練習時間帯と会場設定を初期値に戻しますか？')) return;
+      savePracticeScheduleSettings.disabled = true; resetPracticeScheduleSettings.disabled = true;
+      practiceScheduleSettingsResult.className = 'status-message'; practiceScheduleSettingsResult.textContent = '初期設定へ戻しています…';
+      try {
+        const response = await fetch('/api/settings/practice-schedules', { method: 'DELETE' }); const body = await response.json();
+        if (!response.ok) throw new Error(body.error || '初期設定へ戻せませんでした。');
+        renderPracticeScheduleSettings(body.settings); practiceScheduleSettingsResult.textContent = '初期設定へ戻しました。';
+      } catch (error) {
+        practiceScheduleSettingsResult.className = 'status-message error'; practiceScheduleSettingsResult.textContent = error instanceof Error ? error.message : '初期設定へ戻せませんでした。';
+      } finally { savePracticeScheduleSettings.disabled = false; resetPracticeScheduleSettings.disabled = !practiceScheduleSettings.customized; }
     });
 
     function acceptsDroppedFile(input, file) {
@@ -7898,7 +8082,7 @@ function adminHtml(
     }
     if (currentPage === 'practice') {
       const today = new Date(Date.now() + 9 * 60 * 60 * 1000).toISOString().slice(0, 10);
-      addPracticeScheduleRow(today);
+      loadPracticeScheduleSettings().then(() => addPracticeScheduleRow(today));
       practiceScheduleAdd.addEventListener('click', () => addPracticeScheduleRow());
       practiceScheduleForm.addEventListener('submit', savePracticeSchedules);
       refreshPracticeSchedules.addEventListener('click', loadPracticeSchedules);
@@ -7912,6 +8096,7 @@ function adminHtml(
         loadMessageTemplates();
         loadDeadlineAutomationSettings();
       }
+      if (adminPermissions.includes('practice')) loadPracticeScheduleSettings();
     }
     if (currentPage === 'register') {
       loadDeadlineAutomationSettings().then(initializeTournamentFormDefaults);
@@ -8179,6 +8364,38 @@ export async function handleAdminRequest(
     } catch (error: unknown) {
       console.error("期限自動入力設定の取得エラー", error);
       return json({ error: "期限設定を取得できませんでした。" }, 500);
+    }
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/settings/practice-schedules") {
+    try {
+      return json({ settings: await getPracticeScheduleSettings(env.DB) });
+    } catch (error: unknown) {
+      console.error("練習日程設定の取得エラー", error);
+      return json({ error: "練習日程設定を取得できませんでした。" }, 500);
+    }
+  }
+
+  if (
+    (request.method === "PATCH" || request.method === "DELETE")
+    && url.pathname === "/api/settings/practice-schedules"
+  ) {
+    if (!isSameOrigin(request)) return json({ error: "不正な送信元です。" }, 403);
+    try {
+      if (request.method === "DELETE") {
+        return json({ settings: await resetPracticeScheduleSettings(env.DB) });
+      }
+      if (!request.headers.get("Content-Type")?.toLowerCase().startsWith("application/json")) {
+        return json({ error: "JSON形式で送信してください。" }, 415);
+      }
+      const body = (await request.json()) as Record<string, unknown>;
+      return json({ settings: await savePracticeScheduleSettings(env.DB, body, actor) });
+    } catch (error: unknown) {
+      if (error instanceof PracticeScheduleSettingError) {
+        return json({ error: error.message }, error.statusCode);
+      }
+      console.error("練習日程設定の保存エラー", error);
+      return json({ error: "練習日程設定を保存できませんでした。" }, 500);
     }
   }
 

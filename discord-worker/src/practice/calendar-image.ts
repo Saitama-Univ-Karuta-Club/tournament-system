@@ -1,5 +1,9 @@
 import { Resvg } from "@cf-wasm/resvg";
 import { getGeneralFonts } from "../general/font.generated";
+import {
+  DEFAULT_PRACTICE_SCHEDULE_SETTINGS,
+  type PracticeScheduleSettings,
+} from "./schedule-settings";
 
 export interface PracticeCalendarSchedule {
   practice_date: string;
@@ -38,18 +42,34 @@ function timeMinutes(value: string): number {
   return hours * 60 + minutes;
 }
 
-export function practiceCalendarTimeLabel(schedule: PracticeCalendarSchedule): string {
+export function practiceCalendarTimeLabel(
+  schedule: PracticeCalendarSchedule,
+  settings: PracticeScheduleSettings = DEFAULT_PRACTICE_SCHEDULE_SETTINGS,
+): string {
   if (!schedule.start_time) return "時間未定";
+  const endTime = schedule.end_time ?? schedule.start_time;
+  const exactLabels = new Map([
+    [`${settings.morningStartTime}-${settings.morningEndTime}`, "午前"],
+    [`${settings.afternoonStartTime}-${settings.afternoonEndTime}`, "午後"],
+    [`${settings.eveningStartTime}-${settings.eveningEndTime}`, "夜間"],
+    [`${settings.morningStartTime}-${settings.afternoonEndTime}`, "午前・午後"],
+    [`${settings.afternoonStartTime}-${settings.eveningEndTime}`, "午後・夜間"],
+    [`${settings.morningStartTime}-${settings.eveningEndTime}`, "全日"],
+  ]);
+  const exact = exactLabels.get(`${schedule.start_time}-${endTime}`);
+  if (exact) return exact;
   const start = timeMinutes(schedule.start_time);
-  const end = schedule.end_time ? timeMinutes(schedule.end_time) : start;
-  const startsInMorning = start < 12 * 60;
-  const reachesAfternoon = end > 12 * 60;
-  const reachesNight = end > 18 * 60;
+  const end = timeMinutes(endTime);
+  const afternoonStart = timeMinutes(settings.afternoonStartTime);
+  const eveningStart = timeMinutes(settings.eveningStartTime);
+  const startsInMorning = start < afternoonStart;
+  const reachesAfternoon = end > afternoonStart;
+  const reachesNight = end > eveningStart;
   if (startsInMorning) {
     if (reachesNight) return "全日";
     return reachesAfternoon ? "午前・午後" : "午前";
   }
-  if (start < 18 * 60) return reachesNight ? "午後・夜間" : "午後";
+  if (start < eveningStart) return reachesNight ? "午後・夜間" : "午後";
   return "夜間";
 }
 
@@ -60,9 +80,10 @@ function truncateCalendarLine(value: string, maxLength = 7): string {
     : `${characters.slice(0, maxLength - 1).join("")}…`;
 }
 
-function venueLabel(schedule: PracticeCalendarSchedule): string {
+function venueLabel(schedule: PracticeCalendarSchedule, settings: PracticeScheduleSettings): string {
   const location = schedule.location?.trim() ?? "";
-  if (location.includes("大久保東公民館")) return "大久保東";
+  const configured = settings.venues.find((venue) => venue.name === location);
+  if (configured) return configured.shortName;
   return location ? truncateCalendarLine(location) : "会場未定";
 }
 
@@ -100,6 +121,7 @@ function drawMonthSvg(
   height: number,
   columns: number,
   clipStart: number,
+  settings: PracticeScheduleSettings,
 ): { markup: string; nextClip: number } {
   const [year, month] = key.split("-").map(Number);
   const compact = columns > 1;
@@ -173,11 +195,11 @@ function drawMonthSvg(
         const venueSize = compact ? 17 : 28;
         const noteSize = compact ? 13 : 23;
         parts.push(`<clipPath id="${clipId}"><rect x="${cellX + 2}" y="${rowY + 2}" width="${cellWidth - 4}" height="${rowHeight - 4}"/></clipPath>`);
-        const labels = [...new Set(dayEvents.map(practiceCalendarTimeLabel))].join("・");
+        const labels = [...new Set(dayEvents.map((event) => practiceCalendarTimeLabel(event, settings)))].join("・");
         const noteLines = practiceCalendarNoteLines(dayEvents[0].note);
         parts.push(`<g clip-path="url(#${clipId})">`);
         parts.push(text(`${shownDay}日 ${labels}`, contentX, headerY, daySize, COLORS.ink, { weight: 700 }));
-        parts.push(text(venueLabel(dayEvents[0]), contentX, venueY, venueSize, COLORS.coral, { weight: 700 }));
+        parts.push(text(venueLabel(dayEvents[0], settings), contentX, venueY, venueSize, COLORS.coral, { weight: 700 }));
         if (noteLines[0]) parts.push(text(noteLines[0], contentX, noteFirstY, noteSize, COLORS.ink));
         if (noteLines[1]) parts.push(text(noteLines[1], contentX, noteSecondY, noteSize, COLORS.ink));
         parts.push("</g>");
@@ -199,7 +221,10 @@ function drawMonthSvg(
   return { markup: parts.join(""), nextClip: clipIndex };
 }
 
-export function buildPracticeScheduleCalendarSvg(schedules: PracticeCalendarSchedule[]): string {
+export function buildPracticeScheduleCalendarSvg(
+  schedules: PracticeCalendarSchedule[],
+  settings: PracticeScheduleSettings = DEFAULT_PRACTICE_SCHEDULE_SETTINGS,
+): string {
   if (!schedules.length) throw new Error("カレンダーに表示する練習日程がありません。");
   const months = monthKeys(schedules);
   const columns = months.length <= 2 ? 1 : months.length <= 8 ? 2 : 3;
@@ -224,6 +249,7 @@ export function buildPracticeScheduleCalendarSvg(schedules: PracticeCalendarSche
       tileHeight,
       columns,
       clipIndex,
+      settings,
     );
     parts.push(month.markup);
     clipIndex = month.nextClip;
@@ -233,8 +259,9 @@ export function buildPracticeScheduleCalendarSvg(schedules: PracticeCalendarSche
 
 export async function generatePracticeScheduleCalendarPng(
   schedules: PracticeCalendarSchedule[],
+  settings: PracticeScheduleSettings = DEFAULT_PRACTICE_SCHEDULE_SETTINGS,
 ): Promise<Uint8Array> {
-  const renderer = await Resvg.async(buildPracticeScheduleCalendarSvg(schedules), {
+  const renderer = await Resvg.async(buildPracticeScheduleCalendarSvg(schedules, settings), {
     font: {
       fontBuffers: getGeneralFonts(),
       defaultFontFamily: "Noto Sans JP",

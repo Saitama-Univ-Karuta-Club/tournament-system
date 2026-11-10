@@ -7,6 +7,7 @@ import {
   type DiscordMessagePayload,
 } from "../discord-api";
 import { generatePracticeScheduleCalendarPng } from "./calendar-image";
+import { getPracticeScheduleSettings } from "./schedule-settings";
 import { PracticeError, type PracticeEnv } from "./service";
 
 export type PracticeScheduleResponse = "yes" | "maybe" | "no";
@@ -583,13 +584,14 @@ export async function processPracticeScheduleNotifications(
         );
       } else {
         const month = delivery.target_month ?? data.schedule.practice_date.slice(0, 7);
-        const [schedules, existing] = await Promise.all([
+        const [schedules, existing, calendarSettings] = await Promise.all([
           loadAnnouncementSchedules(env, month),
           env.DB.prepare(
             `SELECT guild_id, practice_month, channel_id, message_id
              FROM practice_schedule_month_announcements
              WHERE guild_id = ? AND practice_month = ?`,
           ).bind(delivery.guild_id, month).first<MonthAnnouncementRow>(),
+          getPracticeScheduleSettings(env.DB),
         ]);
         if (!schedules.length) {
           if (existing) {
@@ -615,7 +617,7 @@ export async function processPracticeScheduleNotifications(
           sent += 1;
           continue;
         }
-        const calendar = await generatePracticeScheduleCalendarPng(schedules);
+        const calendar = await generatePracticeScheduleCalendarPng(schedules, calendarSettings);
         const calendarData = calendar.slice().buffer as ArrayBuffer;
         const payload = buildPracticeScheduleBatchAnnouncement({
           schedules,

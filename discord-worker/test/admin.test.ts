@@ -249,6 +249,11 @@ describe("Admin Worker", () => {
     expect(settingsHtml).toContain('>基準と同じ</option><option value="custom">自由設定</option>');
     expect(settingsHtml).toContain("timeInput.hidden = modeSelect.value !== 'custom'");
     expect(settingsHtml).toContain("fetch('/api/settings/deadlines')");
+    expect(settingsHtml).toContain('id="practice-schedule-settings-form"');
+    expect(settingsHtml).toContain('name="morningStartTime"');
+    expect(settingsHtml).toContain('name="defaultTimeBand"');
+    expect(settingsHtml).toContain('id="practice-venue-setting-rows"');
+    expect(settingsHtml).toContain("fetch('/api/settings/practice-schedules')");
   });
 
   it("renders practice schedule management only in the admin portal", async () => {
@@ -270,9 +275,9 @@ describe("Admin Worker", () => {
     expect(html).toContain("method: 'DELETE'");
     expect(html).toContain("Discordの同月カレンダーも自動的に更新されます。");
     expect(html).toContain("practice-schedule-card-note");
-    expect(html).toContain("practiceScheduleField('開始', 'time', 'startTime', { value: '18:00' })");
-    expect(html).toContain("practiceScheduleField('終了', 'time', 'endTime', { value: '21:30' })");
-    expect(html).toContain("value: '大久保東公民館'");
+    expect(html).toContain("const defaultStart = practiceScheduleSettings[timeBand + 'StartTime']");
+    expect(html).toContain("value: practiceScheduleSettings.defaultVenue");
+    expect(html).toContain("fetch('/api/settings/practice-schedules')");
     expect(html).toContain('data-page="practice"');
   });
 
