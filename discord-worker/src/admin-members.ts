@@ -147,7 +147,11 @@ export interface MemberRegistrationDecision {
 }
 
 export class MemberAdminError extends Error {
-  constructor(message: string, readonly statusCode: number) {
+  constructor(
+    message: string,
+    readonly statusCode: number,
+    readonly memberId?: string,
+  ) {
     super(message);
   }
 }
@@ -779,4 +783,112 @@ export async function updateAdminMember(
     dmEnabled: input.dmEnabled,
     updatedAt: now,
   };
+}
+
+export async function updateAdminMembers(
+  env: TournamentEnv,
+  updates: Array<{ memberId: string; input: MemberUpdateInput }>,
+  changedByEmail: string,
+): Promise<AdminMember[]> {
+  if (!Array.isArray(updates) || updates.length < 1 || updates.length > 200) {
+    throw new MemberAdminError("一括保存は1〜200人で指定してください。", 400);
+  }
+  const memberIds = updates.map((update) => update.memberId);
+  if (new Set(memberIds).size !== memberIds.length) {
+    throw new MemberAdminError("同じメンバーが重複しています。", 400);
+  }
+  for (const memberId of memberIds) {
+    if (!/^M-[0-9a-f-]{36}$/.test(memberId)) {
+      throw new MemberAdminError("メンバーIDが不正です。", 400, memberId);
+    }
+  }
+
+  const prepared = await Promise.all(updates.map(async ({ memberId, input: rawInput }) => {
+    let input: MemberUpdateInput;
+    try {
+      input = normalizeMemberUpdate(rawInput);
+    } catch (error) {
+      if (error instanceof MemberAdminError) {
+        throw new MemberAdminError(error.message, error.statusCode, memberId);
+      }
+      throw error;
+    }
+    const existing = await env.DB.prepare(
+      `SELECT
+        member_id, last_name, first_name, last_name_kana, first_name_kana,
+        display_name, display_name_kana, grade, rank, status, dm_enabled,
+        discord_user_id, created_at, updated_at
+       FROM members WHERE member_id = ?`,
+    ).bind(memberId).first<MemberDatabaseRow>();
+    if (!existing) {
+      throw new MemberAdminError("対象のメンバーが見つかりません。", 404, memberId);
+    }
+    return { memberId, input, existing };
+  }));
+
+  const now = new Date().toISOString();
+  const statements: D1PreparedStatement[] = [];
+  const members: AdminMember[] = [];
+  for (const { memberId, input, existing } of prepared) {
+    const nextDmEnabled = input.dmEnabled ? 1 : 0;
+    const displayName = `${input.lastName}${input.firstName}`;
+    const displayNameKana = `${input.lastNameKana}${input.firstNameKana}`;
+    const changed = existing.last_name !== input.lastName ||
+      existing.first_name !== input.firstName ||
+      existing.last_name_kana !== input.lastNameKana ||
+      existing.first_name_kana !== input.firstNameKana ||
+      existing.grade !== input.grade ||
+      existing.rank !== input.rank ||
+      existing.status !== input.status ||
+      existing.dm_enabled !== nextDmEnabled;
+    if (changed) {
+      statements.push(
+        env.DB.prepare(
+          `UPDATE members
+           SET last_name = ?, first_name = ?, last_name_kana = ?, first_name_kana = ?,
+             display_name = ?, display_name_kana = ?, grade = ?, rank = ?, status = ?,
+             dm_enabled = ?, updated_at = ?
+           WHERE member_id = ?`,
+        ).bind(
+          input.lastName, input.firstName, input.lastNameKana, input.firstNameKana,
+          displayName, displayNameKana, input.grade, input.rank, input.status,
+          nextDmEnabled, now, memberId,
+        ),
+        env.DB.prepare(
+          `INSERT INTO member_change_history (
+            member_id, previous_display_name, new_display_name,
+            previous_display_name_kana, new_display_name_kana,
+            previous_rank, new_rank, previous_grade, new_grade,
+            previous_status, new_status, previous_dm_enabled, new_dm_enabled,
+            changed_by_email, changed_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).bind(
+          memberId, existing.display_name, displayName,
+          existing.display_name_kana, displayNameKana,
+          existing.rank, input.rank, existing.grade, input.grade,
+          existing.status, input.status, existing.dm_enabled, nextDmEnabled,
+          changedByEmail, now,
+        ),
+      );
+      if (existing.grade !== input.grade) {
+        statements.push(invalidateResponsesForGrade(env, memberId, existing.grade, now));
+      }
+    }
+    members.push({
+      ...toAdminMember(existing),
+      lastName: input.lastName,
+      firstName: input.firstName,
+      lastNameKana: input.lastNameKana,
+      firstNameKana: input.firstNameKana,
+      displayName,
+      displayNameKana,
+      grade: input.grade,
+      rank: input.rank,
+      status: input.status,
+      dmEnabled: input.dmEnabled,
+      updatedAt: changed ? now : existing.updated_at,
+    });
+  }
+  if (statements.length) await env.DB.batch(statements);
+  return members;
 }

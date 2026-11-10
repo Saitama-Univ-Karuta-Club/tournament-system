@@ -70,13 +70,13 @@ export const practiceTabHtml = `
         <div class="practice-heading"><div><h2>外部練習会</h2></div></div>
         <form id="external-match-form" class="practice-form practice-result-form">
           <div class="practice-fields practice-result-fields external-result-fields">
-            <label>対戦日<input type="date" name="playedOn" required></label>
-            <label>練習会名<input name="eventName" maxlength="100" required></label>
-            <label>対戦相手<input name="opponentName" maxlength="100" required></label>
-            <label>所属<input name="opponentAffiliation" maxlength="100"></label>
-            <label>相手の級<select name="opponentGrade" required><option value="A">A級</option><option value="B">B級</option><option value="C">C級</option><option value="D">D級</option><option value="E">E級</option><option value="F">F級</option><option value="beginner">初心者</option></select></label>
-            <label>勝敗<select name="outcome" required><option value="win">勝ち</option><option value="loss">負け</option></select></label>
-            <label>枚数差<input type="number" name="scoreDifference" min="0" max="50" inputmode="numeric"></label>
+            <label class="external-result-date">対戦日<input type="date" name="playedOn" required></label>
+            <label class="external-result-event">練習会名<input name="eventName" maxlength="100" required></label>
+            <label class="external-result-opponent">対戦相手<input name="opponentName" maxlength="100" required></label>
+            <label class="external-result-affiliation">所属<input name="opponentAffiliation" maxlength="100"></label>
+            <label class="external-result-grade">相手の級<select name="opponentGrade" required><option value="A">A級</option><option value="B">B級</option><option value="C">C級</option><option value="D">D級</option><option value="E">E級</option><option value="F">F級</option><option value="beginner">初心者</option></select></label>
+            <label class="external-result-outcome">勝敗<select name="outcome" required><option value="win">勝ち</option><option value="loss">負け</option></select></label>
+            <label class="external-result-score">枚数差<input type="number" name="scoreDifference" min="0" max="50" inputmode="numeric"></label>
           </div>
           ${practiceDetailsHtml}
           <div class="practice-actions practice-result-actions"><button class="practice-primary" type="submit">結果を追加</button></div>

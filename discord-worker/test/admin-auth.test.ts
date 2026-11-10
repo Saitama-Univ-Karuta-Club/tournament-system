@@ -160,7 +160,17 @@ describe("Discord administrator authentication", () => {
     const tabs = html.match(/<nav class="tabs"[\s\S]*?<\/nav>/)?.[0] ?? "";
     expect(tabs).toContain('href="/practice"');
     expect(tabs).not.toContain('href="/register"');
-    expect(tabs).not.toContain('href="/settings"');
+    expect(tabs).toContain('href="/settings"');
+
+    const settingsPage = await handleAdminRequest(
+      new Request("https://admin.example.com/settings", { headers: { Cookie: sessionCookie } }),
+      env as AdminEnv,
+      { waitUntil: vi.fn() },
+    );
+    expect(settingsPage.status).toBe(200);
+    const settingsHtml = await settingsPage.text();
+    expect(settingsHtml).toContain('data-settings-view="design"');
+    expect(settingsHtml).toContain('data-can-manage-tournaments="false"');
 
     const tournamentPage = await handleAdminRequest(
       new Request("https://admin.example.com/tournaments", { headers: { Cookie: sessionCookie } }),

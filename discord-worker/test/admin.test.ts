@@ -617,7 +617,7 @@ describe("Admin Worker", () => {
     expect(html).toContain("--control-padding-block: 8px;");
     expect(html).toContain("--control-padding-inline: 10px;");
     expect(html).toContain("padding: var(--control-padding-block) var(--control-padding-inline)");
-    expect(html).toContain("body { margin: 0; font-size: var(--font-size-body);");
+    expect(html).toContain("body { margin: 0; color: var(--site-ink); background: var(--site-background); font-size: var(--font-size-body);");
     expect(html).toContain("button, .todo-link { min-height: 44px;");
     expect(html).toContain(".card-title-actions h3 { min-width: 0; font-size: var(--font-size-page);");
     expect(html).toContain(".entry-management { min-width: 0; max-width: 100%; margin: 5px 0 0;");

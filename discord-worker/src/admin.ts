@@ -16,6 +16,7 @@ import {
   listPendingMemberRegistrations,
   MemberAdminError,
   updateAdminMember,
+  updateAdminMembers,
   type AdminMember,
   type AdminMemberAppearanceHistory,
   type AdminMemberRegistrationRequest,
@@ -89,6 +90,13 @@ import {
   updatePracticeSchedule,
 } from "./practice/schedules";
 import { PracticeError } from "./practice/service";
+import {
+  getSiteDesignSetting,
+  resetSiteDesignSetting,
+  saveSiteDesignSetting,
+  serveSiteBanner,
+  SiteDesignError,
+} from "./site-design";
 
 export interface AdminEnv extends TournamentEnv, DocumentEnv, AdminAuthEnv, ExcelProfileEnv {
   ENVIRONMENT?: string;
@@ -3266,7 +3274,7 @@ export async function editTournaments(
 const securityHeaders = {
   "Cache-Control": "no-store",
   "Content-Security-Policy":
-    "default-src 'none'; connect-src 'self'; img-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+    "default-src 'none'; connect-src 'self'; img-src 'self' blob:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
   "Referrer-Policy": "no-referrer",
   "X-Content-Type-Options": "nosniff",
   "X-Frame-Options": "DENY",
@@ -3290,12 +3298,13 @@ function defaultAdminPath(permissions: AdminPermission[]): string {
 
 function pagePermission(page: AdminPage): AdminPermission | null {
   if (page === "practice") return "practice";
-  if (["todo", "register", "tournaments", "settings"].includes(page)) return "tournament";
+  if (["todo", "register", "tournaments"].includes(page)) return "tournament";
   return null;
 }
 
 function apiPermission(pathname: string): AdminPermission | null {
   if (pathname === "/api/session") return null;
+  if (pathname === "/api/settings/design") return null;
   if (pathname.startsWith("/api/practice/")) return "practice";
   if (pathname === "/api/members" || pathname.startsWith("/api/members/")) return null;
   if (pathname === "/api/member-requests" || pathname.startsWith("/api/member-requests/")) return null;
@@ -3361,10 +3370,20 @@ function adminHtml(
       --control-padding-inline: 10px;
       --button-padding-block: 8px;
       --button-padding-inline: 14px;
+      --site-primary: #3658b2;
+      --site-primary-dark: #294796;
+      --site-primary-light: #edf1ff;
+      --site-background: #f4f6fa;
+      --site-line: #dce1eb;
+      --site-ink: #172033;
+      --site-muted: #596579;
+      --site-on-primary: #ffffff;
     }
     * { box-sizing: border-box; }
-    body { margin: 0; font-size: var(--font-size-body); line-height: 1.5; }
-    header { background: #293c74; color: white; padding: 18px 24px; box-shadow: 0 2px 8px #17203322; }
+    body { margin: 0; color: var(--site-ink); background: var(--site-background); font-size: var(--font-size-body); line-height: 1.5; }
+    header { background-color: var(--site-primary-dark); background-image: linear-gradient(135deg, var(--site-primary-dark), var(--site-primary)); background-position: center; background-size: cover; color: var(--site-on-primary); padding: 18px 24px; box-shadow: 0 2px 8px #17203322; }
+    header.has-site-banner { min-height: 140px; display: flex; align-items: center; }
+    header.has-site-banner .header-inner { width: 100%; }
     .header-inner { max-width: 1080px; margin: auto; display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }
     .admin-brand { display: grid; gap: 1px; }
     .admin-brand-name { color: #dbe4ff; font-size: var(--font-size-meta); font-weight: 650; letter-spacing: .04em; }
@@ -3377,14 +3396,14 @@ function adminHtml(
     .tab-bar { background: white; border-bottom: 1px solid #dce1eb; box-shadow: 0 2px 8px #1720330a; }
     .tabs { max-width: 1080px; margin: auto; padding: 0 18px; display: flex; gap: 4px; overflow-x: auto; }
     .tab { position: relative; display: inline-flex; align-items: center; color: #596579; text-decoration: none; font-weight: 700; white-space: nowrap; padding: 15px 18px 12px; border-bottom: 3px solid transparent; }
-    .tab:hover { color: #294796; background: #f6f8ff; }
+    .tab:hover { color: var(--site-primary-dark); background: var(--site-primary-light); }
     .subtab-bar { position: sticky; top: 16px; background: transparent; border: 0; }
     .subtab-bar[hidden] { display: none; }
     .subtabs { display: grid; gap: 2px; padding: 2px 18px 2px 0; border-right: 1px solid #dce1eb; }
     .subtab { position: relative; display: block; width: 100%; color: #596579; text-decoration: none; font-size: var(--font-size-body); font-weight: 750; white-space: nowrap; padding: 8px 36px 8px 10px; border: 0; border-left: 3px solid transparent; border-radius: 0; text-align: left; transition: color .15s ease, background .15s ease, border-color .15s ease; }
-    .subtab:hover { color: #294796; background: #f4f6fb; }
-    .subtab.active { color: #294796; background: #eef2fb; border-left-color: #3658b2; }
-    .tab.active { color: #294796; border-bottom-color: #3658b2; }
+    .subtab:hover { color: var(--site-primary-dark); background: var(--site-primary-light); }
+    .subtab.active { color: var(--site-primary-dark); background: var(--site-primary-light); border-left-color: var(--site-primary); }
+    .tab.active { color: var(--site-primary-dark); border-bottom-color: var(--site-primary); }
     .request-badge { position: absolute; top: 2px; right: 1px; min-width: 20px; height: 20px; padding: 0 5px; border-radius: 999px; display: inline-flex; align-items: center; justify-content: center; color: white; background: #d92d20; box-shadow: 0 0 0 2px white; font-size: var(--font-size-meta); font-weight: 800; line-height: 1; }
     .subtab .request-badge { top: 50%; right: 9px; transform: translateY(-50%); min-width: 18px; height: 18px; box-shadow: none; }
     main { max-width: 1080px; margin: 24px auto; padding: 0 18px 48px; }
@@ -3423,11 +3442,11 @@ function adminHtml(
     .application-method-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 12px; }
     .application-method-fields > .wide { grid-column: 1 / -1; }
     .actions { margin-top: 24px; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
-    button { border: 0; border-radius: var(--control-radius); padding: var(--button-padding-block) var(--button-padding-inline); background: #3658b2; color: white; font: inherit; font-size: var(--font-size-control); font-weight: 700; cursor: pointer; }
-    button:hover { background: #294796; }
+    button { border: 0; border-radius: var(--control-radius); padding: var(--button-padding-block) var(--button-padding-inline); background: var(--site-primary); color: var(--site-on-primary); font: inherit; font-size: var(--font-size-control); font-weight: 700; cursor: pointer; }
+    button:hover { background: var(--site-primary-dark); }
     button:disabled { opacity: .55; cursor: wait; }
-    button.secondary { padding: 7px 12px; color: #294796; background: #edf1ff; }
-    button.secondary:hover { background: #dfe6ff; }
+    button.secondary { padding: 7px 12px; color: var(--site-primary-dark); background: var(--site-primary-light); }
+    button.secondary:hover { background: var(--site-line); }
     #result { min-height: 1.5em; font-weight: 650; }
     #result.ok { color: #17643a; }
     #result.error { color: #b42318; }
@@ -3687,8 +3706,8 @@ function adminHtml(
     .settings-layout { display: grid; grid-template-columns: 210px minmax(0, 1fr); gap: 28px; align-items: start; }
     .settings-menu { position: sticky; top: 16px; display: grid; gap: 2px; padding: 2px 18px 2px 0; border-right: 1px solid #dce1eb; }
     .settings-menu-item { appearance: none; width: 100%; padding: 10px 12px; border: 0; border-left: 3px solid transparent; border-radius: 0; color: #697386; background: transparent; font: inherit; font-size: var(--font-size-body); font-weight: 700; text-align: left; cursor: pointer; transition: color .15s ease, background .15s ease, border-color .15s ease; }
-    .settings-menu-item:hover { color: #294796; background: #f4f6fb; }
-    .settings-menu-item[aria-selected="true"] { color: #294796; border-left-color: #3658b2; background: #eef2fb; }
+    .settings-menu-item:hover { color: var(--site-primary-dark); background: var(--site-primary-light); }
+    .settings-menu-item[aria-selected="true"] { color: var(--site-primary-dark); border-left-color: var(--site-primary); background: var(--site-primary-light); }
     .settings-content { min-width: 0; padding-top: 2px; }
     .settings-panel { min-width: 0; padding: 0; border: 0; border-radius: 0; background: transparent; }
     .settings-panel[hidden] { display: none; }
@@ -3698,6 +3717,29 @@ function adminHtml(
     .settings-panel ul { margin: 0; padding: 0; list-style: none; color: #465166; font-size: var(--font-size-body); }
     .settings-panel li { padding: 10px 0; border-top: 1px solid #e7eaf0; }
     .settings-panel li:first-child { border-top: 0; }
+    body[data-can-manage-tournaments="false"] .tournament-setting { display: none !important; }
+    .design-settings-controls { display: grid; grid-template-columns: minmax(180px, .65fr) minmax(260px, 1.35fr) auto; gap: 12px; align-items: end; }
+    .design-settings-controls > label { color: #263550; font-weight: 750; }
+    .design-color-controls { display: grid; grid-template-columns: 54px minmax(0, 1fr); gap: 7px; margin-top: 5px; }
+    .design-color-controls input[type="color"] { min-height: 40px; padding: 3px; cursor: pointer; }
+    .design-preview { overflow: hidden; margin-top: 18px; border: 1px solid var(--site-line); border-radius: 12px; background: var(--site-background); }
+    .design-preview-header { display: grid; gap: 2px; min-height: 108px; padding: 20px; color: var(--site-on-primary); background-color: var(--site-primary-dark); background-image: linear-gradient(#00000038, #00000038); background-position: center; background-size: cover; align-content: center; }
+    .design-preview-header strong { font-size: 1.05rem; }
+    .design-preview-header span { opacity: .86; }
+    .design-preview-body { padding: 15px; }
+    .design-preview-tabs { display: flex; gap: 18px; border-bottom: 1px solid var(--site-line); }
+    .design-preview-tabs span { padding: 7px 2px; color: var(--site-muted); font-weight: 750; }
+    .design-preview-tabs .active { color: var(--site-primary-dark); border-bottom: 3px solid var(--site-primary); }
+    .design-preview-card { margin-top: 13px; padding: 14px; border: 1px solid var(--site-line); border-radius: 10px; background: white; color: var(--site-ink); }
+    .design-preview-card p { margin: 4px 0 12px; color: var(--site-muted); }
+    .design-preview-card button { background: var(--site-primary); color: var(--site-on-primary); }
+    .design-settings-actions { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; margin-top: 14px; }
+    .member-card.has-unsaved-changes { border-left: 4px solid var(--site-primary); }
+    .member-bulk-bar { position: fixed; left: 50%; bottom: max(14px, env(safe-area-inset-bottom)); z-index: 30; transform: translateX(-50%); display: flex; align-items: center; gap: 10px; width: min(720px, calc(100% - 28px)); padding: 11px 13px; border: 1px solid var(--site-line); border-radius: 12px; color: var(--site-ink); background: #fffffff2; box-shadow: 0 12px 36px #17203330; backdrop-filter: blur(12px); }
+    .member-bulk-bar[hidden] { display: none; }
+    .member-bulk-bar strong { margin-right: auto; }
+    .member-bulk-bar .status-message { flex: 1 1 auto; }
+    .member-bulk-bar button { flex: 0 0 auto; }
     .settings-status { flex: 0 0 auto; padding: 2px 0; color: #7a8497; background: transparent; font-size: var(--font-size-meta); font-weight: 750; white-space: nowrap; }
     .database-export-actions { display: flex; align-items: center; gap: 12px; margin-top: 16px; flex-wrap: wrap; }
     .database-download { display: inline-flex; align-items: center; justify-content: center; border-radius: var(--control-radius); padding: var(--button-padding-block) var(--button-padding-inline); color: white; background: #3658b2; font-size: var(--font-size-control); font-weight: 700; text-decoration: none; }
@@ -3856,17 +3898,34 @@ function adminHtml(
       .todo-action, .todo-link { width: 100%; }
       .practice-schedule-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .practice-schedule-card { align-items: flex-start; flex-direction: column; }
+      html, body { max-width: 100%; overflow-x: hidden; }
+      main, .admin-page-content, #tournament-list, .tournament-card, .tournament-card > * { min-width: 0; max-width: 100%; }
+      .tournament-card { overflow: hidden; }
+      .card-heading { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+      .card-title-actions { align-items: flex-start; flex-wrap: wrap; overflow-wrap: anywhere; }
+      .card-title-actions h3 { flex: 1 1 100%; overflow-wrap: anywhere; }
+      .workflow-progress { flex-wrap: wrap; overflow: visible; white-space: normal; }
+      .meta { overflow-wrap: anywhere; }
+      .status-row, .status-row label, .card-status-control { width: 100%; min-width: 0; }
+      .status-row select, .card-status-select { width: 100%; min-width: 0; }
+      .response-person { grid-template-columns: 3.5em minmax(0, 1fr); overflow-wrap: anywhere; }
+      .design-settings-controls { grid-template-columns: minmax(0, 1fr); }
+      .design-settings-controls > button { width: 100%; }
+      .member-bulk-bar { align-items: stretch; flex-wrap: wrap; }
+      .member-bulk-bar strong, .member-bulk-bar .status-message { flex: 1 1 100%; }
+      .member-bulk-bar button { flex: 1 1 calc(50% - 5px); }
+      header.has-site-banner { min-height: 90px; }
     }
   </style>
 </head>
-<body data-page="${page}">
+<body data-page="${page}" data-can-manage-tournaments="${String(canManageTournaments)}">
   <header><div class="header-inner"><div class="admin-brand"><span class="admin-brand-name">埼玉大学かるた会</span><h1>${portalName}</h1></div><span class="identity-wrap"><span id="identity">認証情報を確認中…</span><a id="logout" href="/auth/logout" hidden>ログアウト</a></span></div></header>
   <div class="tab-bar">
     <nav class="tabs" aria-label="管理画面メニュー">
       ${canManageTournaments ? `<a class="${tabClass("tournament-management")}" href="/register"${section === "tournament-management" ? ' aria-current="true"' : ""}>大会管理<span id="tournament-todo-count-badge" class="request-badge" role="status" aria-live="polite" hidden>0</span></a>` : ""}
       ${canManagePractice ? `<a class="${tabClass("practice")}" href="/practice"${currentPage("practice")}>練習管理</a>` : ""}
       <a class="${tabClass("members")}" href="/members"${currentPage("members")}>メンバー管理<span id="pending-request-badge" class="request-badge" role="status" aria-live="polite" hidden>0</span></a>
-      ${canManageTournaments ? `<a class="${tabClass("settings")}" href="/settings"${currentPage("settings")}>設定</a>` : ""}
+      <a class="${tabClass("settings")}" href="/settings"${currentPage("settings")}>設定</a>
     </nav>
   </div>
   <main${section === "tournament-management" ? ' class="tournament-workspace"' : ""}>
@@ -3957,17 +4016,40 @@ function adminHtml(
       <div id="member-list"></div>
       <div class="footnote">Discord IDそのものは管理画面に表示しません。氏名・よみがな・出場級・段位・在籍状態・DM送信設定の変更履歴は担当者情報とともに保存されます。</div>
     </section>
+    <div id="member-bulk-bar" class="member-bulk-bar" role="region" aria-label="メンバー変更の一括保存" hidden>
+      <strong id="member-bulk-count">変更はありません</strong>
+      <span id="member-bulk-message" class="status-message" role="status" aria-live="polite"></span>
+      <button id="discard-member-changes" type="button" class="secondary">変更を破棄</button>
+      <button id="save-member-changes" type="button">変更を一括保存</button>
+    </div>
     <section class="panel" aria-labelledby="settings-title"${hiddenPage("settings")}>
       <div class="settings-heading"><div class="settings-title-row"><h2 id="settings-title">設定</h2><span class="desktop-recommended">PC推奨</span></div></div>
       <div class="settings-layout">
         <nav class="settings-menu" role="tablist" aria-label="設定項目">
-          <button class="settings-menu-item" type="button" role="tab" aria-selected="true" aria-controls="message-settings" data-settings-view="messages">Discord Botメッセージ</button>
-          <button class="settings-menu-item" type="button" role="tab" aria-selected="false" aria-controls="deadline-settings" data-settings-view="deadlines">自動入力・期限</button>
-          <button class="settings-menu-item" type="button" role="tab" aria-selected="false" aria-controls="database-settings" data-settings-view="database">データ管理</button>
-          <button class="settings-menu-item" type="button" role="tab" aria-selected="false" aria-controls="manual-settings" data-settings-view="manuals">運用マニュアル</button>
+          <button class="settings-menu-item" type="button" role="tab" aria-selected="true" aria-controls="design-settings" data-settings-view="design">デザイン</button>
+          <button class="settings-menu-item tournament-setting" type="button" role="tab" aria-selected="false" aria-controls="message-settings" data-settings-view="messages">Discord Botメッセージ</button>
+          <button class="settings-menu-item tournament-setting" type="button" role="tab" aria-selected="false" aria-controls="deadline-settings" data-settings-view="deadlines">自動入力・期限</button>
+          <button class="settings-menu-item tournament-setting" type="button" role="tab" aria-selected="false" aria-controls="database-settings" data-settings-view="database">データ管理</button>
+          <button class="settings-menu-item tournament-setting" type="button" role="tab" aria-selected="false" aria-controls="manual-settings" data-settings-view="manuals">運用マニュアル</button>
         </nav>
         <div class="settings-content">
-          <section class="settings-panel" id="message-settings" role="tabpanel">
+          <section class="settings-panel" id="design-settings" role="tabpanel">
+            <div class="settings-panel-head"><h3>ページデザイン</h3><span id="design-settings-customized" class="settings-status">読み込み中…</span></div>
+            <p>管理画面とメンバーポータルに共通するメインカラーとヘッダーバナーを設定します。</p>
+            <form id="design-settings-form" class="design-settings-form">
+              <div class="design-settings-controls">
+                <label>メインカラー<span class="design-color-controls"><input id="design-primary-color" type="color" name="primaryColorPicker" value="#3658b2"><input id="design-primary-code" name="primaryColor" value="#3658b2" maxlength="7" pattern="#[0-9A-Fa-f]{6}" required></span></label>
+                <label>ヘッダーバナー <span class="optional">JPEG・PNG・WebP、5MB以内</span><input id="design-banner-file" type="file" name="banner" accept="image/jpeg,image/png,image/webp"></label>
+                <button id="remove-design-banner" type="button" class="secondary">バナー画像を外す</button>
+              </div>
+              <div class="design-preview" id="design-preview">
+                <div class="design-preview-header"><strong>埼玉大学かるた会</strong><span>ポータルのヘッダー</span></div>
+                <div class="design-preview-body"><div class="design-preview-tabs"><span class="active">選択中のタブ</span><span>通常のタブ</span></div><div class="design-preview-card"><strong>カード表示</strong><p>文字色と背景色はメインカラーから自動調整されます。</p><button type="button">ボタン</button></div></div>
+              </div>
+              <div class="design-settings-actions"><button id="save-design-settings" type="submit">デザインを保存</button><button id="reset-design-settings" type="button" class="secondary">初期設定に戻す</button><span id="design-settings-result" class="status-message" role="status" aria-live="polite"></span></div>
+            </form>
+          </section>
+          <section class="settings-panel tournament-setting" id="message-settings" role="tabpanel" hidden>
             <div class="settings-panel-head"><h3>Discord Botメッセージ</h3><span class="settings-status">本文のみ編集</span></div>
             <p>通知を選択して本文を変更します。大会名・氏名・期限・リンク・ボタンなどの自動表示部分は変更されません。</p>
             <div id="message-setting-status" class="status-message" role="status" aria-live="polite">読み込み中…</div>
@@ -3982,7 +4064,7 @@ function adminHtml(
               </form>
             </div>
           </section>
-          <section class="settings-panel" id="deadline-settings" role="tabpanel" hidden>
+          <section class="settings-panel tournament-setting" id="deadline-settings" role="tabpanel" hidden>
             <div class="settings-panel-head"><h3>自動入力・期限</h3><span id="deadline-settings-customized" class="settings-status">読み込み中…</span></div>
             <p>大会新規登録と参加費案内で自動入力する期限、未回答リマインダーの送信日時を設定します。保存済みの大会日時は変更されません。</p>
             <div id="deadline-setting-status" class="status-message" role="status" aria-live="polite">読み込み中…</div>
@@ -4001,13 +4083,13 @@ function adminHtml(
               <div class="deadline-settings-actions"><button id="save-deadline-settings" type="submit">設定を保存</button><button id="reset-deadline-settings" type="button" class="secondary">初期値に戻す</button><span id="deadline-settings-result" class="status-message" role="status" aria-live="polite"></span></div>
             </form>
           </section>
-          <section class="settings-panel" id="database-settings" role="tabpanel" hidden>
+          <section class="settings-panel tournament-setting" id="database-settings" role="tabpanel" hidden>
             <div class="settings-panel-head"><h3>データ管理</h3><span class="settings-status">管理者限定</span></div>
             <p>D1データベースの全データを、1テーブルにつき1つのCSVファイルとしてZIPにまとめてダウンロードします。</p>
             <div class="database-export-actions"><a class="database-download" href="/api/settings/database-export" download>CSVを一括ダウンロード</a></div>
             <p class="database-export-warning">氏名・よみがな・Discord IDなどの個人情報を含みます。ダウンロードしたファイルは共有せず、安全な場所で管理してください。</p>
           </section>
-          <section class="settings-panel" id="manual-settings" role="tabpanel" hidden>
+          <section class="settings-panel tournament-setting" id="manual-settings" role="tabpanel" hidden>
             <div class="settings-panel-head"><h3>運用マニュアル</h3><span class="settings-status">草案</span></div>
             <div class="manual-workspace">
               <nav class="manual-menu" role="tablist" aria-label="運用マニュアル目次">
@@ -4115,6 +4197,7 @@ function adminHtml(
     const currentPage = document.body.dataset.page;
     const settingsMenuItems = [...document.querySelectorAll('[data-settings-view]')];
     const settingsPanels = {
+      design: document.querySelector('#design-settings'),
       messages: document.querySelector('#message-settings'),
       deadlines: document.querySelector('#deadline-settings'),
       database: document.querySelector('#database-settings'),
@@ -4129,14 +4212,15 @@ function adminHtml(
     }
     manualMenuItems.forEach((item) => item.addEventListener('click', () => selectManualView(item.dataset.manualView)));
     function selectSettingsView(name, updateHash = true) {
-      const selected = Object.hasOwn(settingsPanels, name) ? name : 'messages';
+      const requested = Object.hasOwn(settingsPanels, name) ? name : 'design';
+      const selected = settingsMenuItems.some((item) => item.dataset.settingsView === requested && item.offsetParent !== null) ? requested : 'design';
       settingsMenuItems.forEach((item) => item.setAttribute('aria-selected', String(item.dataset.settingsView === selected)));
       Object.entries(settingsPanels).forEach(([key, panel]) => { panel.hidden = key !== selected; });
       if (updateHash) history.replaceState(null, '', '#settings-' + selected);
     }
     settingsMenuItems.forEach((item) => item.addEventListener('click', () => selectSettingsView(item.dataset.settingsView)));
     if (currentPage === 'settings') {
-      const settingsHash = location.hash.startsWith('#settings-') ? location.hash.slice(10) : 'messages';
+      const settingsHash = location.hash.startsWith('#settings-') ? location.hash.slice(10) : 'design';
       selectSettingsView(settingsHash, false);
       window.addEventListener('hashchange', () => selectSettingsView(location.hash.slice(10), false));
     }
@@ -4180,6 +4264,12 @@ function adminHtml(
     const memberMatchTitle = document.querySelector('#member-match-title');
     const memberMatchContent = document.querySelector('#member-match-content');
     const closeMemberMatch = document.querySelector('#close-member-match');
+    const memberBulkBar = document.querySelector('#member-bulk-bar');
+    const memberBulkCount = document.querySelector('#member-bulk-count');
+    const memberBulkMessage = document.querySelector('#member-bulk-message');
+    const discardMemberChanges = document.querySelector('#discard-member-changes');
+    const saveMemberChanges = document.querySelector('#save-member-changes');
+    const pendingMemberChanges = new Map();
     const requestList = document.querySelector('#request-list');
     const requestStatus = document.querySelector('#request-status');
     const pendingRequestBadge = document.querySelector('#pending-request-badge');
@@ -4206,6 +4296,16 @@ function adminHtml(
     const deadlineSettingsResult = document.querySelector('#deadline-settings-result');
     const saveDeadlineSettings = document.querySelector('#save-deadline-settings');
     const resetDeadlineSettings = document.querySelector('#reset-deadline-settings');
+    const designSettingsForm = document.querySelector('#design-settings-form');
+    const designPrimaryColor = document.querySelector('#design-primary-color');
+    const designPrimaryCode = document.querySelector('#design-primary-code');
+    const designBannerFile = document.querySelector('#design-banner-file');
+    const removeDesignBanner = document.querySelector('#remove-design-banner');
+    const designPreview = document.querySelector('#design-preview');
+    const designSettingsCustomized = document.querySelector('#design-settings-customized');
+    const designSettingsResult = document.querySelector('#design-settings-result');
+    const saveDesignSettings = document.querySelector('#save-design-settings');
+    const resetDesignSettings = document.querySelector('#reset-design-settings');
     const practiceScheduleForm = document.querySelector('#practice-schedule-form');
     const practiceScheduleRows = document.querySelector('#practice-schedule-rows');
     const practiceScheduleResult = document.querySelector('#practice-schedule-result');
@@ -4220,6 +4320,153 @@ function adminHtml(
     const practiceScheduleEditCancel = document.querySelector('#practice-schedule-edit-cancel');
     const practiceScheduleEditSave = document.querySelector('#practice-schedule-edit-save');
     let loadedPracticeSchedules = [];
+    let loadedSiteDesign = null;
+    let pendingBannerRemoval = false;
+    let pendingBannerPreviewUrl = '';
+    function applySiteDesign(design) {
+      if (!design) return;
+      const root = document.documentElement.style;
+      root.setProperty('--site-primary', design.primaryColor);
+      root.setProperty('--site-primary-dark', design.primaryDark);
+      root.setProperty('--site-primary-light', design.primaryLight);
+      root.setProperty('--site-background', design.backgroundColor);
+      root.setProperty('--site-line', design.lineColor);
+      root.setProperty('--site-ink', design.textColor);
+      root.setProperty('--site-muted', design.mutedTextColor);
+      root.setProperty('--site-on-primary', design.textOnPrimary);
+      const header = document.querySelector('body > header');
+      header.classList.toggle('has-site-banner', Boolean(design.bannerUrl));
+      header.style.backgroundImage = design.bannerUrl
+        ? 'linear-gradient(#0000004d,#0000004d),url("' + design.bannerUrl + '")'
+        : 'linear-gradient(135deg,' + design.primaryDark + ',' + design.primaryColor + ')';
+    }
+    function colorChannels(value) {
+      return [1, 3, 5].map((index) => Number.parseInt(value.slice(index, index + 2), 16));
+    }
+    function colorHex(channels) {
+      return '#' + channels.map((channel) => Math.round(channel).toString(16).padStart(2, '0')).join('');
+    }
+    function mixColor(color, target, targetWeight) {
+      const source = colorChannels(color); const destination = colorChannels(target);
+      return colorHex(source.map((channel, index) => channel * (1 - targetWeight) + destination[index] * targetWeight));
+    }
+    function colorLuminance(color) {
+      const channels = colorChannels(color).map((channel) => { const value = channel / 255; return value <= .03928 ? value / 12.92 : Math.pow((value + .055) / 1.055, 2.4); });
+      return .2126 * channels[0] + .7152 * channels[1] + .0722 * channels[2];
+    }
+    function colorContrast(first, second) {
+      const values = [colorLuminance(first), colorLuminance(second)];
+      return (Math.max(...values) + .05) / (Math.min(...values) + .05);
+    }
+    function readableMutedColor(textColor, backgroundColor) {
+      for (const weight of [.4, .34, .28, .2]) {
+        const candidate = mixColor(textColor, backgroundColor, weight);
+        if (colorContrast(candidate, backgroundColor) >= 4.5) return candidate;
+      }
+      return textColor;
+    }
+    function previewPalette(primaryColor) {
+      const rgb = colorChannels(primaryColor).map((channel) => { const value = channel / 255; return value <= .03928 ? value / 12.92 : Math.pow((value + .055) / 1.055, 2.4); });
+      const light = .2126 * rgb[0] + .7152 * rgb[1] + .0722 * rgb[2] > .48;
+      const backgroundColor = mixColor(primaryColor,'#ffffff',.96);
+      const textColor = mixColor(primaryColor,'#000000',light?.78:.72);
+      return {primaryColor,primaryDark:mixColor(primaryColor,'#000000',light?.48:.24),primaryLight:mixColor(primaryColor,'#ffffff',.86),backgroundColor,lineColor:mixColor(primaryColor,'#ffffff',.80),textColor,mutedTextColor:readableMutedColor(textColor,backgroundColor),textOnPrimary:light?'#172033':'#ffffff'};
+    }
+    function updateDesignPreview() {
+      if (!designPreview || !/^#[0-9a-f]{6}$/i.test(designPrimaryCode.value)) return;
+      const palette = previewPalette(designPrimaryCode.value.toLowerCase());
+      const preview = designPreview.style;
+      preview.setProperty('--site-primary', palette.primaryColor);
+      preview.setProperty('--site-primary-dark', palette.primaryDark);
+      preview.setProperty('--site-primary-light', palette.primaryLight);
+      preview.setProperty('--site-background', palette.backgroundColor);
+      preview.setProperty('--site-line', palette.lineColor);
+      preview.setProperty('--site-ink', palette.textColor);
+      preview.setProperty('--site-muted', palette.mutedTextColor);
+      preview.setProperty('--site-on-primary', palette.textOnPrimary);
+      const previewHeader = designPreview.querySelector('.design-preview-header');
+      const bannerUrl = pendingBannerRemoval ? '' : pendingBannerPreviewUrl || loadedSiteDesign?.bannerUrl || '';
+      previewHeader.style.backgroundImage = bannerUrl
+        ? 'linear-gradient(#0000004d,#0000004d),url("' + bannerUrl + '")'
+        : 'linear-gradient(135deg,' + palette.primaryDark + ',' + palette.primaryColor + ')';
+      removeDesignBanner.disabled = !bannerUrl;
+    }
+    async function loadSiteDesign() {
+      try {
+        const response = await fetch('/api/settings/design');
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.error || 'デザイン設定を取得できませんでした。');
+        loadedSiteDesign = body.design;
+        applySiteDesign(loadedSiteDesign);
+        if (designSettingsForm) {
+          designPrimaryColor.value = loadedSiteDesign.primaryColor;
+          designPrimaryCode.value = loadedSiteDesign.primaryColor;
+          designSettingsCustomized.textContent = loadedSiteDesign.customized ? '変更済み' : '初期設定';
+          resetDesignSettings.disabled = !loadedSiteDesign.customized;
+          pendingBannerRemoval = false;
+          pendingBannerPreviewUrl = '';
+          designBannerFile.value = '';
+          updateDesignPreview();
+        }
+      } catch (error) {
+        if (designSettingsResult) {
+          designSettingsResult.className = 'status-message error';
+          designSettingsResult.textContent = error instanceof Error ? error.message : 'デザイン設定を取得できませんでした。';
+        }
+      }
+    }
+    designPrimaryColor?.addEventListener('input', () => { designPrimaryCode.value = designPrimaryColor.value; updateDesignPreview(); });
+    designPrimaryCode?.addEventListener('input', () => { if (/^#[0-9a-f]{6}$/i.test(designPrimaryCode.value)) designPrimaryColor.value = designPrimaryCode.value; updateDesignPreview(); });
+    designBannerFile?.addEventListener('change', () => {
+      if (pendingBannerPreviewUrl.startsWith('blob:')) URL.revokeObjectURL(pendingBannerPreviewUrl);
+      pendingBannerPreviewUrl = designBannerFile.files[0] ? URL.createObjectURL(designBannerFile.files[0]) : '';
+      pendingBannerRemoval = false;
+      updateDesignPreview();
+    });
+    removeDesignBanner?.addEventListener('click', () => {
+      if (pendingBannerPreviewUrl.startsWith('blob:')) URL.revokeObjectURL(pendingBannerPreviewUrl);
+      pendingBannerPreviewUrl = '';
+      designBannerFile.value = '';
+      pendingBannerRemoval = true;
+      updateDesignPreview();
+    });
+    designSettingsForm?.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      saveDesignSettings.disabled = true; resetDesignSettings.disabled = true;
+      designSettingsResult.className = 'status-message'; designSettingsResult.textContent = '保存中…';
+      try {
+        const payload = new FormData();
+        payload.set('primaryColor', designPrimaryCode.value);
+        payload.set('removeBanner', String(pendingBannerRemoval));
+        if (designBannerFile.files[0]) payload.set('banner', designBannerFile.files[0]);
+        const response = await fetch('/api/settings/design', {method:'PATCH',body:payload});
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.error || 'デザイン設定を保存できませんでした。');
+        loadedSiteDesign = body.design; applySiteDesign(loadedSiteDesign);
+        designSettingsResult.textContent = '保存しました。両方のポータルへ反映されます。';
+        designSettingsCustomized.textContent = loadedSiteDesign.customized ? '変更済み' : '初期設定';
+        pendingBannerRemoval = false; pendingBannerPreviewUrl = ''; designBannerFile.value = '';
+        updateDesignPreview();
+      } catch (error) {
+        designSettingsResult.className = 'status-message error';
+        designSettingsResult.textContent = error instanceof Error ? error.message : 'デザイン設定を保存できませんでした。';
+      } finally { saveDesignSettings.disabled = false; resetDesignSettings.disabled = !loadedSiteDesign?.customized; }
+    });
+    resetDesignSettings?.addEventListener('click', async () => {
+      if (!confirm('メインカラーとバナー画像を初期設定に戻しますか？')) return;
+      saveDesignSettings.disabled = true; resetDesignSettings.disabled = true;
+      designSettingsResult.className = 'status-message'; designSettingsResult.textContent = '初期設定へ戻しています…';
+      try {
+        const response = await fetch('/api/settings/design', {method:'DELETE'}); const body = await response.json();
+        if (!response.ok) throw new Error(body.error || '初期設定へ戻せませんでした。');
+        loadedSiteDesign = body.design; applySiteDesign(loadedSiteDesign);
+        designPrimaryColor.value = loadedSiteDesign.primaryColor; designPrimaryCode.value = loadedSiteDesign.primaryColor;
+        pendingBannerRemoval = false; pendingBannerPreviewUrl = ''; designBannerFile.value = '';
+        designSettingsCustomized.textContent = '初期設定'; designSettingsResult.textContent = '初期設定へ戻しました。'; updateDesignPreview();
+      } catch (error) {
+        designSettingsResult.className = 'status-message error'; designSettingsResult.textContent = error instanceof Error ? error.message : '初期設定へ戻せませんでした。';
+      } finally { saveDesignSettings.disabled = false; resetDesignSettings.disabled = !loadedSiteDesign?.customized; }
+    });
     const workflowStatusLabels = {
       draft: '下書き',
       registration_open: '回答受付中',
@@ -6948,8 +7195,61 @@ function adminHtml(
       }
     }
 
+    function updateMemberBulkBar() {
+      const count = pendingMemberChanges.size;
+      memberBulkBar.hidden = count === 0;
+      memberBulkCount.textContent = count ? count + '人分の変更があります' : '変更はありません';
+      saveMemberChanges.textContent = count ? count + '人分の変更を一括保存' : '変更を一括保存';
+      saveMemberChanges.disabled = count === 0;
+      if (!count) memberBulkMessage.textContent = '';
+    }
+
+    async function discardAllMemberChanges() {
+      if (pendingMemberChanges.size && !confirm('未保存の変更をすべて破棄しますか？')) return;
+      pendingMemberChanges.clear();
+      updateMemberBulkBar();
+      await loadMembers();
+    }
+
+    async function saveAllMemberChanges() {
+      if (!pendingMemberChanges.size) return;
+      saveMemberChanges.disabled = true;
+      discardMemberChanges.disabled = true;
+      memberBulkMessage.className = 'status-message';
+      memberBulkMessage.textContent = '一括保存中…';
+      try {
+        const response = await fetch('/api/members', {
+          method: 'PATCH',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({updates:[...pendingMemberChanges.entries()].map(([memberId,input])=>({memberId,...input}))}),
+        });
+        const body = await response.json();
+        if (!response.ok) {
+          if (body.memberId) {
+            const card = memberList.querySelector('[data-member-id="' + CSS.escape(body.memberId) + '"]');
+            card?.scrollIntoView({behavior:'smooth',block:'center'});
+            card?.classList.add('has-unsaved-changes');
+          }
+          throw new Error(body.error || '変更を一括保存できませんでした。');
+        }
+        pendingMemberChanges.clear();
+        memberBulkMessage.textContent = body.members.length + '人分を保存しました。';
+        await loadMembers();
+      } catch (error) {
+        memberBulkMessage.className = 'status-message error';
+        memberBulkMessage.textContent = error instanceof Error ? error.message : '変更を一括保存できませんでした。';
+      } finally {
+        discardMemberChanges.disabled = false;
+        updateMemberBulkBar();
+      }
+    }
+
+    discardMemberChanges?.addEventListener('click', discardAllMemberChanges);
+    saveMemberChanges?.addEventListener('click', saveAllMemberChanges);
+
     function renderMember(member) {
       const card = element('article', 'member-card');
+      card.dataset.memberId = member.memberId;
       const summary = element('div', 'member-summary-grid');
       const summaryItem = (label, value) => {
         const item = element('div', 'member-summary-item', value);
@@ -7050,9 +7350,26 @@ function adminHtml(
       const actions = element('div', 'member-actions');
       const cancel = element('button', 'secondary', 'キャンセル');
       cancel.type = 'button';
-      const save = element('button', '', '変更を保存');
-      save.type = 'button';
       const message = element('span', 'status-message', '');
+      const currentInput = () => ({
+        lastName: lastNameInput.value,
+        firstName: firstNameInput.value,
+        lastNameKana: lastNameKanaInput.value,
+        firstNameKana: firstNameKanaInput.value,
+        grade: gradeSelect.value,
+        rank: Number(rankSelect.value),
+        status: statusSelect.value,
+        dmEnabled: dmCheckbox.checked,
+      });
+      const hasChanged = (input) => input.lastName !== member.lastName || input.firstName !== member.firstName || input.lastNameKana !== member.lastNameKana || input.firstNameKana !== member.firstNameKana || input.grade !== member.grade || input.rank !== Number(member.rank) || input.status !== member.status || input.dmEnabled !== member.dmEnabled;
+      const trackChanges = () => {
+        const input = currentInput();
+        if (hasChanged(input)) pendingMemberChanges.set(member.memberId, input);
+        else pendingMemberChanges.delete(member.memberId);
+        card.classList.toggle('has-unsaved-changes', pendingMemberChanges.has(member.memberId));
+        message.textContent = pendingMemberChanges.has(member.memberId) ? '未保存の変更があります。' : '';
+        updateMemberBulkBar();
+      };
       const resetEditor = () => {
         lastNameInput.value = member.lastName || '';
         firstNameInput.value = member.firstName || '';
@@ -7062,8 +7379,11 @@ function adminHtml(
         rankSelect.value = String(member.rank);
         statusSelect.value = member.status;
         dmCheckbox.checked = member.dmEnabled;
+        pendingMemberChanges.delete(member.memberId);
+        card.classList.remove('has-unsaved-changes');
         message.className = 'status-message';
         message.textContent = '';
+        updateMemberBulkBar();
       };
       edit.addEventListener('click', () => {
         resetEditor();
@@ -7076,37 +7396,9 @@ function adminHtml(
         editor.hidden = true;
         summary.hidden = false;
       });
-      save.addEventListener('click', async () => {
-        save.disabled = true;
-        message.className = 'status-message';
-        message.textContent = '変更中…';
-        try {
-          const response = await fetch('/api/members/' + encodeURIComponent(member.memberId), {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              lastName: lastNameInput.value,
-              firstName: firstNameInput.value,
-              lastNameKana: lastNameKanaInput.value,
-              firstNameKana: firstNameKanaInput.value,
-              grade: gradeSelect.value,
-              rank: Number(rankSelect.value),
-              status: statusSelect.value,
-              dmEnabled: dmCheckbox.checked,
-            }),
-          });
-          const body = await response.json();
-          if (!response.ok) throw new Error(body.error || '変更に失敗しました。');
-          message.textContent = '変更しました。';
-          await loadMembers();
-        } catch (error) {
-          message.className = 'status-message error';
-          message.textContent = error instanceof Error ? error.message : '変更に失敗しました。';
-        } finally {
-          save.disabled = false;
-        }
-      });
-      actions.append(cancel, save, message);
+      [lastNameInput, firstNameInput, lastNameKanaInput, firstNameKanaInput, gradeSelect, rankSelect, statusSelect, dmCheckbox]
+        .forEach((control) => control.addEventListener('input', trackChanges));
+      actions.append(cancel, message);
       editor.append(actions);
       card.append(editor);
       return card;
@@ -7577,7 +7869,7 @@ function adminHtml(
       loadDeadlineAutomationSettings().then(loadTournaments);
     }
     if (currentPage === 'members') {
-      refreshMembers.addEventListener('click', loadMembers);
+      refreshMembers.addEventListener('click', discardAllMemberChanges);
       loadMembers();
     }
     if (currentPage === 'practice') {
@@ -7592,12 +7884,15 @@ function adminHtml(
       loadPracticeSchedules();
     }
     if (currentPage === 'settings') {
-      loadMessageTemplates();
-      loadDeadlineAutomationSettings();
+      if (adminPermissions.includes('tournament')) {
+        loadMessageTemplates();
+        loadDeadlineAutomationSettings();
+      }
     }
     if (currentPage === 'register') {
       loadDeadlineAutomationSettings().then(initializeTournamentFormDefaults);
     }
+    loadSiteDesign();
   </script>
 </body>
 </html>`;
@@ -7705,6 +8000,46 @@ export async function handleAdminRequest(
   const requiredApiPermission = apiPermission(url.pathname);
   if (requiredApiPermission && !permissions.includes(requiredApiPermission)) {
     return json({ error: "この操作を行う担当者権限がありません。" }, 403);
+  }
+
+  if (request.method === "GET" && url.pathname === "/site-banner") {
+    return serveSiteBanner(env.DB, env.DOCUMENTS);
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/settings/design") {
+    return json({ design: await getSiteDesignSetting(env.DB) });
+  }
+
+  if (request.method === "PATCH" && url.pathname === "/api/settings/design") {
+    if (!isSameOrigin(request)) return json({ error: "不正な送信元です。" }, 403);
+    if (!request.headers.get("Content-Type")?.toLowerCase().startsWith("multipart/form-data")) {
+      return json({ error: "デザイン設定をフォーム形式で送信してください。" }, 415);
+    }
+    try {
+      const form = await request.formData();
+      const bannerValue = form.get("banner");
+      const banner = bannerValue instanceof File && bannerValue.size > 0 ? bannerValue : null;
+      const design = await saveSiteDesignSetting(env.DB, {
+        primaryColor: form.get("primaryColor"),
+        banner,
+        removeBanner: form.get("removeBanner") === "true",
+      }, env.DOCUMENTS, actor);
+      return json({ design });
+    } catch (error: unknown) {
+      if (error instanceof SiteDesignError) return json({ error: error.message }, error.statusCode);
+      console.error("デザイン設定の保存エラー", error);
+      return json({ error: "デザイン設定を保存できませんでした。" }, 500);
+    }
+  }
+
+  if (request.method === "DELETE" && url.pathname === "/api/settings/design") {
+    if (!isSameOrigin(request)) return json({ error: "不正な送信元です。" }, 403);
+    try {
+      return json({ design: await resetSiteDesignSetting(env.DB, env.DOCUMENTS) });
+    } catch (error: unknown) {
+      console.error("デザイン設定の初期化エラー", error);
+      return json({ error: "デザイン設定を初期設定へ戻せませんでした。" }, 500);
+    }
   }
 
   if (request.method === "GET" && url.pathname === "/api/practice/schedules") {
@@ -8045,6 +8380,33 @@ export async function handleAdminRequest(
     } catch (error: unknown) {
       console.error("メンバー一覧の取得エラー", error);
       return json({ error: "メンバー一覧を取得できませんでした。" }, 500);
+    }
+  }
+
+  if (request.method === "PATCH" && url.pathname === "/api/members") {
+    if (!isSameOrigin(request)) return json({ error: "不正な送信元です。" }, 403);
+    if (!request.headers.get("Content-Type")?.toLowerCase().startsWith("application/json")) {
+      return json({ error: "JSON形式で送信してください。" }, 415);
+    }
+    try {
+      const body = await request.json<{ updates?: unknown }>();
+      if (!Array.isArray(body.updates)) {
+        throw new MemberAdminError("変更するメンバーを指定してください。", 400);
+      }
+      const updates = body.updates.map((update) => ({
+        ...(typeof update === "object" && update !== null ? update : {}),
+      })).map((update) => ({
+        memberId: typeof update.memberId === "string" ? update.memberId : "",
+        input: update as unknown as MemberUpdateInput,
+      }));
+      const members = await updateAdminMembers(env, updates, actor);
+      return json({ members });
+    } catch (error: unknown) {
+      if (error instanceof MemberAdminError) {
+        return json({ error: error.message, memberId: error.memberId }, error.statusCode);
+      }
+      console.error("メンバー情報の一括変更エラー", error);
+      return json({ error: "メンバー情報を一括変更できませんでした。" }, 500);
     }
   }
 
