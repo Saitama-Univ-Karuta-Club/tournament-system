@@ -3816,7 +3816,9 @@ function adminHtml(
     .practice-period-card { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 12px; border: 1px solid #dce1eb; border-radius: 9px; background: #f8f9fc; }
     .practice-period-card strong { grid-column: 1 / -1; }
     .practice-period-card label, .practice-default-grid label { color: #465166; font-size: var(--font-size-note); font-weight: 750; }
-    .practice-period-card input, .practice-default-grid select { display: block; width: 100%; margin-top: 4px; }
+    .practice-default-grid label { gap: 2px; }
+    .practice-period-card input { display: block; width: 100%; margin-top: 4px; }
+    .practice-default-grid select { display: block; width: 100%; margin-top: 0; }
     .practice-default-grid { display: grid; grid-template-columns: repeat(2, minmax(180px, 280px)); gap: 10px; margin-top: 13px; }
     .practice-venue-settings { display: grid; gap: 8px; max-width: 760px; margin-top: 18px; }
     .practice-venue-settings-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
