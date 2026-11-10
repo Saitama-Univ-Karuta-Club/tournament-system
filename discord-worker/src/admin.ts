@@ -3821,9 +3821,10 @@ function adminHtml(
     .practice-venue-settings { display: grid; gap: 8px; max-width: 760px; margin-top: 18px; }
     .practice-venue-settings-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
     .practice-venue-settings-head h5 { margin: 0; font-size: var(--font-size-body); }
+    #practice-venue-setting-rows { display: grid; gap: 12px; }
     .practice-venue-row { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(100px, .55fr) auto; gap: 8px; align-items: end; }
-    .practice-venue-row label { color: #465166; font-size: var(--font-size-note); font-weight: 750; }
-    .practice-venue-row input { display: block; width: 100%; margin-top: 4px; }
+    .practice-venue-row label { gap: 2px; color: #465166; font-size: var(--font-size-note); font-weight: 750; }
+    .practice-venue-row input { display: block; width: 100%; margin-top: 0; }
     .practice-venue-row button { min-height: 40px; }
     @media (max-width: 760px) { .practice-period-grid, .practice-default-grid { grid-template-columns: 1fr; } .practice-venue-row { grid-template-columns: 1fr 1fr; } .practice-venue-row button { grid-column: 1 / -1; } }
     .manual-workspace { display: grid; grid-template-columns: 190px minmax(0, 1fr); min-width: 0; border-top: 1px solid #dce1eb; }
