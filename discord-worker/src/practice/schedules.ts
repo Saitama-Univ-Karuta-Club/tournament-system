@@ -410,20 +410,35 @@ export async function loadPracticeScheduleReminder(
   return buildPracticeScheduleReminder(data);
 }
 
-async function loadAnnouncementSchedules(
+export async function loadAnnouncementSchedules(
   env: PracticeEnv,
   schedule: ScheduleRow,
 ): Promise<ScheduleRow[]> {
-  if (!schedule.registration_batch_id) return [schedule];
-  const batch = await env.DB.prepare(
+  let addedSchedules = [schedule];
+  if (schedule.registration_batch_id) {
+    const batch = await env.DB.prepare(
+      `SELECT schedule_id, practice_date, start_time, end_time, title, location,
+              note, status, created_by_member_id, created_by_admin_identity,
+              registration_batch_id, announcement_message_id
+       FROM practice_schedules
+       WHERE registration_batch_id = ? AND status = 'scheduled'
+       ORDER BY practice_date, COALESCE(start_time, '99:99'), created_at`,
+    ).bind(schedule.registration_batch_id).all<ScheduleRow>();
+    if (batch.results.length) addedSchedules = batch.results;
+  }
+
+  const months = [...new Set(addedSchedules.map((item) => item.practice_date.slice(0, 7)))];
+  const placeholders = months.map(() => "?").join(", ");
+  const current = await env.DB.prepare(
     `SELECT schedule_id, practice_date, start_time, end_time, title, location,
             note, status, created_by_member_id, created_by_admin_identity,
             registration_batch_id, announcement_message_id
      FROM practice_schedules
-     WHERE registration_batch_id = ? AND status = 'scheduled'
+     WHERE status = 'scheduled'
+       AND substr(practice_date, 1, 7) IN (${placeholders})
      ORDER BY practice_date, COALESCE(start_time, '99:99'), created_at`,
-  ).bind(schedule.registration_batch_id).all<ScheduleRow>();
-  return batch.results.length ? batch.results : [schedule];
+  ).bind(...months).all<ScheduleRow>();
+  return current.results.length ? current.results : addedSchedules;
 }
 
 export async function enqueuePracticeScheduleReminders(

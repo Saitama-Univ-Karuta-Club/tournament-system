@@ -5,6 +5,7 @@ import {
   completeExpiredPracticeSchedules,
   createPracticeSchedules,
   enqueuePracticeScheduleReminders,
+  loadAnnouncementSchedules,
   savePracticeScheduleMemberResponse,
   updatePracticeSchedule,
 } from "../src/practice/schedules";
@@ -87,6 +88,34 @@ describe("practice schedule Discord messages", () => {
 });
 
 describe("practice schedule persistence", () => {
+  it("loads the latest calendar with existing schedules in every newly added month", async () => {
+    const added = {
+      ...schedule,
+      schedule_id: "PS-33333333-3333-4333-8333-333333333333",
+      practice_date: "2026-11-15",
+      registration_batch_id: "PSB-33333333-3333-4333-8333-333333333333",
+    };
+    const existing = [
+      { ...schedule, practice_date: "2026-11-12" },
+      { ...schedule, schedule_id: "PS-22222222-2222-4222-8222-222222222222", practice_date: "2026-11-13" },
+      added,
+    ];
+    const all = vi.fn()
+      .mockResolvedValueOnce({ results: [added] })
+      .mockResolvedValueOnce({ results: existing });
+    const bind = vi.fn(() => ({ all }));
+    const prepare = vi.fn(() => ({ bind }));
+
+    await expect(loadAnnouncementSchedules(
+      { DB: { prepare } as unknown as D1Database },
+      added,
+    )).resolves.toEqual(existing);
+
+    expect(bind).toHaveBeenNthCalledWith(1, added.registration_batch_id);
+    expect(bind).toHaveBeenNthCalledWith(2, "2026-11");
+    expect(prepare).toHaveBeenNthCalledWith(2, expect.stringContaining("substr(practice_date, 1, 7) IN (?)"));
+  });
+
   it("marks schedules completed after their JST end time", async () => {
     const run = vi.fn().mockResolvedValue({ meta: { changes: 2 } });
     const bind = vi.fn(() => ({ run }));
