@@ -106,7 +106,7 @@ function drawMonthSvg(
   const padding = compact ? 22 : 42;
   const titleSize = compact ? 34 : 58;
   const weekdaySize = compact ? 13 : 18;
-  const daySize = compact ? 12 : 16;
+  const daySize = compact ? 15 : 20;
   const titleY = y + (compact ? 46 : 78);
   const parts: string[] = [text(`${month}月${year}`, x + padding, titleY, titleSize, COLORS.green, { weight: 400 })];
 
@@ -165,10 +165,11 @@ function drawMonthSvg(
         const clipId = `cell-${clipIndex}`;
         clipIndex += 1;
         const contentX = cellX + (compact ? 6 : 10);
-        const headerY = rowY + (compact ? 15 : 20);
-        const venueY = rowY + (compact ? 33 : 52);
-        const noteFirstY = rowY + (compact ? 49 : 79);
-        const noteSecondY = rowY + (compact ? 65 : 105);
+        const roomyCell = !compact && rowHeight >= 135;
+        const headerY = rowY + (compact ? 17 : roomyCell ? 26 : 22);
+        const venueY = rowY + (compact ? 35 : roomyCell ? 60 : 53);
+        const noteFirstY = rowY + (compact ? 51 : roomyCell ? 94 : 80);
+        const noteSecondY = rowY + (compact ? 67 : roomyCell ? 123 : 107);
         const venueSize = compact ? 17 : 28;
         const noteSize = compact ? 13 : 23;
         parts.push(`<clipPath id="${clipId}"><rect x="${cellX + 2}" y="${rowY + 2}" width="${cellWidth - 4}" height="${rowHeight - 4}"/></clipPath>`);
