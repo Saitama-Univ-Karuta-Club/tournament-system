@@ -103,7 +103,7 @@ describe("Admin Worker", () => {
 
     expect(response.status).toBe(401);
     await expect(response.json()).resolves.toEqual({
-      error: "Discordでの大会担当者ログインが必要です。",
+      error: "Discordでの担当者ログインが必要です。",
     });
   });
 
@@ -122,6 +122,7 @@ describe("Admin Worker", () => {
     ["todo", "TODO"],
     ["register", "大会新規登録"],
     ["tournaments", "一覧"],
+    ["practice", "練習管理"],
     ["members", "メンバー管理"],
     ["settings", "設定"],
   ])("serves the %s page with tab navigation", async (path, label) => {
@@ -248,6 +249,103 @@ describe("Admin Worker", () => {
     expect(settingsHtml).toContain('>基準と同じ</option><option value="custom">自由設定</option>');
     expect(settingsHtml).toContain("timeInput.hidden = modeSelect.value !== 'custom'");
     expect(settingsHtml).toContain("fetch('/api/settings/deadlines')");
+  });
+
+  it("renders practice schedule management only in the admin portal", async () => {
+    const response = await handleAdminRequest(
+      new Request("https://admin.example.com/practice"),
+      env,
+      authenticatedContext(),
+    );
+    const html = await response.text();
+
+    expect(html).toContain('href="/practice" aria-current="page">練習管理</a>');
+    expect(html).toContain('id="practice-schedule-form"');
+    expect(html).toContain('id="practice-schedule-rows"');
+    expect(html).toContain('id="practice-schedule-list"');
+    expect(html).toContain('id="practice-schedule-edit-dialog"');
+    expect(html).toContain("fetch('/api/practice/schedules'");
+    expect(html).toContain("method: 'POST'");
+    expect(html).toContain("method: 'PATCH'");
+    expect(html).toContain("practiceScheduleField('開始', 'time', 'startTime', { value: '18:00' })");
+    expect(html).toContain("practiceScheduleField('終了', 'time', 'endTime', { value: '21:30' })");
+    expect(html).toContain("value: '大久保東公民館'");
+    expect(html).toContain('data-page="practice"');
+  });
+
+  it("registers practice schedules through the authenticated admin API", async () => {
+    type Statement = { sql: string; values: unknown[] };
+    const batched: Statement[] = [];
+    const adminDb = {
+      prepare(sql: string) {
+        return {
+          bind: (...values: unknown[]) => ({ sql, values }),
+          all: vi.fn().mockResolvedValue({ results: [] }),
+        };
+      },
+      async batch(statements: Statement[]) {
+        batched.push(...statements);
+        return statements.map(() => ({ success: true }));
+      },
+    };
+    const response = await handleAdminRequest(
+      new Request("https://admin.example.com/api/practice/schedules", {
+        method: "POST",
+        headers: {
+          Origin: "https://admin.example.com",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          schedules: [{ practiceDate: "2026-11-01", title: "通常練習" }],
+        }),
+      }),
+      { ...env, DB: adminDb as unknown as D1Database },
+      authenticatedContext(),
+    );
+
+    expect(response.status).toBe(201);
+    expect(batched).toHaveLength(2);
+    expect(batched[0].sql).toContain("created_by_admin_identity");
+    expect(batched[0].values).toContain("admin@example.com");
+    await expect(response.json()).resolves.toMatchObject({ schedules: [] });
+  });
+
+  it("edits practice schedules through the practice administrator API", async () => {
+    const prepared: string[] = [];
+    const run = vi.fn().mockResolvedValue({ meta: { changes: 1 } });
+    const all = vi.fn().mockResolvedValue({ results: [] });
+    const adminDb = {
+      prepare(sql: string) {
+        prepared.push(sql);
+        return {
+          bind: (..._values: unknown[]) => ({ run, all }),
+          all,
+        };
+      },
+    };
+    const response = await handleAdminRequest(
+      new Request("https://admin.example.com/api/practice/schedules/PS-11111111-1111-4111-8111-111111111111", {
+        method: "PATCH",
+        headers: {
+          Origin: "https://admin.example.com",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          practiceDate: "2026-11-03",
+          startTime: "18:00",
+          endTime: "21:30",
+          title: "変更後の練習",
+          location: "大久保東公民館",
+          note: "変更あり",
+        }),
+      }),
+      { ...env, DB: adminDb as unknown as D1Database },
+      authenticatedContext(),
+    );
+
+    expect(response.status).toBe(200);
+    expect(prepared.some((sql) => sql.includes("SET practice_date = ?"))).toBe(true);
+    await expect(response.json()).resolves.toMatchObject({ schedules: [] });
   });
 
   it("renders a simple TODO page with one-tap completion actions", async () => {

@@ -1,0 +1,39 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "sukc-general-man-bot",
+  "main": "src/general-bot.ts",
+  "compatibility_date": "2026-10-30",
+  "observability": {
+    "enabled": true
+  },
+  "triggers": {
+    "crons": ["*/1 * * * *"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "sukc-tournament-discord-db",
+      "database_id": "d1e159c8-0bc9-4065-a00b-15f8edd21d82",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "env": {
+    "development": {
+      "vars": {
+        "ENVIRONMENT": "development",
+        "DISCORD_GUILD_ID": "1561041857952223352"
+      },
+      "triggers": {
+        "crons": ["*/1 * * * *"]
+      },
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "sukc-tournament-discord-db-development",
+          "database_id": "86c04659-78f6-4bdb-909f-c7de05ad4246",
+          "migrations_dir": "migrations"
+        }
+      ]
+    }
+  }
+}

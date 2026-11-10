@@ -26,4 +26,4 @@ if (!response.ok) {
   throw new Error(`Discordへのコマンド登録に失敗しました (${response.status}): ${await response.text()}`);
 }
 
-console.log("練習記録屋さんのコマンドを登録しました。");
+console.log("かるた練習帖のコマンドを登録しました。");

@@ -33,7 +33,8 @@ export interface DiscordMessagePayload {
       type: number;
       style: number;
       label: string;
-      custom_id: string;
+      custom_id?: string;
+      url?: string;
     }>;
   }>;
   allowed_mentions?: {

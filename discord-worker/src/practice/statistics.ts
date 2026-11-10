@@ -15,6 +15,12 @@ export interface MemberMatchRecord {
   outcome: MatchOutcome;
   scoreDifference: number | null;
   note: string | null;
+  faultCount?: number | null;
+  cardsTaken?: number | null;
+  opponentRightTaken?: number | null;
+  opponentLeftTaken?: number | null;
+  ownRightTaken?: number | null;
+  ownLeftTaken?: number | null;
 }
 
 export interface StatisticRow {

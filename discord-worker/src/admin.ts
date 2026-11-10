@@ -38,6 +38,7 @@ import {
 import {
   handleAdminAuthRequest,
   readAdminDiscordPrincipal,
+  type AdminPermission,
   type AdminAuthEnv,
 } from "./admin-auth";
 import {
@@ -82,6 +83,12 @@ import {
   type LotteryRosterReport,
   type RosterExtractionCandidate,
 } from "./roster-auto-fill";
+import {
+  createPracticeSchedules,
+  listPracticeSchedules,
+  updatePracticeSchedule,
+} from "./practice/schedules";
+import { PracticeError } from "./practice/service";
 
 export interface AdminEnv extends TournamentEnv, DocumentEnv, AdminAuthEnv, ExcelProfileEnv {
   ENVIRONMENT?: string;
@@ -3274,19 +3281,46 @@ function isSameOrigin(request: Request): boolean {
   return origin === new URL(request.url).origin;
 }
 
-type AdminPage = "todo" | "register" | "tournaments" | "members" | "settings";
-type AdminSection = "tournament-management" | "members" | "settings";
+type AdminPage = "todo" | "register" | "tournaments" | "practice" | "members" | "settings";
+type AdminSection = "tournament-management" | "practice" | "members" | "settings";
 
-function adminHtml(page: AdminPage, environment?: string): string {
+function defaultAdminPath(permissions: AdminPermission[]): string {
+  return permissions.includes("tournament") ? "/register" : "/practice";
+}
+
+function pagePermission(page: AdminPage): AdminPermission | null {
+  if (page === "practice") return "practice";
+  if (["todo", "register", "tournaments", "settings"].includes(page)) return "tournament";
+  return null;
+}
+
+function apiPermission(pathname: string): AdminPermission | null {
+  if (pathname === "/api/session") return null;
+  if (pathname.startsWith("/api/practice/")) return "practice";
+  if (pathname === "/api/members" || pathname.startsWith("/api/members/")) return null;
+  if (pathname === "/api/member-requests" || pathname.startsWith("/api/member-requests/")) return null;
+  return pathname.startsWith("/api/") ? "tournament" : null;
+}
+
+function adminHtml(
+  page: AdminPage,
+  permissions: AdminPermission[],
+  environment?: string,
+): string {
+  const canManageTournaments = permissions.includes("tournament");
+  const canManagePractice = permissions.includes("practice");
   const pageTitle = {
     todo: "TODO",
     register: "大会新規登録",
     tournaments: "大会一覧・回答集計",
+    practice: "練習管理",
     members: "メンバー管理",
     settings: "設定",
   }[page];
   const section: AdminSection = page === "members"
     ? "members"
+    : page === "practice"
+    ? "practice"
     : page === "settings"
     ? "settings"
     : "tournament-management";
@@ -3669,6 +3703,26 @@ function adminHtml(page: AdminPage, environment?: string): string {
     .database-download { display: inline-flex; align-items: center; justify-content: center; border-radius: var(--control-radius); padding: var(--button-padding-block) var(--button-padding-inline); color: white; background: #3658b2; font-size: var(--font-size-control); font-weight: 700; text-decoration: none; }
     .database-download:hover { background: #294796; }
     .database-export-warning { max-width: 720px; margin-top: 16px !important; padding: 10px 12px; border-left: 4px solid #da8c10; color: #6f4b12 !important; background: #fff7e8; font-size: var(--font-size-note) !important; }
+    .practice-schedule-intro { margin: -8px 0 18px; color: #596579; }
+    .practice-schedule-rows { display: grid; gap: 10px; }
+    .practice-schedule-row { display: grid; grid-template-columns: minmax(130px, 1.1fr) minmax(92px, .7fr) minmax(92px, .7fr) minmax(130px, 1fr) minmax(130px, 1fr) minmax(150px, 1.2fr) auto; gap: 8px; align-items: end; padding: 12px; border-radius: 9px; background: #f5f7fb; }
+    .practice-schedule-row label { min-width: 0; color: #596579; font-size: var(--font-size-meta); }
+    .practice-schedule-row input { min-height: 38px; padding: 7px 8px; background: white; }
+    button.practice-schedule-remove, button.practice-schedule-add { white-space: nowrap; color: #294796; background: #edf1ff; }
+    button.practice-schedule-remove:hover, button.practice-schedule-add:hover { background: #dfe6ff; }
+    button.practice-schedule-remove:disabled { opacity: .4; cursor: default; }
+    .practice-schedule-actions { justify-content: flex-end; }
+    .practice-schedule-actions .status-message { margin-right: auto; }
+    .practice-schedule-list { display: grid; gap: 10px; }
+    .practice-schedule-card { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 12px 14px; border: 1px solid #dce1eb; border-radius: 9px; }
+    .practice-schedule-card-title { font-weight: 800; }
+    .practice-schedule-card-meta { margin-top: 3px; color: #596579; font-size: var(--font-size-note); }
+    .practice-schedule-card-status { display: inline-flex; margin-left: 7px; padding: 2px 7px; border-radius: 999px; color: #596579; background: #edf0f5; font-size: var(--font-size-meta); font-weight: 750; vertical-align: middle; }
+    .practice-schedule-card-status.scheduled { color: #17643a; background: #e4f7ec; }
+    .practice-schedule-card-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; flex-wrap: wrap; }
+    .practice-schedule-counts { display: flex; flex-wrap: wrap; gap: 6px; }
+    .practice-schedule-counts span { padding: 4px 8px; border-radius: 999px; color: #294796; background: #edf1ff; font-size: var(--font-size-meta); font-weight: 800; white-space: nowrap; }
+    .practice-schedule-empty { padding: 24px 12px; border: 1px dashed #cfd6e3; border-radius: 9px; color: #697386; text-align: center; }
     .message-settings-workspace { display: grid; grid-template-columns: 230px minmax(0, 1fr); min-width: 0; border-top: 1px solid #dce1eb; }
     .message-template-list { min-width: 0; padding: 8px 16px 8px 0; border-right: 1px solid #dce1eb; }
     .message-template-category { border-bottom: 1px solid #e7eaf0; }
@@ -3800,6 +3854,8 @@ function adminHtml(page: AdminPage, environment?: string): string {
       .list-controls label { flex: 1 1 100%; }
       .todo-card { grid-template-columns: minmax(0, 1fr); }
       .todo-action, .todo-link { width: 100%; }
+      .practice-schedule-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .practice-schedule-card { align-items: flex-start; flex-direction: column; }
     }
   </style>
 </head>
@@ -3807,9 +3863,10 @@ function adminHtml(page: AdminPage, environment?: string): string {
   <header><div class="header-inner"><div class="admin-brand"><span class="admin-brand-name">埼玉大学かるた会</span><h1>${portalName}</h1></div><span class="identity-wrap"><span id="identity">認証情報を確認中…</span><a id="logout" href="/auth/logout" hidden>ログアウト</a></span></div></header>
   <div class="tab-bar">
     <nav class="tabs" aria-label="管理画面メニュー">
-      <a class="${tabClass("tournament-management")}" href="/register"${section === "tournament-management" ? ' aria-current="true"' : ""}>大会管理<span id="tournament-todo-count-badge" class="request-badge" role="status" aria-live="polite" hidden>0</span></a>
+      ${canManageTournaments ? `<a class="${tabClass("tournament-management")}" href="/register"${section === "tournament-management" ? ' aria-current="true"' : ""}>大会管理<span id="tournament-todo-count-badge" class="request-badge" role="status" aria-live="polite" hidden>0</span></a>` : ""}
+      ${canManagePractice ? `<a class="${tabClass("practice")}" href="/practice"${currentPage("practice")}>練習管理</a>` : ""}
       <a class="${tabClass("members")}" href="/members"${currentPage("members")}>メンバー管理<span id="pending-request-badge" class="request-badge" role="status" aria-live="polite" hidden>0</span></a>
-      <a class="${tabClass("settings")}" href="/settings"${currentPage("settings")}>設定</a>
+      ${canManageTournaments ? `<a class="${tabClass("settings")}" href="/settings"${currentPage("settings")}>設定</a>` : ""}
     </nav>
   </div>
   <main${section === "tournament-management" ? ' class="tournament-workspace"' : ""}>
@@ -3872,6 +3929,19 @@ function adminHtml(page: AdminPage, environment?: string): string {
       </div>
       <div id="list-status" role="status" aria-live="polite">読み込み中…</div>
       <div id="tournament-list"></div>
+    </section>
+    <section class="panel" aria-labelledby="practice-schedule-title"${hiddenPage("practice")}>
+      <h2 id="practice-schedule-title">練習日程を登録</h2>
+      <p class="practice-schedule-intro">複数の日程をまとめて登録し、かるた練習帖からDiscordへ案内します。</p>
+      <form id="practice-schedule-form">
+        <div id="practice-schedule-rows" class="practice-schedule-rows"></div>
+        <div class="actions practice-schedule-actions"><span id="practice-schedule-result" class="status-message" role="status" aria-live="polite"></span><button id="practice-schedule-add" type="button" class="practice-schedule-add">日程を追加</button><button id="practice-schedule-submit" type="submit">まとめて登録</button></div>
+      </form>
+    </section>
+    <section class="panel" aria-labelledby="practice-schedule-list-title"${hiddenPage("practice")}>
+      <div class="list-heading"><h2 id="practice-schedule-list-title">登録済み日程</h2><button id="refresh-practice-schedules" type="button" class="secondary">再読み込み</button></div>
+      <div id="practice-schedule-list-status" class="status-message" role="status" aria-live="polite">読み込み中…</div>
+      <div id="practice-schedule-list" class="practice-schedule-list"></div>
     </section>
     <section class="panel" aria-labelledby="request-list-title"${hiddenPage("members")}>
       <h2 id="request-list-title">登録・変更申請</h2>
@@ -3987,6 +4057,21 @@ function adminHtml(page: AdminPage, environment?: string): string {
     </section>
     </div>
   </main>
+  <dialog id="practice-schedule-edit-dialog">
+    <form id="practice-schedule-edit-form" class="dialog-form">
+      <h2>練習日程を編集</h2>
+      <input type="hidden" name="scheduleId">
+      <div class="grid">
+        <label>練習日<input type="date" name="practiceDate" required></label>
+        <label>練習名<input name="title" maxlength="100" required></label>
+        <label>開始時刻<input type="time" name="startTime"></label>
+        <label>終了時刻<input type="time" name="endTime"></label>
+        <label class="wide">会場<input name="location" maxlength="100"></label>
+        <label class="wide">連絡事項<textarea name="note" maxlength="500" rows="3"></textarea></label>
+      </div>
+      <div class="dialog-actions"><span id="practice-schedule-edit-result" class="status-message" role="status" aria-live="polite"></span><button id="practice-schedule-edit-cancel" type="button" class="secondary">キャンセル</button><button id="practice-schedule-edit-save" type="submit">変更を保存</button></div>
+    </form>
+  </dialog>
   <dialog id="status-confirm-dialog">
     <div class="dialog-form">
       <h2>大会ステータスを変更しますか？</h2>
@@ -4121,6 +4206,20 @@ function adminHtml(page: AdminPage, environment?: string): string {
     const deadlineSettingsResult = document.querySelector('#deadline-settings-result');
     const saveDeadlineSettings = document.querySelector('#save-deadline-settings');
     const resetDeadlineSettings = document.querySelector('#reset-deadline-settings');
+    const practiceScheduleForm = document.querySelector('#practice-schedule-form');
+    const practiceScheduleRows = document.querySelector('#practice-schedule-rows');
+    const practiceScheduleResult = document.querySelector('#practice-schedule-result');
+    const practiceScheduleAdd = document.querySelector('#practice-schedule-add');
+    const practiceScheduleSubmit = document.querySelector('#practice-schedule-submit');
+    const practiceScheduleList = document.querySelector('#practice-schedule-list');
+    const practiceScheduleListStatus = document.querySelector('#practice-schedule-list-status');
+    const refreshPracticeSchedules = document.querySelector('#refresh-practice-schedules');
+    const practiceScheduleEditDialog = document.querySelector('#practice-schedule-edit-dialog');
+    const practiceScheduleEditForm = document.querySelector('#practice-schedule-edit-form');
+    const practiceScheduleEditResult = document.querySelector('#practice-schedule-edit-result');
+    const practiceScheduleEditCancel = document.querySelector('#practice-schedule-edit-cancel');
+    const practiceScheduleEditSave = document.querySelector('#practice-schedule-edit-save');
+    let loadedPracticeSchedules = [];
     const workflowStatusLabels = {
       draft: '下書き',
       registration_open: '回答受付中',
@@ -4203,6 +4302,178 @@ function adminHtml(page: AdminPage, environment?: string): string {
       if (className) node.className = className;
       if (text !== undefined) node.textContent = text;
       return node;
+    }
+
+    function practiceScheduleField(labelText, type, field, options = {}) {
+      const label = element('label', '', labelText);
+      const input = document.createElement('input');
+      input.type = type;
+      input.dataset.field = field;
+      if (options.required) input.required = true;
+      if (options.maxLength) input.maxLength = options.maxLength;
+      if (options.value) input.value = options.value;
+      label.append(input);
+      return label;
+    }
+
+    function updatePracticeScheduleRemoveButtons() {
+      const rows = Array.from(practiceScheduleRows.querySelectorAll('.practice-schedule-row'));
+      rows.forEach((row) => {
+        row.querySelector('.practice-schedule-remove').disabled = rows.length === 1;
+      });
+    }
+
+    function addPracticeScheduleRow(defaultDate = '') {
+      const row = element('div', 'practice-schedule-row');
+      row.append(
+        practiceScheduleField('練習日', 'date', 'practiceDate', { required: true, value: defaultDate }),
+        practiceScheduleField('開始', 'time', 'startTime', { value: '18:00' }),
+        practiceScheduleField('終了', 'time', 'endTime', { value: '21:30' }),
+        practiceScheduleField('練習名', 'text', 'title', { required: true, maxLength: 100, value: '通常練習' }),
+        practiceScheduleField('会場', 'text', 'location', { maxLength: 100, value: '大久保東公民館' }),
+        practiceScheduleField('連絡事項', 'text', 'note', { maxLength: 500 }),
+      );
+      const remove = element('button', 'practice-schedule-remove', '削除');
+      remove.type = 'button';
+      remove.addEventListener('click', () => {
+        row.remove();
+        updatePracticeScheduleRemoveButtons();
+      });
+      row.append(remove);
+      practiceScheduleRows.append(row);
+      updatePracticeScheduleRemoveButtons();
+    }
+
+    function renderPracticeSchedules(schedules) {
+      loadedPracticeSchedules = schedules;
+      practiceScheduleList.replaceChildren();
+      const visible = schedules.filter((schedule) => schedule.status !== 'canceled');
+      if (!visible.length) {
+        practiceScheduleList.append(element('div', 'practice-schedule-empty', '登録済みの練習日程はありません。'));
+        return;
+      }
+      visible.forEach((schedule) => {
+        const card = element('article', 'practice-schedule-card');
+        const details = document.createElement('div');
+        const title = element('div', 'practice-schedule-card-title', schedule.practice_date.replaceAll('-', '/') + ' ' + schedule.title);
+        title.append(element('span', 'practice-schedule-card-status ' + schedule.status, schedule.status === 'completed' ? '終了' : '予定'));
+        details.append(title);
+        const time = schedule.start_time
+          ? schedule.start_time + (schedule.end_time ? '〜' + schedule.end_time : '〜')
+          : '時刻未定';
+        details.append(element('div', 'practice-schedule-card-meta', time + (schedule.location ? '・' + schedule.location : '')));
+        const counts = { yes: 0, maybe: 0, no: 0 };
+        schedule.responses.forEach((response) => { counts[response.response] += 1; });
+        const countBox = element('div', 'practice-schedule-counts');
+        countBox.append(
+          element('span', '', '参加 ' + counts.yes),
+          element('span', '', '未定 ' + counts.maybe),
+          element('span', '', '不参加 ' + counts.no),
+        );
+        const actions = element('div', 'practice-schedule-card-actions');
+        actions.append(countBox);
+        if (schedule.status === 'scheduled') {
+          const edit = element('button', 'secondary', '編集');
+          edit.type = 'button';
+          edit.dataset.schedule = schedule.schedule_id;
+          edit.addEventListener('click', openPracticeScheduleEdit);
+          actions.append(edit);
+        }
+        card.append(details, actions);
+        practiceScheduleList.append(card);
+      });
+    }
+
+    function openPracticeScheduleEdit(event) {
+      const schedule = loadedPracticeSchedules.find((item) => item.schedule_id === event.currentTarget.dataset.schedule);
+      if (!schedule || schedule.status !== 'scheduled') return;
+      practiceScheduleEditForm.elements.scheduleId.value = schedule.schedule_id;
+      practiceScheduleEditForm.elements.practiceDate.value = schedule.practice_date;
+      practiceScheduleEditForm.elements.title.value = schedule.title;
+      practiceScheduleEditForm.elements.startTime.value = schedule.start_time || '';
+      practiceScheduleEditForm.elements.endTime.value = schedule.end_time || '';
+      practiceScheduleEditForm.elements.location.value = schedule.location || '';
+      practiceScheduleEditForm.elements.note.value = schedule.note || '';
+      practiceScheduleEditResult.className = 'status-message';
+      practiceScheduleEditResult.textContent = '';
+      practiceScheduleEditDialog.showModal();
+    }
+
+    async function savePracticeScheduleEdit(event) {
+      event.preventDefault();
+      const fields = new FormData(practiceScheduleEditForm);
+      const scheduleId = fields.get('scheduleId');
+      practiceScheduleEditSave.disabled = true;
+      practiceScheduleEditResult.className = 'status-message';
+      practiceScheduleEditResult.textContent = '保存しています…';
+      try {
+        const response = await fetch('/api/practice/schedules/' + encodeURIComponent(scheduleId), {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            practiceDate: fields.get('practiceDate'),
+            title: fields.get('title'),
+            startTime: fields.get('startTime'),
+            endTime: fields.get('endTime'),
+            location: fields.get('location'),
+            note: fields.get('note'),
+          }),
+        });
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.error || '練習日程を編集できませんでした。');
+        renderPracticeSchedules(body.schedules || []);
+        practiceScheduleEditDialog.close();
+        practiceScheduleListStatus.textContent = '';
+      } catch (error) {
+        practiceScheduleEditResult.className = 'status-message error';
+        practiceScheduleEditResult.textContent = error instanceof Error ? error.message : '練習日程を編集できませんでした。';
+      } finally {
+        practiceScheduleEditSave.disabled = false;
+      }
+    }
+
+    async function loadPracticeSchedules() {
+      practiceScheduleListStatus.className = 'status-message';
+      practiceScheduleListStatus.textContent = '読み込み中…';
+      try {
+        const response = await fetch('/api/practice/schedules');
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.error || '練習日程を取得できませんでした。');
+        renderPracticeSchedules(body.schedules || []);
+        practiceScheduleListStatus.textContent = '';
+      } catch (error) {
+        practiceScheduleListStatus.className = 'status-message error';
+        practiceScheduleListStatus.textContent = error instanceof Error ? error.message : '練習日程を取得できませんでした。';
+      }
+    }
+
+    async function savePracticeSchedules(event) {
+      event.preventDefault();
+      const schedules = Array.from(practiceScheduleRows.querySelectorAll('.practice-schedule-row')).map((row) =>
+        Object.fromEntries(Array.from(row.querySelectorAll('[data-field]')).map((input) => [input.dataset.field, input.value]))
+      );
+      practiceScheduleSubmit.disabled = true;
+      practiceScheduleResult.className = 'status-message';
+      practiceScheduleResult.textContent = '登録しています…';
+      try {
+        const response = await fetch('/api/practice/schedules', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ schedules }),
+        });
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.error || '練習日程を登録できませんでした。');
+        renderPracticeSchedules(body.schedules || []);
+        practiceScheduleRows.replaceChildren();
+        addPracticeScheduleRow();
+        practiceScheduleResult.className = 'status-message';
+        practiceScheduleResult.textContent = '練習日程を登録しました。';
+      } catch (error) {
+        practiceScheduleResult.className = 'status-message error';
+        practiceScheduleResult.textContent = error instanceof Error ? error.message : '練習日程を登録できませんでした。';
+      } finally {
+        practiceScheduleSubmit.disabled = false;
+      }
     }
 
     function selectedMessageTemplate() {
@@ -7131,24 +7402,25 @@ function adminHtml(page: AdminPage, environment?: string): string {
       refreshApplicationMethodFields();
     }
 
+    const adminPermissions = ${JSON.stringify(permissions)};
     fetch('/api/session').then((response) => response.json()).then((data) => {
       identity.textContent = data.displayName || data.email || '認証済み';
       document.querySelector('#logout').hidden = data.provider !== 'discord';
     }).catch(() => { identity.textContent = '認証済み'; });
     loadPendingRequestCount();
-    if (currentPage !== 'todo') loadTodoCount();
+    if (adminPermissions.includes('tournament') && currentPage !== 'todo') loadTodoCount();
     setInterval(() => {
       if (!document.hidden) {
         loadPendingRequestCount();
         if (currentPage === 'todo') loadTodos();
-        else loadTodoCount();
+        else if (adminPermissions.includes('tournament')) loadTodoCount();
       }
     }, 30000);
     document.addEventListener('visibilitychange', () => {
       if (!document.hidden) {
         loadPendingRequestCount();
         if (currentPage === 'todo') loadTodos();
-        else loadTodoCount();
+        else if (adminPermissions.includes('tournament')) loadTodoCount();
       }
     });
 
@@ -7308,6 +7580,17 @@ function adminHtml(page: AdminPage, environment?: string): string {
       refreshMembers.addEventListener('click', loadMembers);
       loadMembers();
     }
+    if (currentPage === 'practice') {
+      const today = new Date(Date.now() + 9 * 60 * 60 * 1000).toISOString().slice(0, 10);
+      addPracticeScheduleRow(today);
+      practiceScheduleAdd.addEventListener('click', () => addPracticeScheduleRow());
+      practiceScheduleForm.addEventListener('submit', savePracticeSchedules);
+      refreshPracticeSchedules.addEventListener('click', loadPracticeSchedules);
+      practiceScheduleEditForm.addEventListener('submit', savePracticeScheduleEdit);
+      practiceScheduleEditCancel.addEventListener('click', () => practiceScheduleEditDialog.close());
+      practiceScheduleEditDialog.addEventListener('click', (event) => { if (event.target === practiceScheduleEditDialog) practiceScheduleEditDialog.close(); });
+      loadPracticeSchedules();
+    }
     if (currentPage === 'settings') {
       loadMessageTemplates();
       loadDeadlineAutomationSettings();
@@ -7355,6 +7638,7 @@ export async function handleAdminRequest(
       displayName: string;
       auditIdentity: string;
       discordUserId?: string;
+      permissions: AdminPermission[];
     }
     | null = null;
   if (ctx.access) {
@@ -7365,6 +7649,7 @@ export async function handleAdminRequest(
         provider: "cloudflare",
         displayName: email,
         auditIdentity: email,
+        permissions: ["tournament", "practice"],
       };
     }
   }
@@ -7373,7 +7658,7 @@ export async function handleAdminRequest(
   }
   if (!principal) {
     if (url.pathname.startsWith("/api/")) {
-      return json({ error: "Discordでの大会担当者ログインが必要です。" }, 401);
+      return json({ error: "Discordでの担当者ログインが必要です。" }, 401);
     }
     const returnTo = `${url.pathname}${url.search}`;
     return new Response(null, {
@@ -7385,16 +7670,25 @@ export async function handleAdminRequest(
     });
   }
   const actor = principal.auditIdentity;
+  const permissions = principal.permissions;
 
   const page = {
     "/todo": "todo",
     "/register": "register",
     "/tournaments": "tournaments",
+    "/practice": "practice",
     "/members": "members",
     "/settings": "settings",
   }[url.pathname] as AdminPage | undefined;
   if (request.method === "GET" && page) {
-    return new Response(adminHtml(page, env.ENVIRONMENT), {
+    const required = pagePermission(page);
+    if (required && !permissions.includes(required)) {
+      return new Response(null, {
+        status: 302,
+        headers: { ...securityHeaders, Location: defaultAdminPath(permissions) },
+      });
+    }
+    return new Response(adminHtml(page, permissions, env.ENVIRONMENT), {
       headers: { ...securityHeaders, "Content-Type": "text/html; charset=utf-8" },
     });
   }
@@ -7404,7 +7698,65 @@ export async function handleAdminRequest(
       email: principal.displayName,
       displayName: principal.displayName,
       provider: principal.provider,
+      permissions,
     });
+  }
+
+  const requiredApiPermission = apiPermission(url.pathname);
+  if (requiredApiPermission && !permissions.includes(requiredApiPermission)) {
+    return json({ error: "この操作を行う担当者権限がありません。" }, 403);
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/practice/schedules") {
+    try {
+      return json({ schedules: await listPracticeSchedules(env) });
+    } catch (error: unknown) {
+      console.error("練習日程の取得エラー", error);
+      return json({ error: "練習日程を取得できませんでした。" }, 500);
+    }
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/practice/schedules") {
+    if (!isSameOrigin(request)) {
+      return json({ error: "不正な送信元です。" }, 403);
+    }
+    if (!request.headers.get("Content-Type")?.toLowerCase().startsWith("application/json")) {
+      return json({ error: "JSON形式で送信してください。" }, 415);
+    }
+    try {
+      const body = await request.json<Record<string, unknown>>();
+      const created = await createPracticeSchedules(
+        env,
+        { adminIdentity: actor },
+        body,
+      );
+      return json({ ...created, schedules: await listPracticeSchedules(env) }, 201);
+    } catch (error: unknown) {
+      if (error instanceof PracticeError) return json({ error: error.message }, error.status);
+      console.error("練習日程の登録エラー", error);
+      return json({ error: "練習日程を登録できませんでした。" }, 500);
+    }
+  }
+
+  const practiceSchedulePath = url.pathname.match(
+    /^\/api\/practice\/schedules\/(PS-[0-9a-f-]{36})$/,
+  );
+  if (request.method === "PATCH" && practiceSchedulePath) {
+    if (!isSameOrigin(request)) {
+      return json({ error: "不正な送信元です。" }, 403);
+    }
+    if (!request.headers.get("Content-Type")?.toLowerCase().startsWith("application/json")) {
+      return json({ error: "JSON形式で送信してください。" }, 415);
+    }
+    try {
+      const body = await request.json<Record<string, unknown>>();
+      await updatePracticeSchedule(env, practiceSchedulePath[1], body);
+      return json({ schedules: await listPracticeSchedules(env) });
+    } catch (error: unknown) {
+      if (error instanceof PracticeError) return json({ error: error.message }, error.status);
+      console.error("練習日程の編集エラー", error);
+      return json({ error: "練習日程を編集できませんでした。" }, 500);
+    }
   }
 
   if (request.method === "GET" && url.pathname === "/api/settings/messages") {

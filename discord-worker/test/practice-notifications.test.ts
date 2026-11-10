@@ -22,7 +22,7 @@ describe("practice Discord messages", () => {
       portalUrl: "https://portal.example.com",
     });
 
-    expect(message.content).toContain("練習記録屋さん");
+    expect(message.content).toContain("かるた練習帖");
     expect(message.embeds?.[0]).toMatchObject({
       title: "2026-10-28 通常練習",
       description: "会場：大学会館",
@@ -41,5 +41,6 @@ describe("practice Discord messages", () => {
     expect(message.embeds?.[0]?.fields).toContainEqual(expect.objectContaining({
       value: "[メンバーポータルを開く](https://portal.example.com/#practice)",
     }));
+    expect(message.embeds?.[0]?.fields?.some((field) => field.name === "参加メンバー")).toBe(false);
   });
 });

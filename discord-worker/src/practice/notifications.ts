@@ -12,6 +12,7 @@ interface DeliveryRow {
   delivery_id: number;
   session_id: string;
   round_number: number | null;
+  notification_type: "session" | "cards" | "pairings" | "results";
   attempts: number;
   channel_id: string;
 }
@@ -33,31 +34,35 @@ interface PairingMessageRow {
   status: "scheduled" | "completed" | "canceled" | "bye";
 }
 
+function cardSelectionField(session: SessionMessageRow) {
+  let labels: string[] = [];
+  try {
+    const parsed = JSON.parse(session.card_selection_json ?? "[]");
+    if (Array.isArray(parsed)) labels = parsed.map(String);
+  } catch {
+    labels = [];
+  }
+  return {
+    name: "使用札",
+    value: session.card_scheme
+      ? `${CARD_SCHEME_LABELS[session.card_scheme]}：**${labels.join("・")}**`
+      : "未抽選",
+  };
+}
+
 export function buildPracticePairingMessage(input: {
   session: SessionMessageRow;
   roundNumber: number;
   matches: PairingMessageRow[];
   portalUrl?: string;
 }): DiscordMessagePayload {
-  let labels: string[] = [];
-  try {
-    const parsed = JSON.parse(input.session.card_selection_json ?? "[]");
-    if (Array.isArray(parsed)) labels = parsed.map(String);
-  } catch {
-    labels = [];
-  }
   const pairings = input.matches.map((match, index) =>
     match.status === "bye"
       ? `休み　${match.player1_name}`
       : `${index + 1}組　${match.player1_name} — ${match.player2_name ?? "相手未定"}`
   ).join("\n");
   const fields: NonNullable<DiscordMessagePayload["embeds"]>[number]["fields"] = [
-    {
-      name: "使用札",
-      value: input.session.card_scheme
-        ? `${CARD_SCHEME_LABELS[input.session.card_scheme]}：**${labels.join("・")}**`
-        : "未抽選",
-    },
+    cardSelectionField(input.session),
     {
       name: `第${input.roundNumber}試合`,
       value: pairings || "組み合わせがありません。",
@@ -75,7 +80,7 @@ export function buildPracticePairingMessage(input: {
     });
   }
   return {
-    content: "【練習記録屋さん】組み合わせをお知らせします。",
+    content: "【かるた練習帖】組み合わせをお知らせします。",
     embeds: [{
       title: `${input.session.practice_date} ${input.session.title}`,
       description: input.session.location ? `会場：${input.session.location}` : undefined,
@@ -160,6 +165,7 @@ export async function processPracticeNotificationQueue(
     `SELECT practice_notification_queue.delivery_id,
             practice_notification_queue.session_id,
             practice_notification_queue.round_number,
+            practice_notification_queue.notification_type,
             practice_notification_queue.attempts,
             practice_discord_settings.channel_id
      FROM practice_notification_queue
@@ -173,6 +179,14 @@ export async function processPracticeNotificationQueue(
   let sent = 0;
   for (const delivery of deliveries.results) {
     try {
+      if (delivery.notification_type !== "pairings") {
+        await env.DB.prepare(
+          `UPDATE practice_notification_queue
+           SET status = 'skipped', error_message = 'この通知形式は使用しません。'
+           WHERE delivery_id = ?`,
+        ).bind(delivery.delivery_id).run();
+        continue;
+      }
       if (!delivery.round_number) throw new Error("試合番号がありません。");
       const payload = await loadPairingPayload(
         env,

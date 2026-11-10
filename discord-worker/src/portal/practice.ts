@@ -6,21 +6,28 @@ import {
   loadMemberMatchStatistics,
   PracticeError,
   saveExternalPracticeMatch,
+  saveInternalPracticeResult,
   savePracticeMatchResult,
 } from "../practice/service";
+import {
+  listPracticeSchedules,
+  savePracticeScheduleMemberResponse,
+} from "../practice/schedules";
 import { json, sameOrigin } from "./http";
 import type { PortalEnv, PortalMemberRow } from "./types";
 
 async function dashboard(env: PortalEnv, member: PortalMemberRow) {
-  const [members, sessions, matchData] = await Promise.all([
+  const [members, sessions, schedules, matchData] = await Promise.all([
     listPracticeMembers(env),
     listPracticeSessions(env),
+    listPracticeSchedules(env),
     loadMemberMatchStatistics(env, member.member_id),
   ]);
   return {
     current_member_id: member.member_id,
     members,
     sessions,
+    schedules,
     ...matchData,
   };
 }
@@ -54,11 +61,34 @@ export async function handlePracticePortalRequest(
     try {
       const body = await request.json<Record<string, unknown>>();
       const created = await createPracticeSession(env, member.member_id, body);
-      return json({ ...created, practice: await dashboard(env, member) }, 201);
+      const generated = await generateNextPracticeRound(env, created.sessionId, member.member_id);
+      return json({ ...created, ...generated, practice: await dashboard(env, member) }, 201);
     } catch (error) {
       if (error instanceof PracticeError) return json({ error: error.message }, error.status);
       console.error("Practice session creation error", error);
       return json({ error: "練習を作成できませんでした。" }, 500);
+    }
+  }
+
+  const scheduleResponsePath = url.pathname.match(
+    /^\/api\/practice\/schedules\/(PS-[0-9a-f-]{36})\/response$/,
+  );
+  if (request.method === "PUT" && scheduleResponsePath) {
+    const invalid = requireJson(request);
+    if (invalid) return invalid;
+    try {
+      const body = await request.json<{ response?: unknown }>();
+      const message = await savePracticeScheduleMemberResponse(
+        env,
+        member.member_id,
+        scheduleResponsePath[1],
+        body.response,
+      );
+      return json({ message, practice: await dashboard(env, member) });
+    } catch (error) {
+      if (error instanceof PracticeError) return json({ error: error.message }, error.status);
+      console.error("Practice schedule response save error", error);
+      return json({ error: "練習日程への回答を保存できませんでした。" }, 500);
     }
   }
 
@@ -101,6 +131,20 @@ export async function handlePracticePortalRequest(
       if (error instanceof PracticeError) return json({ error: error.message }, error.status);
       console.error("External practice result save error", error);
       return json({ error: "外部練習会の対戦結果を保存できませんでした。" }, 500);
+    }
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/practice/internal-matches") {
+    const invalid = requireJson(request);
+    if (invalid) return invalid;
+    try {
+      const body = await request.json<Record<string, unknown>>();
+      const created = await saveInternalPracticeResult(env, member, body);
+      return json({ ...created, practice: await dashboard(env, member) }, 201);
+    } catch (error) {
+      if (error instanceof PracticeError) return json({ error: error.message }, error.status);
+      console.error("Internal practice result save error", error);
+      return json({ error: "サークル内練習の対戦結果を保存できませんでした。" }, 500);
     }
   }
 

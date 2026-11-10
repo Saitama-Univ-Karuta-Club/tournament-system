@@ -1,6 +1,6 @@
 export const answerTabHtml = `
-<section class="panel" id="answer-panel" role="tabpanel" aria-labelledby="answer-tab">
-  <div class="notice">DMが届かない場合も、ここから回答できます。参加希望者の一覧は「大会情報」の「開催予定」で確認できます。</div>
+<section class="info-view" id="answer-panel" role="tabpanel" aria-labelledby="answer-view-tab">
+  <div class="notice">DMが届かない場合も、ここから回答できます。参加希望者の一覧は「大会関連」の「開催予定」で確認できます。</div>
   <div class="toolbar"><div class="filters"><label>回答状況<select id="answer-status-filter"><option value="all" selected>すべて</option><option value="yes">参加希望</option><option value="no">不参加</option><option value="maybe">未定</option><option value="unanswered">未回答</option></select></label></div></div>
   <div class="list" id="answer-list"></div>
 </section>`;
