@@ -28,7 +28,7 @@ export const practiceTabHtml = `
             <label>練習日<input type="date" name="practiceDate" required></label>
             <label>練習名<input name="title" maxlength="100" value="通常練習" required></label>
             <label>会場<input name="location" maxlength="100" placeholder="任意"></label>
-            <label>組み合わせ<select name="pairingMode" required><option value="near_grade">近い級中心</option><option value="mixed">ごちゃ混ぜ</option></select></label>
+            <label>組み合わせ<select name="pairingMode" required><option value="near_grade">近い級同士</option><option value="mixed">ランダム</option></select></label>
             <label>札組<select name="cardScheme" required><option value="number_ones">札番号の1の位</option><option value="number_tens">札番号の10の位</option><option value="hiragana">ひらがな</option><option value="katakana">カタカナ</option><option value="kanji">漢数字</option><option value="alphabet">アルファベット</option></select></label>
           </div>
           <fieldset class="member-picker"><legend>参加メンバー</legend><input type="hidden" name="readerMemberId" id="practice-reader" value=""><div id="practice-member-list" class="member-picker-list"></div></fieldset>
@@ -93,7 +93,7 @@ export const practiceTabHtml = `
 
 export const practiceTabScript = String.raw`
 const practiceSourceLabels={internal_practice:'サークル内練習',external_practice:'外部練習会',tournament:'大会'};
-const practiceModeLabels={near_grade:'近い級中心',mixed:'ごちゃ混ぜ'};
+const practiceModeLabels={near_grade:'近い級同士',mixed:'ランダム'};
 let selectedPracticeView='schedules';
 let practiceRecordPage=1;
 const practiceRecordsPerPage=10;

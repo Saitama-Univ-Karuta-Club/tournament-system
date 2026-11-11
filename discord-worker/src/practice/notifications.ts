@@ -69,7 +69,7 @@ export function buildPracticePairingMessage(input: {
     },
     {
       name: "組み合わせ方式",
-      value: input.session.pairing_mode === "near_grade" ? "近い級中心" : "ごちゃ混ぜ",
+      value: input.session.pairing_mode === "near_grade" ? "近い級同士" : "ランダム",
       inline: true,
     },
   ];
