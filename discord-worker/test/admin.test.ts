@@ -172,6 +172,23 @@ describe("Admin Worker", () => {
     expect(productionHtml).not.toContain("運営管理ポータル（開発版）");
   });
 
+  it("filters the member list by membership status", async () => {
+    const response = await handleAdminRequest(
+      new Request("https://admin.example.com/members"),
+      env,
+      authenticatedContext(),
+    );
+    const html = await response.text();
+    expect(html).toContain('id="member-status-filter"');
+    expect(html).toContain('<option value="all">すべて</option>');
+    expect(html).toContain('<option value="active">有効</option>');
+    expect(html).toContain('<option value="inactive">無効</option>');
+    expect(html).toContain('<option value="pending">確認待ち</option>');
+    expect(html).toContain('<option value="rejected">却下</option>');
+    expect(html).toContain("memberStatusFilter?.addEventListener('change', renderMemberList)");
+    expect(html).toContain("memberStatusFilter.disabled = count > 0");
+  });
+
   it("groups tournament pages under a secondary navigation and renders the settings categories", async () => {
     const tournamentResponse = await handleAdminRequest(
       new Request("https://admin.example.com/todo"),

@@ -3684,6 +3684,9 @@ function adminHtml(
     .member-match-mark.loss { color: #b42318; }
     .member-match-affiliation { color: #697386; font-size: var(--font-size-note); }
     .member-match-final { margin: 14px 0 0; font-weight: 800; }
+    .member-list-actions { display: flex; align-items: end; gap: 9px; flex-wrap: wrap; }
+    .member-list-actions label { gap: 3px; color: #596579; font-size: var(--font-size-meta); }
+    .member-list-actions select { min-width: 120px; padding: 7px 9px; }
     #request-status { color: #697386; margin-bottom: 12px; }
     #request-list { display: grid; gap: 12px; }
     .request-card { border: 1px solid #dce1eb; border-radius: 10px; padding: 16px; }
@@ -4047,7 +4050,7 @@ function adminHtml(
     <section class="panel" aria-labelledby="member-list-title"${hiddenPage("members")}>
       <div class="list-heading">
         <h2 id="member-list-title">メンバー管理</h2>
-        <button id="refresh-members" type="button" class="secondary">再読み込み</button>
+        <div class="member-list-actions"><label>ステータス<select id="member-status-filter"><option value="all">すべて</option><option value="active">有効</option><option value="inactive">無効</option><option value="pending">確認待ち</option><option value="rejected">却下</option></select></label><button id="refresh-members" type="button" class="secondary">再読み込み</button></div>
       </div>
       <div id="member-status" role="status" aria-live="polite">読み込み中…</div>
       <div id="member-list"></div>
@@ -4316,6 +4319,7 @@ function adminHtml(
     const memberList = document.querySelector('#member-list');
     const memberStatus = document.querySelector('#member-status');
     const refreshMembers = document.querySelector('#refresh-members');
+    const memberStatusFilter = document.querySelector('#member-status-filter');
     const memberHistoryDialog = document.querySelector('#member-history-dialog');
     const memberHistoryTitle = document.querySelector('#member-history-title');
     const memberHistoryContent = document.querySelector('#member-history-content');
@@ -4330,6 +4334,7 @@ function adminHtml(
     const discardMemberChanges = document.querySelector('#discard-member-changes');
     const saveMemberChanges = document.querySelector('#save-member-changes');
     const pendingMemberChanges = new Map();
+    let loadedMembers = [];
     const requestList = document.querySelector('#request-list');
     const requestStatus = document.querySelector('#request-status');
     const pendingRequestBadge = document.querySelector('#pending-request-badge');
@@ -7455,6 +7460,7 @@ function adminHtml(
       memberBulkCount.textContent = count ? count + '人分の変更があります' : '変更はありません';
       saveMemberChanges.textContent = count ? count + '人分の変更を一括保存' : '変更を一括保存';
       saveMemberChanges.disabled = count === 0;
+      memberStatusFilter.disabled = count > 0;
       if (!count) memberBulkMessage.textContent = '';
     }
 
@@ -7658,6 +7664,27 @@ function adminHtml(
       return card;
     }
 
+    function renderMemberList() {
+      const selectedStatus = memberStatusFilter.value;
+      const visibleMembers = selectedStatus === 'all'
+        ? loadedMembers
+        : loadedMembers.filter((member) => member.status === selectedStatus);
+      memberList.replaceChildren();
+      memberList.classList.toggle('has-members', visibleMembers.length > 0);
+      if (!visibleMembers.length) {
+        memberList.append(element('div', 'empty', selectedStatus === 'all' ? '登録されたメンバーはいません。' : '該当するステータスのメンバーはいません。'));
+      } else {
+        memberList.append(renderMemberTableHeader());
+        visibleMembers.forEach((member) => memberList.append(renderMember(member)));
+      }
+      const active = loadedMembers.filter((member) => member.status === 'active').length;
+      const dmEnabled = loadedMembers.filter((member) => member.status === 'active' && member.dmEnabled).length;
+      const shown = selectedStatus === 'all' ? '' : '・表示 ' + visibleMembers.length + '人';
+      memberStatus.textContent = loadedMembers.length + '人（有効 ' + active + '人・DM対象 ' + dmEnabled + '人' + shown + '）';
+    }
+
+    memberStatusFilter?.addEventListener('change', renderMemberList);
+
     function renderRegistrationRequest(request) {
       const card = element('article', 'request-card ' + request.requestType);
       const title = element('div', 'request-title');
@@ -7850,17 +7877,8 @@ function adminHtml(
         }
         requestStatus.textContent = '未処理 ' + requestBody.requests.length + '件';
         setPendingRequestBadge(requestBody.requests.length);
-        memberList.replaceChildren();
-        memberList.classList.toggle('has-members', body.members.length > 0);
-        if (!body.members.length) {
-          memberList.append(element('div', 'empty', '登録されたメンバーはいません。'));
-        } else {
-          memberList.append(renderMemberTableHeader());
-          body.members.forEach((member) => memberList.append(renderMember(member)));
-        }
-        const active = body.members.filter((member) => member.status === 'active').length;
-        const dmEnabled = body.members.filter((member) => member.status === 'active' && member.dmEnabled).length;
-        memberStatus.textContent = body.members.length + '人（有効 ' + active + '人・DM対象 ' + dmEnabled + '人）';
+        loadedMembers = body.members;
+        renderMemberList();
       } catch (error) {
         const message = error instanceof Error ? error.message : 'メンバー情報を取得できませんでした。';
         memberStatus.textContent = message;
