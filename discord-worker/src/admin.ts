@@ -3759,9 +3759,9 @@ function adminHtml(
     .practice-schedule-row { display: grid; grid-template-columns: minmax(130px, 1.1fr) minmax(92px, .7fr) minmax(92px, .7fr) minmax(130px, 1fr) minmax(130px, 1fr) minmax(150px, 1.2fr) auto; gap: 8px; align-items: end; padding: 12px; border-radius: 9px; background: #f5f7fb; }
     .practice-schedule-row label { min-width: 0; color: #596579; font-size: var(--font-size-meta); }
     .practice-schedule-row input, .practice-schedule-row select { min-height: 38px; padding: 7px 8px; background: white; }
-    .practice-venue-combobox { position: relative; display: grid; grid-template-columns: 38px minmax(0, 1fr); gap: 0; }
-    .practice-venue-combobox > input { border-radius: 0 var(--control-radius) var(--control-radius) 0; }
-    button.practice-venue-preset-toggle { min-height: 38px; padding: 0; border: 1px solid #b9c1d0; border-right: 0; border-radius: var(--control-radius) 0 0 var(--control-radius); color: #465166; background: #f5f7fb; }
+    .practice-venue-combobox { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) 38px; gap: 0; }
+    .practice-venue-combobox > input { border-radius: var(--control-radius) 0 0 var(--control-radius); }
+    button.practice-venue-preset-toggle { min-height: 38px; padding: 0; border: 1px solid #b9c1d0; border-left: 0; border-radius: 0 var(--control-radius) var(--control-radius) 0; color: #465166; background: #f5f7fb; }
     button.practice-venue-preset-toggle:hover, button.practice-venue-preset-toggle[aria-expanded="true"] { color: var(--site-primary-dark); background: var(--site-primary-light); }
     .practice-venue-preset-menu { position: absolute; z-index: 20; top: calc(100% + 4px); left: 0; right: 0; display: grid; overflow: hidden; padding: 4px; border: 1px solid #b9c1d0; border-radius: 8px; background: white; box-shadow: 0 8px 22px #17203324; }
     .practice-venue-preset-menu[hidden] { display: none; }
@@ -4676,7 +4676,7 @@ function adminHtml(
         menu.hidden = !willOpen;
         toggle.setAttribute('aria-expanded', String(willOpen));
       });
-      combobox.append(toggle, input, menu);
+      combobox.append(input, toggle, menu);
       label.append(combobox);
       return label;
     }
