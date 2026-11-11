@@ -3759,6 +3759,14 @@ function adminHtml(
     .practice-schedule-row { display: grid; grid-template-columns: minmax(130px, 1.1fr) minmax(92px, .7fr) minmax(92px, .7fr) minmax(130px, 1fr) minmax(130px, 1fr) minmax(150px, 1.2fr) auto; gap: 8px; align-items: end; padding: 12px; border-radius: 9px; background: #f5f7fb; }
     .practice-schedule-row label { min-width: 0; color: #596579; font-size: var(--font-size-meta); }
     .practice-schedule-row input, .practice-schedule-row select { min-height: 38px; padding: 7px 8px; background: white; }
+    .practice-venue-combobox { position: relative; display: grid; grid-template-columns: 38px minmax(0, 1fr); gap: 0; }
+    .practice-venue-combobox > input { border-radius: 0 var(--control-radius) var(--control-radius) 0; }
+    button.practice-venue-preset-toggle { min-height: 38px; padding: 0; border: 1px solid #b9c1d0; border-right: 0; border-radius: var(--control-radius) 0 0 var(--control-radius); color: #465166; background: #f5f7fb; }
+    button.practice-venue-preset-toggle:hover, button.practice-venue-preset-toggle[aria-expanded="true"] { color: var(--site-primary-dark); background: var(--site-primary-light); }
+    .practice-venue-preset-menu { position: absolute; z-index: 20; top: calc(100% + 4px); left: 0; right: 0; display: grid; overflow: hidden; padding: 4px; border: 1px solid #b9c1d0; border-radius: 8px; background: white; box-shadow: 0 8px 22px #17203324; }
+    .practice-venue-preset-menu[hidden] { display: none; }
+    button.practice-venue-preset-option { width: 100%; min-height: 36px; padding: 7px 9px; color: #263550; background: white; text-align: left; }
+    button.practice-venue-preset-option:hover { color: var(--site-primary-dark); background: var(--site-primary-light); }
     button.practice-schedule-remove, button.practice-schedule-add { white-space: nowrap; color: #294796; background: #edf1ff; }
     button.practice-schedule-remove:hover, button.practice-schedule-add:hover { background: #dfe6ff; }
     button.practice-schedule-remove:disabled { opacity: .4; cursor: default; }
@@ -4635,18 +4643,49 @@ function adminHtml(
 
     function practiceScheduleVenueField() {
       const label = element('label', '', '会場');
-      const select = document.createElement('select');
-      select.dataset.field = 'location';
+      const combobox = element('div', 'practice-venue-combobox');
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.dataset.field = 'location';
+      input.maxLength = 100;
+      input.value = practiceScheduleSettings.defaultVenue;
+      input.setAttribute('autocomplete', 'off');
+      input.setAttribute('aria-label', '会場名');
+      const menu = element('div', 'practice-venue-preset-menu');
+      menu.hidden = true;
+      const toggle = element('button', 'practice-venue-preset-toggle', '▼');
+      toggle.type = 'button';
+      toggle.setAttribute('aria-label', '登録済み会場から選択');
+      toggle.setAttribute('aria-expanded', 'false');
       practiceScheduleSettings.venues.forEach((venue) => {
-        const option = document.createElement('option');
-        option.value = venue.name;
-        option.textContent = venue.name;
-        option.selected = venue.name === practiceScheduleSettings.defaultVenue;
-        select.append(option);
+        const option = element('button', 'practice-venue-preset-option', venue.name);
+        option.type = 'button';
+        option.addEventListener('click', () => {
+          input.value = venue.name;
+          menu.hidden = true;
+          toggle.setAttribute('aria-expanded', 'false');
+          input.focus();
+        });
+        menu.append(option);
       });
-      label.append(select);
+      toggle.addEventListener('click', (event) => {
+        event.stopPropagation();
+        const willOpen = menu.hidden;
+        document.querySelectorAll('.practice-venue-preset-menu').forEach((other) => { other.hidden = true; });
+        document.querySelectorAll('.practice-venue-preset-toggle').forEach((other) => { other.setAttribute('aria-expanded', 'false'); });
+        menu.hidden = !willOpen;
+        toggle.setAttribute('aria-expanded', String(willOpen));
+      });
+      combobox.append(toggle, input, menu);
+      label.append(combobox);
       return label;
     }
+
+    document.addEventListener('click', (event) => {
+      if (event.target.closest('.practice-venue-combobox')) return;
+      document.querySelectorAll('.practice-venue-preset-menu').forEach((menu) => { menu.hidden = true; });
+      document.querySelectorAll('.practice-venue-preset-toggle').forEach((toggle) => { toggle.setAttribute('aria-expanded', 'false'); });
+    });
 
     function updatePracticeScheduleRemoveButtons() {
       const rows = Array.from(practiceScheduleRows.querySelectorAll('.practice-schedule-row'));

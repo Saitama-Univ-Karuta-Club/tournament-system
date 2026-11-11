@@ -278,7 +278,9 @@ describe("Admin Worker", () => {
     expect(html).toContain("const defaultStart = practiceScheduleSettings[timeBand + 'StartTime']");
     expect(html).toContain("function practiceScheduleVenueField()");
     expect(html).toContain("practiceScheduleSettings.venues.forEach((venue)");
-    expect(html).toContain("option.selected = venue.name === practiceScheduleSettings.defaultVenue");
+    expect(html).toContain("input.value = practiceScheduleSettings.defaultVenue");
+    expect(html).toContain("'practice-venue-preset-toggle', '▼'");
+    expect(html).toContain("input.value = venue.name");
     expect(html).toContain("fetch('/api/settings/practice-schedules')");
     expect(html).toContain('data-page="practice"');
   });
