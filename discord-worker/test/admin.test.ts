@@ -276,7 +276,9 @@ describe("Admin Worker", () => {
     expect(html).toContain("Discordの同月カレンダーも自動的に更新されます。");
     expect(html).toContain("practice-schedule-card-note");
     expect(html).toContain("const defaultStart = practiceScheduleSettings[timeBand + 'StartTime']");
-    expect(html).toContain("value: practiceScheduleSettings.defaultVenue");
+    expect(html).toContain("function practiceScheduleVenueField()");
+    expect(html).toContain("practiceScheduleSettings.venues.forEach((venue)");
+    expect(html).toContain("option.selected = venue.name === practiceScheduleSettings.defaultVenue");
     expect(html).toContain("fetch('/api/settings/practice-schedules')");
     expect(html).toContain('data-page="practice"');
   });

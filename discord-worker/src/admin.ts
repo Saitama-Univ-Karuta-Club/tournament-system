@@ -3758,7 +3758,7 @@ function adminHtml(
     .practice-schedule-rows { display: grid; gap: 10px; }
     .practice-schedule-row { display: grid; grid-template-columns: minmax(130px, 1.1fr) minmax(92px, .7fr) minmax(92px, .7fr) minmax(130px, 1fr) minmax(130px, 1fr) minmax(150px, 1.2fr) auto; gap: 8px; align-items: end; padding: 12px; border-radius: 9px; background: #f5f7fb; }
     .practice-schedule-row label { min-width: 0; color: #596579; font-size: var(--font-size-meta); }
-    .practice-schedule-row input { min-height: 38px; padding: 7px 8px; background: white; }
+    .practice-schedule-row input, .practice-schedule-row select { min-height: 38px; padding: 7px 8px; background: white; }
     button.practice-schedule-remove, button.practice-schedule-add { white-space: nowrap; color: #294796; background: #edf1ff; }
     button.practice-schedule-remove:hover, button.practice-schedule-add:hover { background: #dfe6ff; }
     button.practice-schedule-remove:disabled { opacity: .4; cursor: default; }
@@ -4022,7 +4022,6 @@ function adminHtml(
       <h2 id="practice-schedule-title">練習日程を登録</h2>
       <p class="practice-schedule-intro">複数の日程をまとめて登録し、かるた練習帖からDiscordへ案内します。</p>
       <form id="practice-schedule-form">
-        <datalist id="practice-venue-options"></datalist>
         <div id="practice-schedule-rows" class="practice-schedule-rows"></div>
         <div class="actions practice-schedule-actions"><span id="practice-schedule-result" class="status-message" role="status" aria-live="polite"></span><button id="practice-schedule-add" type="button" class="practice-schedule-add">日程を追加</button><button id="practice-schedule-submit" type="submit">まとめて登録</button></div>
       </form>
@@ -4368,7 +4367,6 @@ function adminHtml(
     const resetDesignSettings = document.querySelector('#reset-design-settings');
     const practiceScheduleForm = document.querySelector('#practice-schedule-form');
     const practiceScheduleRows = document.querySelector('#practice-schedule-rows');
-    const practiceVenueOptions = document.querySelector('#practice-venue-options');
     const practiceScheduleResult = document.querySelector('#practice-schedule-result');
     const practiceScheduleAdd = document.querySelector('#practice-schedule-add');
     const practiceScheduleSubmit = document.querySelector('#practice-schedule-submit');
@@ -4631,8 +4629,22 @@ function adminHtml(
       if (options.required) input.required = true;
       if (options.maxLength) input.maxLength = options.maxLength;
       if (options.value) input.value = options.value;
-      if (options.list) input.setAttribute('list', options.list);
       label.append(input);
+      return label;
+    }
+
+    function practiceScheduleVenueField() {
+      const label = element('label', '', '会場');
+      const select = document.createElement('select');
+      select.dataset.field = 'location';
+      practiceScheduleSettings.venues.forEach((venue) => {
+        const option = document.createElement('option');
+        option.value = venue.name;
+        option.textContent = venue.name;
+        option.selected = venue.name === practiceScheduleSettings.defaultVenue;
+        select.append(option);
+      });
+      label.append(select);
       return label;
     }
 
@@ -4653,7 +4665,7 @@ function adminHtml(
         practiceScheduleField('開始', 'time', 'startTime', { value: defaultStart }),
         practiceScheduleField('終了', 'time', 'endTime', { value: defaultEnd }),
         practiceScheduleField('練習名', 'text', 'title', { required: true, maxLength: 100, value: '通常練習' }),
-        practiceScheduleField('会場', 'text', 'location', { maxLength: 100, value: practiceScheduleSettings.defaultVenue, list: 'practice-venue-options' }),
+        practiceScheduleVenueField(),
         practiceScheduleField('連絡事項', 'text', 'note', { maxLength: 500 }),
       );
       const remove = element('button', 'practice-schedule-remove', '削除');
@@ -5103,16 +5115,8 @@ function adminHtml(
       refreshPracticeVenueRemoveButtons();
     }
 
-    function refreshPracticeVenueOptions() {
-      if (!practiceVenueOptions) return;
-      practiceVenueOptions.replaceChildren(...practiceScheduleSettings.venues.map((venue) => {
-        const option = document.createElement('option'); option.value = venue.name; return option;
-      }));
-    }
-
     function renderPracticeScheduleSettings(settings) {
       practiceScheduleSettings = { ...practiceScheduleSettings, ...settings };
-      refreshPracticeVenueOptions();
       if (practiceScheduleSettingsForm) {
         ['morningStartTime','morningEndTime','afternoonStartTime','afternoonEndTime','eveningStartTime','eveningEndTime'].forEach((name) => {
           practiceScheduleSettingsForm.elements[name].value = practiceScheduleSettings[name];
