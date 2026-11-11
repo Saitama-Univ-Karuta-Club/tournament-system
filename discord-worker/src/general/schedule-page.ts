@@ -10,7 +10,7 @@ const pageShell = (title: string, body: string): string => `<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>${escapeHtml(title)} | 裏方bot</title>
+  <title>${escapeHtml(title)} | いろいろBOT</title>
   <style>
     :root { color-scheme: light; --green:#668437; --ink:#182238; --muted:#65708a; --line:#d6deeb; --bg:#f4f7fb; }
     * { box-sizing:border-box; }

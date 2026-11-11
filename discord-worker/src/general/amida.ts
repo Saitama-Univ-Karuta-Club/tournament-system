@@ -218,7 +218,7 @@ export function buildAmidaSvg(draw: AmidaDraw): string {
   });
 
   parts.push(`<text x="${width / 2}" y="612" text-anchor="middle" font-size="18" font-weight="700" fill="#c74d43">ゴール</text>`);
-  parts.push(`<text x="${width / 2}" y="650" text-anchor="middle" font-size="16" fill="#6f7772">裏方bot</text>`);
+  parts.push(`<text x="${width / 2}" y="650" text-anchor="middle" font-size="16" fill="#6f7772">いろいろBOT</text>`);
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}"><g font-family="Noto Sans JP, sans-serif">${parts.join("")}</g></svg>`;
 }
 

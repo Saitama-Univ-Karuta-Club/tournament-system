@@ -302,7 +302,7 @@ describe("general man Discord bot", () => {
       .join("\n");
     expect(helpText).toContain("大会お知らせくん");
     expect(helpText).toContain("かるた練習帖");
-    expect(helpText).toContain("裏方bot");
+    expect(helpText).toContain("いろいろBOT");
     expect(helpText).toContain("/member-register");
     expect(helpText).toContain("/ping");
     expect(helpText).toContain("/practice-today");

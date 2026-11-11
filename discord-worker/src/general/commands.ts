@@ -33,7 +33,7 @@ export const generalCommands = [
   },
   {
     name: "help",
-    description: "裏方botの使い方を表示します",
+    description: "いろいろBOTの使い方を表示します",
     type: 1,
     dm_permission: false,
   },

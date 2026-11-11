@@ -87,7 +87,7 @@ type SignatureVerifier = (
 type AmidaImageGenerator = (draw: AmidaDraw) => Promise<Uint8Array>;
 
 const json = (body: unknown, status = 200): Response => Response.json(body, { status });
-const GENERAL_COMMANDS_VERSION = "2026-11-10-rename-v1";
+const GENERAL_COMMANDS_VERSION = "2026-11-11-iroiro-bot-v1";
 const ephemeral = (content: string): Response => json({
   type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
   data: { content, flags: 64 },
@@ -108,7 +108,7 @@ export async function registerGeneralCommands(
   fetcher: typeof fetch = fetch,
 ): Promise<void> {
   if (!env.DISCORD_APPLICATION_ID || !env.DISCORD_GUILD_ID || !env.DISCORD_BOT_TOKEN) {
-    throw new Error("裏方botのコマンド登録設定が足りません。");
+    throw new Error("いろいろBOTのコマンド登録設定が足りません。");
   }
   const response = await fetcher(
     `https://discord.com/api/v10/applications/${env.DISCORD_APPLICATION_ID}/guilds/${env.DISCORD_GUILD_ID}/commands`,
@@ -562,7 +562,7 @@ function amidaMultipartResponse(draw: AmidaDraw, png: Uint8Array): Response {
         description: formatAmidaAssignments(draw),
         color: 0x668437,
         image: { url: `attachment://${filename}` },
-        footer: { text: "裏方botのあみだくじ" },
+        footer: { text: "いろいろBOTのあみだくじ" },
       }],
       allowed_mentions: { parse: [] },
       attachments: [{ id: 0, filename, description: `${draw.title}のあみだくじ` }],
@@ -647,7 +647,7 @@ export async function handleGeneralBotRequest(
       try {
         await ensureGeneralCommandsRegistered(env);
       } catch (error) {
-        console.error("裏方botのコマンド登録エラー", error);
+        console.error("いろいろBOTのコマンド登録エラー", error);
       }
     }
     const registration = env.DISCORD_GUILD_ID
@@ -687,7 +687,7 @@ export async function handleGeneralBotRequest(
   if (interaction.type === InteractionType.PING) {
     if (ctx && env.DISCORD_APPLICATION_ID && env.DISCORD_GUILD_ID && env.DISCORD_BOT_TOKEN) {
       ctx.waitUntil(ensureGeneralCommandsRegistered(env).catch((error) => {
-        console.error("裏方botのコマンド登録エラー", error);
+        console.error("いろいろBOTのコマンド登録エラー", error);
       }));
     }
     return json({ type: InteractionResponseType.PONG });
@@ -701,7 +701,7 @@ export async function handleGeneralBotRequest(
       data: {
         flags: 64,
         embeds: [{
-          title: "裏方bot ヘルプ",
+          title: "いろいろBOT ヘルプ",
           description: "3つのBotで一般メンバーが利用できるコマンドを案内します。このヘルプは実行した本人にだけ表示されます。",
           color: 0x668437,
           fields: [
@@ -719,7 +719,7 @@ export async function handleGeneralBotRequest(
               inline: false,
             },
             {
-              name: "裏方bot",
+              name: "いろいろBOT",
               value: [
                 "`/amida` — 参加メンバーと行き先からあみだくじを作成します。結果と図はチャンネル全体に投稿されます。",
                 "`/poll` — 通常投票・匿名投票を作成します。`anonymous`で匿名、`multiple`で複数選択を指定できます。",
@@ -733,7 +733,7 @@ export async function handleGeneralBotRequest(
               inline: false,
             },
           ],
-          footer: { text: "裏方bot" },
+          footer: { text: "いろいろBOT" },
         }],
         allowed_mentions: { parse: [] },
       },
@@ -1302,7 +1302,7 @@ export default {
   },
   scheduled(_controller: ScheduledController, env: GeneralBotEnv, ctx: ExecutionContext) {
     ctx.waitUntil(ensureGeneralCommandsRegistered(env).catch((error) => {
-      console.error("裏方botのコマンド自動登録エラー", error);
+      console.error("いろいろBOTのコマンド自動登録エラー", error);
       return false;
     }));
   },
