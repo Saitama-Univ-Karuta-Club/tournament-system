@@ -148,6 +148,10 @@ describe("member portal", () => {
     expect(html).toContain("name==='practice-schedules'?'schedules'");
     expect(html).toContain('function applyScheduledParticipants(force=false)');
     expect(html).toContain('id="practice-session-form"');
+    expect(html).toContain('id="practice-schedule"');
+    expect(html).toContain('id="practice-add-guest"');
+    expect(html).toContain('function applyPracticeSchedule(schedule)');
+    expect(html).toContain('guests:practiceGuests()');
     expect(html).toContain('id="practice-reader"');
     expect(html).toContain('type="hidden" name="readerMemberId" id="practice-reader"');
     expect(html).toContain('class="practice-reader-toggle"');

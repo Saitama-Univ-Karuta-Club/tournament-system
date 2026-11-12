@@ -31,6 +31,7 @@ interface MemberRow {
 
 interface SessionRow {
   session_id: string;
+  schedule_id: string | null;
   practice_date: string;
   title: string;
   location: string | null;
@@ -50,18 +51,25 @@ interface AttendanceRow extends MemberRow {
   attendance_status: string;
 }
 
+interface GuestRow {
+  guest_id: string;
+  session_id: string;
+  display_name: string;
+  grade_snapshot: PracticeGrade;
+}
+
 interface MatchRow {
   match_id: string;
   session_id: string;
   round_number: number;
-  player1_member_id: string;
-  player2_member_id: string | null;
+  player1_participant_id: string;
+  player2_participant_id: string | null;
   player1_grade_snapshot: PracticeGrade;
   player2_grade_snapshot: PracticeGrade | null;
   player1_name: string;
   player2_name: string | null;
   status: "scheduled" | "completed" | "canceled" | "bye";
-  winner_member_id: string | null;
+  winner_participant_id: string | null;
   score_difference: number | null;
   result_note: string | null;
 }
@@ -109,6 +117,7 @@ interface TournamentRecordRow extends ExternalRecordRow {
 const PRACTICE_ID = /^P-[0-9a-f-]{36}$/;
 const MATCH_ID = /^PM-[0-9a-f-]{36}$/;
 const MEMBER_ID = /^M-[0-9a-f-]{36}$/;
+const SCHEDULE_ID = /^PS-[0-9a-f-]{36}$/;
 const GRADES = new Set<PracticeGrade>(["A", "B", "C", "D", "E", "F", "beginner"]);
 
 export class PracticeError extends Error {
@@ -175,10 +184,16 @@ function parseLabels(raw: string | null): string[] {
   }
 }
 
-function sessionView(row: SessionRow, participants: AttendanceRow[], matches: MatchRow[]) {
+function sessionView(
+  row: SessionRow,
+  participants: AttendanceRow[],
+  guests: GuestRow[],
+  matches: MatchRow[],
+) {
   const labels = parseLabels(row.card_selection_json);
   return {
     session_id: row.session_id,
+    schedule_id: row.schedule_id,
     practice_date: row.practice_date,
     title: row.title,
     location: row.location,
@@ -198,6 +213,16 @@ function sessionView(row: SessionRow, participants: AttendanceRow[], matches: Ma
       grade: participant.grade_snapshot,
       attendance_status: participant.attendance_status,
       is_reader: participant.member_id === row.reader_member_id,
+      participant_type: "member",
+    })),
+    guests: guests.filter((guest) => guest.session_id === row.session_id).map((guest) => ({
+      member_id: guest.guest_id,
+      display_name: guest.display_name,
+      display_name_kana: "",
+      grade: guest.grade_snapshot,
+      attendance_status: "attending",
+      is_reader: false,
+      participant_type: "guest",
     })),
     matches: matches.filter((match) => match.session_id === row.session_id).map((match) => ({
       ...match,
@@ -221,9 +246,9 @@ export async function listPracticeMembers(env: PracticeEnv): Promise<MemberRow[]
 }
 
 export async function listPracticeSessions(env: PracticeEnv): Promise<unknown[]> {
-  const [sessionRows, participantRows, matchRows] = await Promise.all([
+  const [sessionRows, participantRows, guestRows, matchRows] = await Promise.all([
     env.DB.prepare(
-      `SELECT session_id, practice_date, title, location, pairing_mode, status,
+      `SELECT session_id, schedule_id, practice_date, title, location, pairing_mode, status,
               card_scheme, card_selection_json, reader_member_id,
               created_by_member_id, created_at, updated_at
        FROM practice_sessions
@@ -242,23 +267,39 @@ export async function listPracticeSessions(env: PracticeEnv): Promise<unknown[]>
        ORDER BY members.display_name_kana, members.display_name`,
     ).all<AttendanceRow>(),
     env.DB.prepare(
+      `SELECT practice_guests.guest_id, practice_guests.session_id,
+              practice_guests.display_name, practice_guests.grade_snapshot
+       FROM practice_guests
+       INNER JOIN practice_sessions ON practice_sessions.session_id = practice_guests.session_id
+       WHERE practice_sessions.status NOT IN ('completed', 'canceled')
+       ORDER BY practice_guests.created_at`,
+    ).all<GuestRow>(),
+    env.DB.prepare(
       `SELECT practice_matches.match_id, practice_matches.session_id,
-              practice_matches.round_number, practice_matches.player1_member_id,
-              practice_matches.player2_member_id, practice_matches.player1_grade_snapshot,
+              practice_matches.round_number, practice_matches.player1_participant_id,
+              practice_matches.player2_participant_id, practice_matches.player1_grade_snapshot,
               practice_matches.player2_grade_snapshot, practice_matches.status,
-              practice_matches.winner_member_id, practice_matches.score_difference,
-              practice_matches.result_note, player1.display_name AS player1_name,
-              player2.display_name AS player2_name
+              practice_matches.winner_participant_id, practice_matches.score_difference,
+              practice_matches.result_note,
+              COALESCE(player1.display_name, guest1.display_name) AS player1_name,
+              COALESCE(player2.display_name, guest2.display_name) AS player2_name
        FROM practice_matches
-       INNER JOIN members AS player1 ON player1.member_id = practice_matches.player1_member_id
-       LEFT JOIN members AS player2 ON player2.member_id = practice_matches.player2_member_id
+       LEFT JOIN members AS player1 ON player1.member_id = practice_matches.player1_participant_id
+       LEFT JOIN practice_guests AS guest1 ON guest1.guest_id = practice_matches.player1_participant_id
+       LEFT JOIN members AS player2 ON player2.member_id = practice_matches.player2_participant_id
+       LEFT JOIN practice_guests AS guest2 ON guest2.guest_id = practice_matches.player2_participant_id
        INNER JOIN practice_sessions ON practice_sessions.session_id = practice_matches.session_id
        WHERE practice_sessions.status NOT IN ('completed', 'canceled')
        ORDER BY practice_matches.session_id, practice_matches.round_number,
                 practice_matches.created_at`,
     ).all<MatchRow>(),
   ]);
-  return sessionRows.results.map((row) => sessionView(row, participantRows.results, matchRows.results));
+  return sessionRows.results.map((row) => sessionView(
+    row,
+    participantRows.results,
+    guestRows.results,
+    matchRows.results,
+  ));
 }
 
 export async function createPracticeSession(
@@ -273,22 +314,56 @@ export async function createPracticeSession(
   if (!isCardScheme(input.cardScheme)) throw new PracticeError("札組方式を選択してください。");
   const rawMemberIds = Array.isArray(input.memberIds) ? input.memberIds : [];
   const memberIds = [...new Set(rawMemberIds.map(String))];
-  if (memberIds.length < 2) throw new PracticeError("参加メンバーを2人以上選択してください。");
   if (memberIds.some((id) => !/^M-[0-9a-f-]{36}$/.test(id))) {
     throw new PracticeError("参加メンバーを確認できませんでした。");
+  }
+  const rawGuests = Array.isArray(input.guests) ? input.guests : [];
+  if (rawGuests.length > 20) throw new PracticeError("ゲストは20人まで追加できます。");
+  const guests = rawGuests.map((raw, index) => {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      throw new PracticeError(`ゲスト${index + 1}人目の情報を確認してください。`);
+    }
+    const guest = raw as Record<string, unknown>;
+    const displayName = validateText(guest.displayName, `ゲスト${index + 1}人目の名前`, 50)!;
+    if (!isGrade(guest.grade)) {
+      throw new PracticeError(`ゲスト${index + 1}人目の級を選択してください。`);
+    }
+    return {
+      guestId: `G-${crypto.randomUUID()}`,
+      displayName,
+      grade: guest.grade,
+    };
+  });
+  if (memberIds.length + guests.length < 2) {
+    throw new PracticeError("会員とゲストを合わせて2人以上選択してください。");
   }
   const readerMemberId = input.readerMemberId ? String(input.readerMemberId) : null;
   if (readerMemberId && (!MEMBER_ID.test(readerMemberId) || !memberIds.includes(readerMemberId))) {
     throw new PracticeError("読手は参加メンバーから選択してください。");
   }
-  if (readerMemberId && memberIds.length < 3) {
+  if (readerMemberId && memberIds.length + guests.length < 3) {
     throw new PracticeError("読手以外の参加メンバーを2人以上選択してください。");
   }
-  const members = await env.DB.prepare(
-    `SELECT member_id, display_name, display_name_kana, grade
-     FROM members
-     WHERE status = 'active' AND member_id IN (${placeholders(memberIds.length)})`,
-  ).bind(...memberIds).all<MemberRow>();
+  const scheduleId = input.scheduleId ? String(input.scheduleId) : null;
+  if (scheduleId && !SCHEDULE_ID.test(scheduleId)) {
+    throw new PracticeError("登録済み日程を確認できませんでした。");
+  }
+  if (scheduleId) {
+    const schedule = await env.DB.prepare(
+      `SELECT practice_date FROM practice_schedules
+       WHERE schedule_id = ? AND status = 'scheduled'`,
+    ).bind(scheduleId).first<{ practice_date: string }>();
+    if (!schedule || schedule.practice_date !== practiceDate) {
+      throw new PracticeError("登録済み日程と練習日が一致しません。", 409);
+    }
+  }
+  const members = memberIds.length
+    ? await env.DB.prepare(
+      `SELECT member_id, display_name, display_name_kana, grade
+       FROM members
+       WHERE status = 'active' AND member_id IN (${placeholders(memberIds.length)})`,
+    ).bind(...memberIds).all<MemberRow>()
+    : { results: [] as MemberRow[] };
   if (members.results.length !== memberIds.length) {
     throw new PracticeError("無効なメンバーが含まれています。", 409);
   }
@@ -298,11 +373,12 @@ export async function createPracticeSession(
   await env.DB.batch([
     env.DB.prepare(
       `INSERT INTO practice_sessions (
-         session_id, practice_date, title, location, pairing_mode,
+         session_id, schedule_id, practice_date, title, location, pairing_mode,
          card_scheme, card_selection_json, reader_member_id, created_by_member_id
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).bind(
       sessionId,
+      scheduleId,
       practiceDate,
       title,
       location,
@@ -316,6 +392,10 @@ export async function createPracticeSession(
       `INSERT INTO practice_attendance (session_id, member_id, grade_snapshot)
        VALUES (?, ?, ?)`,
     ).bind(sessionId, member.member_id, member.grade)),
+    ...guests.map((guest) => env.DB.prepare(
+      `INSERT INTO practice_guests (guest_id, session_id, display_name, grade_snapshot)
+       VALUES (?, ?, ?, ?)`,
+    ).bind(guest.guestId, sessionId, guest.displayName, guest.grade)),
   ]);
   return { sessionId };
 }
@@ -341,7 +421,7 @@ export async function generateNextPracticeRound(
   }
 
   const participantRows = await env.DB.prepare(
-    `SELECT practice_attendance.member_id, members.display_name,
+    `SELECT practice_attendance.member_id AS participant_id, members.display_name,
             practice_attendance.grade_snapshot AS grade
      FROM practice_attendance
      INNER JOIN members ON members.member_id = practice_attendance.member_id
@@ -349,10 +429,19 @@ export async function generateNextPracticeRound(
      WHERE practice_attendance.session_id = ?
        AND practice_attendance.attendance_status = 'attending'
        AND (practice_sessions.reader_member_id IS NULL
-            OR practice_attendance.member_id <> practice_sessions.reader_member_id)`,
-  ).bind(sessionId).all<PairingParticipant & { member_id: string; display_name: string }>();
+            OR practice_attendance.member_id <> practice_sessions.reader_member_id)
+     UNION ALL
+     SELECT practice_guests.guest_id AS participant_id, practice_guests.display_name,
+            practice_guests.grade_snapshot AS grade
+     FROM practice_guests
+     WHERE practice_guests.session_id = ?`,
+  ).bind(sessionId, sessionId).all<{
+    participant_id: string;
+    display_name: string;
+    grade: PracticeGrade;
+  }>();
   const participants: PairingParticipant[] = participantRows.results.map((row) => ({
-    memberId: row.member_id,
+    memberId: row.participant_id,
     displayName: row.display_name,
     grade: row.grade,
   }));
@@ -360,41 +449,48 @@ export async function generateNextPracticeRound(
     throw new PracticeError("組み合わせ生成には読手以外の参加者が2人以上必要です。", 409);
   }
 
-  const selectedMembersCte = `selected_members AS (
-    SELECT practice_attendance.member_id
+  const selectedParticipantsCte = `current_session AS (
+    SELECT ? AS session_id
+  ), selected_participants AS (
+    SELECT practice_attendance.member_id AS participant_id
     FROM practice_attendance
     INNER JOIN practice_sessions
       ON practice_sessions.session_id = practice_attendance.session_id
-    WHERE practice_attendance.session_id = ?
+    INNER JOIN current_session ON current_session.session_id = practice_attendance.session_id
+    WHERE 1 = 1
       AND practice_attendance.attendance_status = 'attending'
       AND (practice_sessions.reader_member_id IS NULL
            OR practice_attendance.member_id <> practice_sessions.reader_member_id)
+    UNION ALL
+    SELECT practice_guests.guest_id AS participant_id
+    FROM practice_guests
+    INNER JOIN current_session ON current_session.session_id = practice_guests.session_id
   )`;
   const [historyRows, byeRows, roundRow] = await Promise.all([
     env.DB.prepare(
-      `WITH ${selectedMembersCte}
+      `WITH ${selectedParticipantsCte}
        SELECT player1_member_id AS member1Id, player2_member_id AS member2Id,
               created_at AS playedAt,
               CAST(strftime('%s', created_at) AS INTEGER) AS sequence
        FROM internal_practice_results
-       WHERE player1_member_id IN (SELECT member_id FROM selected_members)
-         AND player2_member_id IN (SELECT member_id FROM selected_members)
+       WHERE player1_member_id IN (SELECT participant_id FROM selected_participants)
+         AND player2_member_id IN (SELECT participant_id FROM selected_participants)
        UNION ALL
-       SELECT player1_member_id AS member1Id, player2_member_id AS member2Id,
+       SELECT player1_participant_id AS member1Id, player2_participant_id AS member2Id,
               created_at AS playedAt,
               CAST(strftime('%s', created_at) AS INTEGER) AS sequence
        FROM practice_matches
-       WHERE player2_member_id IS NOT NULL AND status = 'completed'
-         AND player1_member_id IN (SELECT member_id FROM selected_members)
-         AND player2_member_id IN (SELECT member_id FROM selected_members)`,
+       WHERE player2_participant_id IS NOT NULL AND status = 'completed'
+         AND player1_participant_id IN (SELECT participant_id FROM selected_participants)
+         AND player2_participant_id IN (SELECT participant_id FROM selected_participants)`,
     ).bind(sessionId).all<PairHistory>(),
     env.DB.prepare(
-      `WITH ${selectedMembersCte}
-       SELECT player1_member_id AS memberId, created_at AS restedAt,
+      `WITH ${selectedParticipantsCte}
+       SELECT player1_participant_id AS memberId, created_at AS restedAt,
               CAST(strftime('%s', created_at) AS INTEGER) AS sequence
        FROM practice_matches
        WHERE status = 'bye'
-         AND player1_member_id IN (SELECT member_id FROM selected_members)`,
+         AND player1_participant_id IN (SELECT participant_id FROM selected_participants)`,
     ).bind(sessionId).all<{ memberId: string; restedAt: string; sequence: number }>(),
     env.DB.prepare(
       `SELECT COALESCE(MAX(round_number), 0) AS last_round
@@ -411,7 +507,7 @@ export async function generateNextPracticeRound(
   });
   const statements = result.pairs.map((pair) => env.DB.prepare(
     `INSERT INTO practice_matches (
-       match_id, session_id, round_number, player1_member_id, player2_member_id,
+       match_id, session_id, round_number, player1_participant_id, player2_participant_id,
        player1_grade_snapshot, player2_grade_snapshot
      ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
   ).bind(
@@ -426,7 +522,7 @@ export async function generateNextPracticeRound(
   if (result.bye) {
     statements.push(env.DB.prepare(
       `INSERT INTO practice_matches (
-         match_id, session_id, round_number, player1_member_id,
+         match_id, session_id, round_number, player1_participant_id,
          player1_grade_snapshot, status
        ) VALUES (?, ?, ?, ?, ?, 'bye')`,
     ).bind(
@@ -468,21 +564,21 @@ export async function savePracticeMatchResult(
 ): Promise<void> {
   if (!MATCH_ID.test(matchId)) throw new PracticeError("対戦を確認できませんでした。", 404);
   const match = await env.DB.prepare(
-    `SELECT player1_member_id, player2_member_id, status
+    `SELECT player1_participant_id, player2_participant_id, status
      FROM practice_matches WHERE match_id = ?`,
   ).bind(matchId).first<{
-    player1_member_id: string;
-    player2_member_id: string | null;
+    player1_participant_id: string;
+    player2_participant_id: string | null;
     status: string;
   }>();
-  if (!match || !match.player2_member_id || match.status === "bye" || match.status === "canceled") {
+  if (!match || !match.player2_participant_id || match.status === "bye" || match.status === "canceled") {
     throw new PracticeError("結果を登録できる対戦ではありません。", 409);
   }
-  if (memberId !== match.player1_member_id && memberId !== match.player2_member_id) {
+  if (memberId !== match.player1_participant_id && memberId !== match.player2_participant_id) {
     throw new PracticeError("自分が参加した対戦だけ結果を登録できます。", 403);
   }
   const winnerMemberId = String(input.winnerMemberId ?? "");
-  if (winnerMemberId !== match.player1_member_id && winnerMemberId !== match.player2_member_id) {
+  if (winnerMemberId !== match.player1_participant_id && winnerMemberId !== match.player2_participant_id) {
     throw new PracticeError("勝者を選択してください。");
   }
   const scoreDifference = input.scoreDifference === null || input.scoreDifference === undefined || input.scoreDifference === ""
@@ -494,7 +590,7 @@ export async function savePracticeMatchResult(
   const note = validateText(input.note, "備考", 500, false);
   await env.DB.prepare(
     `UPDATE practice_matches
-     SET status = 'completed', winner_member_id = ?, score_difference = ?,
+     SET status = 'completed', winner_participant_id = ?, score_difference = ?,
          result_note = ?, recorded_by_member_id = ?,
          updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
      WHERE match_id = ?`,
@@ -712,25 +808,28 @@ export async function loadMemberMatchRecords(
       `SELECT practice_matches.match_id AS record_id,
               practice_sessions.practice_date AS played_on,
               practice_sessions.title AS event_name,
-              CASE WHEN practice_matches.player1_member_id = ?
-                THEN practice_matches.player2_member_id
-                ELSE practice_matches.player1_member_id END AS opponent_key,
-              CASE WHEN practice_matches.player1_member_id = ?
-                THEN player2.display_name ELSE player1.display_name END AS opponent_name,
-              CASE WHEN practice_matches.player1_member_id = ?
+              CASE WHEN practice_matches.player1_participant_id = ?
+                THEN practice_matches.player2_participant_id
+                ELSE practice_matches.player1_participant_id END AS opponent_key,
+              CASE WHEN practice_matches.player1_participant_id = ?
+                THEN COALESCE(player2.display_name, guest2.display_name)
+                ELSE COALESCE(player1.display_name, guest1.display_name) END AS opponent_name,
+              CASE WHEN practice_matches.player1_participant_id = ?
                 THEN practice_matches.player2_grade_snapshot
                 ELSE practice_matches.player1_grade_snapshot END AS opponent_grade,
-              CASE WHEN practice_matches.winner_member_id = ? THEN 'win' ELSE 'loss' END AS outcome,
+              CASE WHEN practice_matches.winner_participant_id = ? THEN 'win' ELSE 'loss' END AS outcome,
               practice_matches.score_difference, practice_matches.result_note,
               NULL AS fault_count, NULL AS cards_taken,
               NULL AS opponent_right_taken, NULL AS opponent_left_taken,
               NULL AS own_right_taken, NULL AS own_left_taken
        FROM practice_matches
        INNER JOIN practice_sessions ON practice_sessions.session_id = practice_matches.session_id
-       INNER JOIN members AS player1 ON player1.member_id = practice_matches.player1_member_id
-       INNER JOIN members AS player2 ON player2.member_id = practice_matches.player2_member_id
+       LEFT JOIN members AS player1 ON player1.member_id = practice_matches.player1_participant_id
+       LEFT JOIN practice_guests AS guest1 ON guest1.guest_id = practice_matches.player1_participant_id
+       LEFT JOIN members AS player2 ON player2.member_id = practice_matches.player2_participant_id
+       LEFT JOIN practice_guests AS guest2 ON guest2.guest_id = practice_matches.player2_participant_id
        WHERE practice_matches.status = 'completed'
-         AND (? = practice_matches.player1_member_id OR ? = practice_matches.player2_member_id)`,
+         AND (? = practice_matches.player1_participant_id OR ? = practice_matches.player2_participant_id)`,
     ).bind(memberId, memberId, memberId, memberId, memberId, memberId).all<InternalRecordRow>(),
     env.DB.prepare(
       `SELECT external_match_id AS record_id, played_on, event_name, opponent_name,

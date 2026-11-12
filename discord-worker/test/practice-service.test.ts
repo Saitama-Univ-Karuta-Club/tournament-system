@@ -50,6 +50,7 @@ function adHocPracticeEnv(memberRows = [
     values: unknown[];
     all: () => Promise<{ results: unknown[] }>;
     run: () => Promise<{ success: boolean }>;
+    first: () => Promise<unknown>;
   };
   const batched: BoundStatement[] = [];
   const db = {
@@ -64,6 +65,12 @@ function adHocPracticeEnv(memberRows = [
             },
             async run() {
               return { success: true };
+            },
+            async first() {
+              if (sql.includes("FROM practice_schedules")) {
+                return { practice_date: "2026-10-29" };
+              }
+              return null;
             },
           };
         },
@@ -101,8 +108,48 @@ describe("practice creation with a reader", () => {
     expect(created.sessionId).toMatch(/^P-/);
     expect(batched).toHaveLength(4);
     expect(batched[0].sql).toContain("reader_member_id");
-    expect(batched[0].values[7]).toBe(readerId);
-    expect(batched[0].values[8]).toBe(memberId);
+    expect(batched[0].values[8]).toBe(readerId);
+    expect(batched[0].values[9]).toBe(memberId);
+  });
+
+  it("stores a guest without adding them to the member table", async () => {
+    const { env, batched } = adHocPracticeEnv([
+      { member_id: memberId, grade: "C" },
+    ]);
+
+    await createPracticeSession(env, memberId, {
+      practiceDate: "2026-10-29",
+      title: "通常練習",
+      pairingMode: "near_grade",
+      cardScheme: "hiragana",
+      memberIds: [memberId],
+      guests: [{ displayName: "ゲスト選手", grade: "B" }],
+    });
+
+    expect(batched).toHaveLength(3);
+    expect(batched[2].sql).toContain("INSERT INTO practice_guests");
+    expect(batched[2].values[0]).toMatch(/^G-/);
+    expect(batched[2].values.slice(2)).toEqual(["ゲスト選手", "B"]);
+  });
+
+  it("links a created practice to the selected registered schedule", async () => {
+    const { env, batched } = adHocPracticeEnv();
+    const scheduleId = "PS-66666666-6666-4666-8666-666666666666";
+
+    await createPracticeSession(env, memberId, {
+      scheduleId,
+      practiceDate: "2026-10-29",
+      title: "水曜練習",
+      location: "大学会館",
+      pairingMode: "mixed",
+      cardScheme: "alphabet",
+      memberIds: [memberId, opponentId],
+    });
+
+    expect(batched[0].sql).toContain("session_id, schedule_id, practice_date");
+    expect(batched[0].values[1]).toBe(scheduleId);
+    expect(batched[0].values[3]).toBe("水曜練習");
+    expect(batched[0].values[4]).toBe("大学会館");
   });
 
   it("rejects a reader who is not a checked participant", async () => {
@@ -142,8 +189,8 @@ describe("practice pairing history selection", () => {
                 if (sql.includes("FROM practice_attendance") && sql.includes("members.display_name")) {
                   return {
                     results: [
-                      { member_id: memberId, display_name: "参加者", grade: "C" },
-                      { member_id: opponentId, display_name: "対戦相手", grade: "B" },
+                      { participant_id: memberId, display_name: "参加者", grade: "C" },
+                      { participant_id: "G-55555555-5555-4555-8555-555555555555", display_name: "ゲスト", grade: "B" },
                     ],
                   };
                 }
@@ -178,22 +225,33 @@ describe("practice pairing history selection", () => {
     );
 
     expect(result.pairs).toHaveLength(1);
+    expect(result.pairs[0]).toEqual(expect.objectContaining({
+      player1: expect.objectContaining({ displayName: expect.any(String) }),
+      player2: expect.objectContaining({ displayName: expect.any(String) }),
+    }));
+    const pair = result.pairs[0] as {
+      player1: { displayName: string };
+      player2: { displayName: string };
+    };
+    expect([pair.player1.displayName, pair.player2.displayName])
+      .toContain("ゲスト");
     const historyQuery = prepared.find(({ sql }) =>
       sql.includes("FROM internal_practice_results")
     );
-    expect(historyQuery?.sql).toContain("WITH selected_members AS");
+    expect(historyQuery?.sql).toContain("selected_participants AS");
     expect(historyQuery?.sql).toContain(
-      "player1_member_id IN (SELECT member_id FROM selected_members)",
+      "player1_member_id IN (SELECT participant_id FROM selected_participants)",
     );
     expect(historyQuery?.sql).toContain(
-      "player2_member_id IN (SELECT member_id FROM selected_members)",
+      "player2_member_id IN (SELECT participant_id FROM selected_participants)",
     );
+    expect(historyQuery?.sql).toContain("player1_participant_id");
     expect(historyQuery?.values).toEqual([sessionId]);
     const byeQuery = prepared.find(({ sql }) =>
       sql.includes("WHERE status = 'bye'")
     );
     expect(byeQuery?.sql).toContain(
-      "player1_member_id IN (SELECT member_id FROM selected_members)",
+      "player1_participant_id IN (SELECT participant_id FROM selected_participants)",
     );
     expect(byeQuery?.values).toEqual([sessionId]);
   });

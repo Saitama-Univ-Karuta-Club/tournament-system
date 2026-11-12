@@ -118,11 +118,13 @@ async function loadPairingPayload(
     ).bind(sessionId).first<SessionMessageRow>(),
     env.DB.prepare(
       `SELECT practice_matches.round_number, practice_matches.status,
-              player1.display_name AS player1_name,
-              player2.display_name AS player2_name
+              COALESCE(player1.display_name, guest1.display_name) AS player1_name,
+              COALESCE(player2.display_name, guest2.display_name) AS player2_name
        FROM practice_matches
-       INNER JOIN members AS player1 ON player1.member_id = practice_matches.player1_member_id
-       LEFT JOIN members AS player2 ON player2.member_id = practice_matches.player2_member_id
+       LEFT JOIN members AS player1 ON player1.member_id = practice_matches.player1_participant_id
+       LEFT JOIN practice_guests AS guest1 ON guest1.guest_id = practice_matches.player1_participant_id
+       LEFT JOIN members AS player2 ON player2.member_id = practice_matches.player2_participant_id
+       LEFT JOIN practice_guests AS guest2 ON guest2.guest_id = practice_matches.player2_participant_id
        WHERE practice_matches.session_id = ? AND practice_matches.round_number = ?
        ORDER BY practice_matches.created_at`,
     ).bind(sessionId, roundNumber).all<PairingMessageRow>(),
