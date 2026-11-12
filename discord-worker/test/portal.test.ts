@@ -112,8 +112,9 @@ describe("member portal", () => {
     const html = await response.text();
 
     expect(response.status).toBe(200);
-    expect(html).toContain("大会参加確認");
-    expect(html).toContain("埼玉大学かるた会 メンバーポータル</p>");
+    expect(html).toContain("<h1>埼玉大学かるた会</h1>");
+    expect(html).toContain("<p>メンバーポータル</p>");
+    expect(html).not.toContain(".brand p{display:none}");
     expect(html).toContain("Discordでログイン");
     expect(html).toContain('id="info-tab"');
     expect(html).not.toContain('id="answer-tab"');
@@ -332,9 +333,9 @@ describe("member portal", () => {
       context,
     );
     const developmentHtml = await developmentResponse.text();
-    expect(developmentHtml).toContain("大会参加確認（開発版）｜埼玉大学かるた会");
-    expect(developmentHtml).toContain("<h1>大会参加確認（開発版）</h1>");
-    expect(developmentHtml).toContain("埼玉大学かるた会 メンバーポータル</p>");
+    expect(developmentHtml).toContain("メンバーポータル（開発版）｜埼玉大学かるた会");
+    expect(developmentHtml).toContain("<h1>埼玉大学かるた会</h1>");
+    expect(developmentHtml).toContain("<p>メンバーポータル（開発版）</p>");
 
     const productionResponse = await handlePortalRequest(
       new Request("https://portal.example.com/"),
@@ -342,8 +343,9 @@ describe("member portal", () => {
       context,
     );
     const productionHtml = await productionResponse.text();
-    expect(productionHtml).toContain("<h1>大会参加確認</h1>");
-    expect(productionHtml).not.toContain("大会参加確認（開発版）");
+    expect(productionHtml).toContain("<h1>埼玉大学かるた会</h1>");
+    expect(productionHtml).toContain("<p>メンバーポータル</p>");
+    expect(productionHtml).not.toContain("メンバーポータル（開発版）");
   });
 
   it("rejects tournament API access without a member session", async () => {

@@ -37,11 +37,9 @@ loadSiteDesign();
 
 export function portalHtml(environment?: string): string {
   const isDevelopment = environment === "development";
-  const portalName = "埼玉大学かるた会 メンバーポータル";
-  const pageHeading = isDevelopment ? "大会参加確認（開発版）" : "大会参加確認";
-  const pageTitle = isDevelopment
-    ? "大会参加確認（開発版）｜埼玉大学かるた会"
-    : "大会参加確認｜埼玉大学かるた会";
+  const organizationName = "埼玉大学かるた会";
+  const portalName = isDevelopment ? "メンバーポータル（開発版）" : "メンバーポータル";
+  const pageTitle = `${portalName}｜${organizationName}`;
   return `<!doctype html>
 <html lang="ja">
 <head>
@@ -52,7 +50,7 @@ export function portalHtml(environment?: string): string {
   <style>${portalStyles}</style>
 </head>
 <body>
-  <header><div class="header-inner"><div class="brand"><h1>${pageHeading}</h1><p>${portalName}</p></div><div class="account" id="account" hidden><span id="account-name"></span><a href="/auth/logout">ログアウト</a></div></div></header>
+  <header><div class="header-inner"><div class="brand"><h1>${organizationName}</h1><p>${portalName}</p></div><div class="account" id="account" hidden><span id="account-name"></span><a href="/auth/logout">ログアウト</a></div></div></header>
   <main>
     <section class="login" id="login" hidden><h2>Discordでログイン</h2><p>承認済みメンバーだけが大会関連の情報・参加希望者・大会要項を閲覧し、参加回答を変更できます。</p><a class="discord-button" href="/auth/discord"><span class="discord-mark">◈</span>Discordで続ける</a></section>
     <div id="app" hidden>
