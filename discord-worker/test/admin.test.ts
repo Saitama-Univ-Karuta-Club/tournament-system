@@ -1325,9 +1325,9 @@ describe("Admin Worker", () => {
       "大会種別",
       "主催締切日",
       "サークル内締切日",
+      "大会要項",
       "会場",
       "コメント",
-      "大会要項",
     ];
     const positions = orderedLabels.map((label) => formHtml.indexOf(label));
 
@@ -1349,6 +1349,9 @@ describe("Admin Worker", () => {
     expect(html).toContain("payload.eventDatesByGrade");
     expect(formHtml).toContain('name="venue"');
     expect(formHtml).toContain('name="comment"');
+    expect(formHtml).toContain('name="venue" maxlength="200" autocomplete="off" placeholder="任意"');
+    expect(formHtml).toContain('name="comment" maxlength="1000" rows="1" placeholder="任意"');
+    expect(html).toContain('#tournament-form .tournament-optional-field input, #tournament-form .tournament-optional-field textarea { height: 42px; min-height: 42px;');
     expect(formHtml).not.toContain('name="documentUrl"');
   });
 

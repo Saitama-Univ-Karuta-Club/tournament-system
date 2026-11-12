@@ -3439,6 +3439,9 @@ function adminHtml(
     .optional { color: #697386; font-size: var(--font-size-meta); font-weight: 500; }
     input, select, textarea { width: 100%; min-width: 0; max-width: 100%; border: 1px solid #b9c1d0; border-radius: var(--control-radius); padding: var(--control-padding-block) var(--control-padding-inline); font: inherit; font-size: var(--font-size-control); color: inherit; background: white; }
     input:focus, select:focus, textarea:focus { outline: 3px solid #7c9cff3b; border-color: #526fc4; }
+    #tournament-form .tournament-optional-field { gap: 4px; }
+    #tournament-form .tournament-optional-field input, #tournament-form .tournament-optional-field textarea { height: 42px; min-height: 42px; padding-block: 7px; line-height: 1.35; }
+    #tournament-form .tournament-optional-field textarea { resize: vertical; }
     .grade-picker { min-width: 0; margin: 0; padding: 0; border: 0; }
     .grade-picker legend { margin-bottom: 7px; padding: 0; font-size: var(--font-size-body); font-weight: 650; }
     .grade-options { display: flex; flex-wrap: wrap; gap: 8px; padding: 7px; border: 1px solid #b9c1d0; border-radius: var(--control-radius); background: #fff; }
@@ -4008,8 +4011,6 @@ function adminHtml(
         <div id="grade-date-settings" class="grade-date-settings" hidden><strong>級ごとの開催日 <span class="optional">同じ大会で日程が異なる級だけ変更してください</span></strong><div id="grade-date-grid" class="grade-date-grid"></div></div>
         <label>主催締切日<input type="datetime-local" name="trueDeadline" required></label>
         <label><span>サークル内締切日 <span class="optional">（設定値に基づき自動入力）</span></span><input type="datetime-local" name="internalDeadline" required></label>
-        <label>会場 <span class="optional">任意</span><input name="venue" maxlength="200" autocomplete="off"></label>
-        <label>コメント <span class="optional">任意</span><textarea name="comment" maxlength="1000" rows="2"></textarea></label>
         <fieldset class="application-method wide">
           <legend>申込方法</legend>
           <label>主催者への申込方法<select name="applicationMethod" required><option value="">選択してください</option><option value="excel_email">Excel名簿に選手名を記入してメール送信</option><option value="excel_form">Excel名簿に選手名を記入してフォームで送信</option><option value="direct_form">フォームに選手名を直接入力して送信</option></select></label>
@@ -4027,6 +4028,8 @@ function adminHtml(
           </div>
         </fieldset>
         <label class="wide">大会要項（PDF・Word） <span class="file-note">任意・20MBまで。Wordは原本を保存し、ブラウザ閲覧用PDFを自動生成します</span><input type="file" name="documentFile" accept="application/pdf,.pdf,application/msword,.doc,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.docx"></label>
+        <label class="tournament-optional-field">会場<input name="venue" maxlength="200" autocomplete="off" placeholder="任意"></label>
+        <label class="tournament-optional-field">コメント<textarea name="comment" maxlength="1000" rows="1" placeholder="任意"></textarea></label>
       </div>
       <div class="actions"><button id="submit" type="submit">登録して通知を開始</button><span id="result" role="status" aria-live="polite"></span></div>
     </form>
