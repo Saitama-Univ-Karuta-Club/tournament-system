@@ -292,13 +292,22 @@ describe("general man Discord bot", () => {
       type: number;
       data: {
         flags: number;
-        embeds: Array<{ fields: Array<{ name: string; value: string }> }>;
+        embeds: Array<{
+          title?: string;
+          description?: string;
+          fields?: Array<{ name: string; value: string }>;
+        }>;
       };
     };
     expect(payload.type).toBe(4);
     expect(payload.data.flags).toBe(64);
-    const helpText = payload.data.embeds[0].fields
-      .map((field) => `${field.name}\n${field.value}`)
+    expect(payload.data.embeds[0].title).toBe("BOTコマンドヘルプ");
+    const helpText = payload.data.embeds
+      .flatMap((embed) => [
+        embed.title ?? "",
+        embed.description ?? "",
+        ...(embed.fields ?? []).map((field) => `${field.name}\n${field.value}`),
+      ])
       .join("\n");
     expect(helpText).toContain("大会お知らせくん");
     expect(helpText).toContain("かるた練習帖");

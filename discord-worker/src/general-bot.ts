@@ -700,41 +700,65 @@ export async function handleGeneralBotRequest(
       type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
       data: {
         flags: 64,
-        embeds: [{
-          title: "いろいろBOT ヘルプ",
-          description: "3つのBotで一般メンバーが利用できるコマンドを案内します。このヘルプは実行した本人にだけ表示されます。",
-          color: 0x668437,
-          fields: [
-            {
-              name: "大会お知らせくん",
-              value: [
-                "`/member-register` — メンバー登録・登録内容の変更を担当者へ申請します。氏名、よみがな、出場級、段位を入力します。",
-                "`/ping` — 大会お知らせくんとの接続を確認します。コマンドが動かない場合の確認に使います。",
-              ].join("\n\n"),
+        embeds: [
+          {
+            title: "BOTコマンドヘルプ",
+            description: "3つのBotで一般メンバーが利用できるコマンドを案内します。\nこのヘルプは実行した本人にだけ表示されます。",
+            color: 0x668437,
+          },
+          {
+            title: "大会お知らせくん",
+            color: 0x5865f2,
+            fields: [
+              {
+                name: "/member-register",
+                value: "メンバー登録・登録内容の変更を担当者へ申請します。氏名、よみがな、出場級、段位を入力します。",
+                inline: false,
+              },
+              {
+                name: "/ping",
+                value: "大会お知らせくんとの接続を確認します。コマンドが動かない場合の確認に使います。",
+                inline: false,
+              },
+            ],
+          },
+          {
+            title: "かるた練習帖",
+            color: 0x4262ad,
+            fields: [{
+              name: "/practice-today",
+              value: "今日の使用札と、登録されている最新の対戦組み合わせを確認します。",
               inline: false,
-            },
-            {
-              name: "かるた練習帖",
-              value: "`/practice-today` — 今日の使用札と、登録されている最新の対戦組み合わせを確認します。",
-              inline: false,
-            },
-            {
-              name: "いろいろBOT",
-              value: [
-                "`/amida` — 参加メンバーと行き先からあみだくじを作成します。結果と図はチャンネル全体に投稿されます。",
-                "`/poll` — 通常投票・匿名投票を作成します。`anonymous`で匿名、`multiple`で複数選択を指定できます。",
-                "`/schedule` — カレンダーから候補日時を選び、○・△・×で回答する日程調整を作成します。",
-              ].join("\n\n"),
-              inline: false,
-            },
-            {
-              name: "回答の変更・締め切り",
-              value: "投票は同じ選択肢を再度押すと解除できます。日程調整は「回答する」から変更でき、投票・日程調整ともに作成者だけが締め切れます。",
-              inline: false,
-            },
-          ],
-          footer: { text: "いろいろBOT" },
-        }],
+            }],
+          },
+          {
+            title: "いろいろBOT",
+            color: 0x668437,
+            fields: [
+              {
+                name: "/amida",
+                value: "参加メンバーと行き先からあみだくじを作成します。結果と図はチャンネル全体に投稿されます。",
+                inline: false,
+              },
+              {
+                name: "/poll",
+                value: "通常投票・匿名投票を作成します。`anonymous`で匿名、`multiple`で複数選択を指定できます。",
+                inline: false,
+              },
+              {
+                name: "/schedule",
+                value: "カレンダーから候補日時を選び、○・△・×で回答する日程調整を作成します。",
+                inline: false,
+              },
+            ],
+          },
+          {
+            title: "回答の変更・締め切り",
+            description: "投票は同じ選択肢を再度押すと解除できます。\n日程調整は「回答する」から変更でき、投票・日程調整ともに作成者だけが締め切れます。",
+            color: 0x668437,
+            footer: { text: "いろいろBOT" },
+          },
+        ],
         allowed_mentions: { parse: [] },
       },
     });
