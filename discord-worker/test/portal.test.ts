@@ -151,6 +151,9 @@ describe("member portal", () => {
     expect(html).toContain('id="practice-schedule"');
     expect(html).toContain('id="practice-add-guest"');
     expect(html).toContain('function applyPracticeSchedule(schedule)');
+    expect(html).toContain('class="practice-manual-field"');
+    expect(html).toContain("item.practice_date===today");
+    expect(html).toContain('function setPracticeManualFieldsVisible(visible)');
     expect(html).toContain('guests:practiceGuests()');
     expect(html).toContain('id="practice-reader"');
     expect(html).toContain('type="hidden" name="readerMemberId" id="practice-reader"');
