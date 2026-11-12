@@ -1,6 +1,6 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
-  "name": "sukc-general-man-bot",
+  "name": "sukc-iroiro-bot",
   "main": "src/general-bot.ts",
   "compatibility_date": "2026-10-30",
   "observability": {
@@ -19,6 +19,7 @@
   ],
   "env": {
     "development": {
+      "name": "sukc-general-man-bot-development",
       "vars": {
         "ENVIRONMENT": "development",
         "DISCORD_GUILD_ID": "1561041857952223352"

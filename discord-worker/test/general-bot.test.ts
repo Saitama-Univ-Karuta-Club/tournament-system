@@ -247,7 +247,7 @@ describe("general man Discord bot", () => {
     );
     await expect(health.json()).resolves.toEqual({
       ok: true,
-      service: "sukc-general-man-bot",
+      service: "sukc-iroiro-bot",
       configured: {
         publicKey: true,
         applicationId: false,

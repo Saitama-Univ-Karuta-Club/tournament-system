@@ -47,7 +47,7 @@
 - `sukc-tournament-portal`: 承認済みメンバー用。Discord OAuthで本人確認し、大会閲覧・PDF閲覧・Web回答を提供する
 - `sukc-tournament-backup`: 毎日3:00（日本時間）にD1と未退避のR2 PDFをGoogle Driveへ保存する
 - `sukc-practice-recorder-bot`: 「かるた練習帖」。練習の札組・対戦組み合わせをDiscordへ投稿する
-- `sukc-general-man-bot`: 「いろいろBOT」。投票・日程調整・あみだくじなどの汎用機能を担当する
+- `sukc-iroiro-bot`: 「いろいろBOT」。投票・日程調整・あみだくじなどの汎用機能を担当する
 
 管理画面で保存した大会はD1へ入り、Discord WorkerのCronが1分以内を目安に取得して告知とDMを送ります。管理画面WorkerへBotトークンを複製しない構成です。
 
@@ -269,7 +269,7 @@ Discord内で完結するあみだくじを提供します。
 Discord Developer PortalのInteractions Endpointには次を設定します。
 
 ```text
-https://sukc-general-man-bot.saitama-univ-karuta-club.workers.dev/interactions
+https://sukc-iroiro-bot.saitama-univ-karuta-club.workers.dev/interactions
 ```
 
 開発環境は `--env development` で別Workerへ配備します。開発サーバーへコマンドを

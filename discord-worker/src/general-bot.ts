@@ -662,7 +662,7 @@ export async function handleGeneralBotRequest(
       : null;
     return json({
       ok: true,
-      service: "sukc-general-man-bot",
+      service: "sukc-iroiro-bot",
       configured: {
         publicKey: Boolean(env.DISCORD_PUBLIC_KEY),
         applicationId: Boolean(env.DISCORD_APPLICATION_ID),
