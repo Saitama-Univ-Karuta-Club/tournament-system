@@ -7,7 +7,7 @@
     "enabled": true
   },
   "triggers": {
-    "crons": ["*/1 * * * *"]
+    "crons": []
   },
   "d1_databases": [
     {
@@ -24,7 +24,7 @@
         "DISCORD_GUILD_ID": "1561041857952223352"
       },
       "triggers": {
-        "crons": ["*/1 * * * *"]
+        "crons": []
       },
       "d1_databases": [
         {
