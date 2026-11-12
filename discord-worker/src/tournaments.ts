@@ -47,6 +47,7 @@ export interface TournamentInput {
   grade: string;
   tournamentType: string;
   venue?: string;
+  comment?: string;
   trueDeadline: string;
   internalDeadline: string;
   documentUrl?: string;
@@ -78,6 +79,7 @@ export interface TournamentRow {
   true_deadline: string;
   tournament_type?: string;
   venue?: string | null;
+  comment?: string | null;
   document_url?: string | null;
   closure_reason?: "no_participants" | null;
   workflow_stage?: string;
@@ -376,6 +378,7 @@ export function normalizeTournamentInput(raw: TournamentInput): TournamentInput 
     internalDeadline,
     trueDeadline,
     venue: normalizeOptionalText(raw.venue, "会場", 200),
+    comment: normalizeOptionalText(raw.comment, "コメント", 1000),
     documentUrl: normalizeDocumentUrl(raw.documentUrl),
     applicationMethod: applicationMethod as TournamentApplicationMethod | "",
     applicationRosterUrl,
@@ -1515,6 +1518,7 @@ export async function createTournaments(
     all_grades: input.grade === "all" ? 1 : 0,
     tournament_type: input.tournamentType,
     venue: input.venue || null,
+    comment: input.comment || null,
     true_deadline: input.trueDeadline,
     internal_deadline: input.internalDeadline,
     document_url: input.documentUrl || null,
@@ -1539,6 +1543,7 @@ export async function createTournaments(
           true_deadline,
           internal_deadline,
           venue,
+          comment,
           document_url,
           status,
           workflow_stage,
@@ -1546,7 +1551,7 @@ export async function createTournaments(
           created_by_email,
           created_at,
           updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)`,
       ).bind(
         tournament.tournament_id,
         tournament.registration_group_id,
@@ -1560,6 +1565,7 @@ export async function createTournaments(
         tournament.true_deadline,
         tournament.internal_deadline,
         input.venue || null,
+        input.comment || null,
         input.documentUrl || null,
         tournament.workflow_stage,
         input.createdByDiscordUserId || null,

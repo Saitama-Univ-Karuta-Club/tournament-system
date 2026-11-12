@@ -18,6 +18,7 @@ interface PortalTournamentRow {
   all_grades: number;
   tournament_type: string;
   venue: string | null;
+  comment: string | null;
   true_deadline: string;
   internal_deadline: string;
   document_url: string | null;
@@ -85,6 +86,7 @@ export async function listPortalTournaments(
       tournaments.all_grades,
       tournaments.tournament_type,
       tournaments.venue,
+      tournaments.comment,
       tournaments.true_deadline,
       tournaments.internal_deadline,
       tournaments.document_url,

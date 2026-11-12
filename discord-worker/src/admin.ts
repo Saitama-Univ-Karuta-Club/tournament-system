@@ -364,6 +364,7 @@ export interface TournamentEditInput {
   grades?: string[];
   tournamentType: string;
   venue?: string;
+  comment?: string;
   trueDeadline: string;
   internalDeadline: string;
   documentUrl?: string;
@@ -575,6 +576,7 @@ async function loadEditableTournaments(
       all_grades,
       tournament_type,
       venue,
+      comment,
       true_deadline,
       internal_deadline,
       document_url,
@@ -634,6 +636,7 @@ export async function listAdminTournaments(
       tournaments.all_grades,
       tournaments.tournament_type,
       tournaments.venue,
+      tournaments.comment,
       tournaments.true_deadline,
       tournaments.internal_deadline,
       tournaments.document_url,
@@ -2991,6 +2994,7 @@ export async function editTournaments(
     title: normalized.title,
     tournamentType: normalized.tournamentType,
     venue: normalized.venue || "",
+    comment: normalized.comment || "",
     trueDeadline: normalized.trueDeadline,
     internalDeadline: normalized.internalDeadline,
     documentUrl: normalized.documentUrl || "",
@@ -3018,6 +3022,7 @@ export async function editTournaments(
     ) ||
     tournament.tournament_type !== editableData.tournamentType ||
     (tournament.venue ?? "") !== editableData.venue ||
+    (tournament.comment ?? "") !== editableData.comment ||
     tournament.true_deadline !== editableData.trueDeadline ||
     tournament.internal_deadline !== editableData.internalDeadline ||
     (tournament.document_url ?? "") !== editableData.documentUrl
@@ -3043,6 +3048,7 @@ export async function editTournaments(
       tournament.event_end_date !== normalizedEventDates[grade] ||
       tournament.tournament_type !== editableData.tournamentType ||
       (tournament.venue ?? "") !== editableData.venue ||
+      (tournament.comment ?? "") !== editableData.comment ||
       tournament.true_deadline !== editableData.trueDeadline ||
       tournament.internal_deadline !== editableData.internalDeadline ||
       (tournament.document_url ?? "") !== editableData.documentUrl ||
@@ -3057,6 +3063,7 @@ export async function editTournaments(
         grades: currentGrades,
         tournamentType: tournament.tournament_type,
         venue: tournament.venue ?? "",
+        comment: tournament.comment ?? "",
         trueDeadline: tournament.true_deadline,
         internalDeadline: tournament.internal_deadline,
         documentUrl: tournament.document_url ?? "",
@@ -3066,7 +3073,7 @@ export async function editTournaments(
         env.DB.prepare(
           `UPDATE tournaments
            SET title = ?, event_start_date = ?, event_end_date = ?,
-             tournament_type = ?, is_official = ?, venue = ?,
+             tournament_type = ?, is_official = ?, venue = ?, comment = ?,
              true_deadline = ?, internal_deadline = ?, document_url = ?,
              registration_group_id = ?,
              workflow_stage = CASE
@@ -3083,6 +3090,7 @@ export async function editTournaments(
           editableData.tournamentType,
           editableData.tournamentType === "official" ? 1 : 0,
           editableData.venue || null,
+          editableData.comment || null,
           editableData.trueDeadline,
           editableData.internalDeadline,
           editableData.documentUrl || null,
@@ -3143,6 +3151,7 @@ export async function editTournaments(
     all_grades: 0,
     tournament_type: editableData.tournamentType,
     venue: editableData.venue || null,
+    comment: editableData.comment || null,
     true_deadline: editableData.trueDeadline,
     internal_deadline: editableData.internalDeadline,
     document_url: editableData.documentUrl || null,
@@ -3153,9 +3162,9 @@ export async function editTournaments(
       `INSERT INTO tournaments (
         tournament_id, registration_group_id, title, event_start_date,
         event_end_date, grade, all_grades, tournament_type, is_official,
-        true_deadline, internal_deadline, venue, document_url, status,
+        true_deadline, internal_deadline, venue, comment, document_url, status,
         workflow_stage, created_by_email, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).bind(
       tournament.tournament_id,
       tournament.registration_group_id,
@@ -3168,6 +3177,7 @@ export async function editTournaments(
       tournament.true_deadline,
       tournament.internal_deadline,
       tournament.venue,
+      tournament.comment,
       tournament.document_url,
       tournament.status,
       tournament.status === "draft"
@@ -3217,6 +3227,7 @@ export async function editTournaments(
       event_end_date: normalizedEventDates[tournamentGrade(tournament)],
       tournament_type: editableData.tournamentType,
       venue: editableData.venue || null,
+      comment: editableData.comment || null,
       true_deadline: editableData.trueDeadline,
       internal_deadline: editableData.internalDeadline,
       document_url: editableData.documentUrl || null,
@@ -3997,6 +4008,8 @@ function adminHtml(
         <div id="grade-date-settings" class="grade-date-settings" hidden><strong>級ごとの開催日 <span class="optional">同じ大会で日程が異なる級だけ変更してください</span></strong><div id="grade-date-grid" class="grade-date-grid"></div></div>
         <label>主催締切日<input type="datetime-local" name="trueDeadline" required></label>
         <label><span>サークル内締切日 <span class="optional">（設定値に基づき自動入力）</span></span><input type="datetime-local" name="internalDeadline" required></label>
+        <label>会場 <span class="optional">任意</span><input name="venue" maxlength="200" autocomplete="off"></label>
+        <label>コメント <span class="optional">任意</span><textarea name="comment" maxlength="1000" rows="2"></textarea></label>
         <fieldset class="application-method wide">
           <legend>申込方法</legend>
           <label>主催者への申込方法<select name="applicationMethod" required><option value="">選択してください</option><option value="excel_email">Excel名簿に選手名を記入してメール送信</option><option value="excel_form">Excel名簿に選手名を記入してフォームで送信</option><option value="direct_form">フォームに選手名を直接入力して送信</option></select></label>
@@ -4236,6 +4249,7 @@ function adminHtml(
         <label>主催締切日<input type="datetime-local" name="trueDeadline" required></label>
         <label>サークル内締切日<input type="datetime-local" name="internalDeadline" required></label>
         <label class="wide">会場 <span class="optional">任意</span><input name="venue" maxlength="200" autocomplete="off"></label>
+        <label class="wide">コメント <span class="optional">任意</span><textarea name="comment" maxlength="1000" rows="3"></textarea></label>
         <label class="wide">大会要項（PDF・Word） <span class="file-note">新しいファイルを選ぶと現在の要項を差し替えます。Wordは閲覧用PDFを自動生成します</span><input type="file" name="documentFile" accept="application/pdf,.pdf,application/msword,.doc,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.docx"></label>
         <label class="wide">大会要項URL <span class="optional">現在のリンク。空欄にすると要項なし</span><input type="url" name="documentUrl" maxlength="500" placeholder="https://..."></label>
       </div>
@@ -5517,6 +5531,7 @@ function adminHtml(
         tournament.internal_deadline,
         tournament.true_deadline,
         tournament.venue || '',
+        tournament.comment || '',
         tournament.document_url || '',
         tournament.all_grades === 1 ? 'all' : 'individual',
         tournament.created_at,
@@ -5759,6 +5774,7 @@ function adminHtml(
       editTournamentForm.elements.trueDeadline.value = dateTimeInputValue(tournament.true_deadline);
       editTournamentForm.elements.internalDeadline.value = dateTimeInputValue(tournament.internal_deadline);
       editTournamentForm.elements.venue.value = tournament.venue || '';
+      editTournamentForm.elements.comment.value = tournament.comment || '';
       editTournamentForm.elements.documentUrl.value = tournament.document_url || '';
       editTournamentForm.elements.documentFile.value = '';
       editTournamentResult.className = 'status-message';

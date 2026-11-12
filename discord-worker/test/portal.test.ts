@@ -123,6 +123,8 @@ describe("member portal", () => {
     expect(html).toContain('data-view="answer">参加回答</button>');
     expect(html).toContain('aria-label="大会関連の表示切替"');
     expect(html).toContain('.info-cell{padding:2px 0;background:transparent}');
+    expect(html).toContain("target.comment?'<p class=\"tournament-comment\">'");
+    expect(html).toContain("first.comment?'<p class=\"tournament-comment\">'");
     expect(html).not.toContain('.info-cell{border:1px solid');
     expect(html).toContain('id="tournaments-view-tab"');
     expect(html).toContain('id="documents-view-tab"');

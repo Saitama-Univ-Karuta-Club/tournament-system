@@ -260,10 +260,14 @@ describe("tournament input", () => {
       eventEndDate: "2026-11-01",
       internalDeadline: "2026-10-25T23:59:00+09:00",
       trueDeadline: "2026-10-28T23:59:00+09:00",
+      venue: " さいたま会館 ",
+      comment: " 受付は2階です。 ",
     });
 
     expect(input.title).toBe("東会大会");
     expect(input.internalDeadline).toBe("2026-10-25T14:59:00.000Z");
+    expect(input.venue).toBe("さいたま会館");
+    expect(input.comment).toBe("受付は2階です。");
   });
 
   it("rejects an internal deadline after the organizer deadline", () => {

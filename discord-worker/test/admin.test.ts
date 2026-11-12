@@ -1325,6 +1325,8 @@ describe("Admin Worker", () => {
       "大会種別",
       "主催締切日",
       "サークル内締切日",
+      "会場",
+      "コメント",
       "大会要項",
     ];
     const positions = orderedLabels.map((label) => formHtml.indexOf(label));
@@ -1345,7 +1347,8 @@ describe("Admin Worker", () => {
     expect(html).toContain("payload.eventEndDate = payload.eventDate");
     expect(formHtml).toContain('id="grade-date-settings"');
     expect(html).toContain("payload.eventDatesByGrade");
-    expect(formHtml).not.toContain('name="venue"');
+    expect(formHtml).toContain('name="venue"');
+    expect(formHtml).toContain('name="comment"');
     expect(formHtml).not.toContain('name="documentUrl"');
   });
 
