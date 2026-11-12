@@ -1,5 +1,11 @@
 const DISCORD_API_BASE = "https://discord.com/api/v10";
 
+export class DiscordApiError extends Error {
+  constructor(readonly status: number, readonly detail: string) {
+    super(`Discord API error (${status}): ${detail}`);
+  }
+}
+
 export interface DiscordMessage {
   id: string;
   channel_id: string;
@@ -33,7 +39,8 @@ export interface DiscordMessagePayload {
       type: number;
       style: number;
       label: string;
-      custom_id: string;
+      custom_id?: string;
+      url?: string;
     }>;
   }>;
   allowed_mentions?: {
@@ -59,7 +66,7 @@ async function discordRequest<T>(
 
   if (!response.ok) {
     const detail = (await response.text()).slice(0, 500);
-    throw new Error(`Discord API error (${response.status}): ${detail}`);
+    throw new DiscordApiError(response.status, detail);
   }
 
   return (await response.json()) as T;
@@ -75,6 +82,21 @@ export function sendChannelMessage(
     token,
     `/channels/${channelId}/messages`,
     { method: "POST", body: JSON.stringify(payload) },
+    fetcher,
+  );
+}
+
+export function editChannelMessage(
+  token: string,
+  channelId: string,
+  messageId: string,
+  payload: DiscordMessagePayload,
+  fetcher: typeof fetch = fetch,
+): Promise<DiscordMessage> {
+  return discordRequest<DiscordMessage>(
+    token,
+    `/channels/${channelId}/messages/${messageId}`,
+    { method: "PATCH", body: JSON.stringify(payload) },
     fetcher,
   );
 }
@@ -113,9 +135,67 @@ export async function sendChannelMessageWithFiles(
   );
   if (!response.ok) {
     const detail = (await response.text()).slice(0, 500);
-    throw new Error(`Discord API error (${response.status}): ${detail}`);
+    throw new DiscordApiError(response.status, detail);
   }
   return await response.json<DiscordMessage>();
+}
+
+export async function editChannelMessageWithFiles(
+  token: string,
+  channelId: string,
+  messageId: string,
+  payload: DiscordMessagePayload,
+  files: DiscordFileAttachment[],
+  fetcher: typeof fetch = fetch,
+): Promise<DiscordMessage> {
+  const form = new FormData();
+  form.append("payload_json", JSON.stringify({
+    ...payload,
+    attachments: files.map((file, index) => ({
+      id: index,
+      filename: file.filename,
+      description: file.description,
+    })),
+  }));
+  files.forEach((file, index) => {
+    form.append(
+      `files[${index}]`,
+      new Blob([file.data], { type: file.contentType }),
+      file.filename,
+    );
+  });
+  const response = await fetcher(
+    `${DISCORD_API_BASE}/channels/${channelId}/messages/${messageId}`,
+    {
+      method: "PATCH",
+      headers: { Authorization: `Bot ${token}` },
+      body: form,
+    },
+  );
+  if (!response.ok) {
+    const detail = (await response.text()).slice(0, 500);
+    throw new DiscordApiError(response.status, detail);
+  }
+  return await response.json<DiscordMessage>();
+}
+
+export async function deleteChannelMessage(
+  token: string,
+  channelId: string,
+  messageId: string,
+  fetcher: typeof fetch = fetch,
+): Promise<void> {
+  const response = await fetcher(
+    `${DISCORD_API_BASE}/channels/${channelId}/messages/${messageId}`,
+    {
+      method: "DELETE",
+      headers: { Authorization: `Bot ${token}` },
+    },
+  );
+  if (!response.ok && response.status !== 404) {
+    const detail = (await response.text()).slice(0, 500);
+    throw new DiscordApiError(response.status, detail);
+  }
 }
 
 export async function sendDirectMessage(

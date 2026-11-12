@@ -17,6 +17,9 @@ export interface DocumentEnv {
     convertR2DocumentToPdf(
       request: OfficeConversionRequest,
     ): Promise<OfficeConversionResult>;
+    convertR2LegacyExcelToXlsx?(
+      request: OfficeConversionRequest,
+    ): Promise<OfficeConversionResult>;
   };
 }
 
@@ -122,7 +125,7 @@ export function buildConfirmationRosterFilename(
   title: string,
   grades: string[],
   eventDates: string[],
-  extension: "pdf" | "doc" | "docx" | "xls" | "xlsx",
+  extension: "pdf" | "doc" | "docx" | "xls" | "xlsx" | "xlsm",
 ): string {
   const base = buildPdfFilename(title, grades, eventDates).replace(/\.pdf$/i, "");
   return safeFilenamePart(`${base}_申込確認名簿`, "申込確認名簿") + `.${extension}`;
@@ -326,11 +329,13 @@ export async function storeParticipantGuidanceDocument(
       throw new DocumentUploadError("Word（.doc）形式を確認できませんでした。");
     }
     contentType = "application/msword";
-  } else if (extension === "xlsx") {
+  } else if (extension === "xlsx" || extension === "xlsm") {
     if (prefix[0] !== 0x50 || prefix[1] !== 0x4b) {
-      throw new DocumentUploadError("Excel（.xlsx）形式を確認できませんでした。");
+      throw new DocumentUploadError("Excel（.xlsx・.xlsm）形式を確認できませんでした。");
     }
-    contentType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+    contentType = extension === "xlsm"
+      ? "application/vnd.ms-excel.sheet.macroEnabled.12"
+      : "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
   } else if (extension === "xls") {
     const oleSignature = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1];
     if (!oleSignature.every((value, index) => prefix[index] === value)) {
@@ -344,7 +349,7 @@ export async function storeParticipantGuidanceDocument(
   const id = crypto.randomUUID();
   const baseUrl = env.DOCUMENT_PUBLIC_BASE_URL.replace(/\/+$/, "");
   const needsPdfPreview = options.generatePdfPreview !== false &&
-    (extension === "doc" || extension === "docx" || extension === "xls" || extension === "xlsx");
+    (extension === "doc" || extension === "docx" || extension === "xls" || extension === "xlsx" || extension === "xlsm");
 
   // PDFと、編集用として残す申込名簿Excelは従来URLのまま保存する。
   if (!env.DB || !needsPdfPreview) {
@@ -408,7 +413,7 @@ export async function storeParticipantGuidanceDocument(
   ).run();
 
   if (needsPdfPreview) {
-    const previewFileName = fileName.replace(/\.(?:doc|docx|xls|xlsx)$/i, ".pdf");
+    const previewFileName = fileName.replace(/\.(?:doc|docx|xls|xlsx|xlsm)$/i, ".pdf");
     const previewKey = `documents/${id}/preview/${previewFileName}`;
     try {
       if (!env.DOCUMENT_CONVERTER) {
@@ -533,7 +538,7 @@ export async function serveTournamentDocument(
     parts.length !== 3 ||
     parts[0] !== "documents" ||
     !SAFE_ID.test(parts[1]) ||
-    !/\.(?:pdf|doc|docx|xls|xlsx)$/i.test(parts[2])
+    !/\.(?:pdf|doc|docx|xls|xlsx|xlsm)$/i.test(parts[2])
   ) {
     return new Response("Not Found", { status: 404 });
   }

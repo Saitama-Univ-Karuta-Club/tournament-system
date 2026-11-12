@@ -62,6 +62,73 @@ describe("Discord Worker", () => {
     );
   });
 
+  it("downloads an unsent application email with the generated roster attached", async () => {
+    const tournamentId = "T-11111111-1111-4111-8111-111111111111";
+    const rosterUrl =
+      "https://example.com/documents/22222222-2222-4222-8222-222222222222/%E3%83%86%E3%82%B9%E3%83%88%E5%A4%A7%E4%BC%9A_C%E7%B4%9A_%E7%94%B3%E8%BE%BC%E5%90%8D%E7%B0%BF.xlsx";
+    const prepare = vi.fn((sql: string) => {
+      const statement = {
+        bind: vi.fn(() => statement),
+        first: vi.fn().mockResolvedValue(sql.includes("FROM tournaments") ? {
+          tournament_id: tournamentId,
+          registration_group_id: null,
+          title: "テスト大会",
+          event_start_date: "2026-11-01",
+          event_end_date: "2026-11-01",
+          grade: "C",
+          all_grades: 0,
+          internal_deadline: "2026-10-20T14:59:00.000Z",
+          true_deadline: "2026-10-22T14:59:00.000Z",
+          application_method: "excel_email",
+          application_roster_url: rosterUrl,
+          application_roster_file_name: "テスト大会_C級_申込名簿.xlsx",
+          application_roster_content_type:
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          application_email: "entry@example.com",
+        } : null),
+        all: vi.fn().mockResolvedValue({
+          results: [{
+            display_name: "石田洋音",
+            display_name_kana: "いしだひろね",
+            grade: "C",
+          }],
+        }),
+      };
+      return statement;
+    });
+    const get = vi.fn().mockResolvedValue({
+      arrayBuffer: vi.fn().mockResolvedValue(
+        new Uint8Array([0x50, 0x4b, 0x03, 0x04]).buffer,
+      ),
+      httpMetadata: {
+        contentType:
+          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      },
+    });
+    const configuredEnv: Env = {
+      ...env,
+      DB: { prepare } as unknown as D1Database,
+      DOCUMENTS: { get } as unknown as R2Bucket,
+    };
+
+    const response = await handleRequest(
+      new Request(`https://example.com/application-email/${tournamentId}/draft.eml`),
+      configuredEnv,
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Content-Type")).toContain("message/rfc822");
+    expect(response.headers.get("Content-Disposition")).toContain(".eml");
+    const eml = await response.text();
+    expect(eml).toContain("X-Unsent: 1");
+    expect(eml).toContain("To: entry@example.com");
+    expect(eml).toContain("Content-Disposition: inline; filename=\"application-roster.xlsx\";");
+    expect(eml).toContain("UEsDBA==");
+    expect(get).toHaveBeenCalledWith(
+      "documents/22222222-2222-4222-8222-222222222222/テスト大会_C級_申込名簿.xlsx",
+    );
+  });
+
   it("rejects unsigned interaction requests", async () => {
     const response = await handleRequest(
       new Request("https://example.com/interactions", {

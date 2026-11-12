@@ -3,6 +3,7 @@ import {
   decideMemberRegistration,
   listAdminMemberAppearances,
   MemberAdminError,
+  updateAdminMembers,
 } from "../src/admin-members";
 
 function decisionEnvironment(requestRow: Record<string, unknown>) {
@@ -26,16 +27,39 @@ describe("member registration decisions", () => {
   it("summarizes confirmed appearances by grade for the current fiscal year", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-10-20T12:00:00+09:00"));
-    const all = vi.fn().mockResolvedValue({
-      results: [
-        { group_key: "G-new", title: "秋大会", event_start_date: "2026-10-19", grade: "C", result_text: "優勝" },
-        { group_key: "G-summer", title: "夏大会", event_start_date: "2026-06-10", grade: "B", result_text: null },
-        { group_key: "G-summer", title: "夏大会", event_start_date: "2026-06-10", grade: "B", result_text: null },
-        { group_key: "G-old", title: "春季大会", event_start_date: "2026-03-20", grade: "C", result_text: "2回戦敗退" },
-      ],
-    });
-    const bind = vi.fn().mockReturnValue({ all });
-    const prepare = vi.fn().mockReturnValue({ bind });
+    const prepare = vi.fn((sql: string) => ({
+      bind: vi.fn().mockReturnValue({
+        all: vi.fn().mockResolvedValue({
+          results: sql.includes("FROM tournament_entry_matches")
+            ? [
+              {
+                tournament_id: "T-new",
+                round_number: 1,
+                outcome: "win",
+                score_difference: 8,
+                result_note: null,
+                opponent_name: "山田太郎",
+                opponent_affiliation: "世界大学かるた会",
+              },
+              {
+                tournament_id: "T-new",
+                round_number: 2,
+                outcome: "loss",
+                score_difference: 2,
+                result_note: null,
+                opponent_name: "佐藤花子",
+                opponent_affiliation: "ちはやふるかるた会",
+              },
+            ]
+            : [
+              { tournament_id: "T-new", group_key: "G-new", title: "秋大会", event_start_date: "2026-10-19", grade: "C", result_text: "優勝" },
+              { tournament_id: "T-summer", group_key: "G-summer", title: "夏大会", event_start_date: "2026-06-10", grade: "B", result_text: null },
+              { tournament_id: "T-summer-duplicate", group_key: "G-summer", title: "夏大会", event_start_date: "2026-06-10", grade: "B", result_text: null },
+              { tournament_id: "T-old", group_key: "G-old", title: "春季大会", event_start_date: "2026-03-20", grade: "C", result_text: "2回戦敗退" },
+            ],
+        }),
+      }),
+    }));
     const memberId = "M-11111111-1111-4111-8111-111111111111";
 
     const history = await listAdminMemberAppearances(
@@ -48,12 +72,37 @@ describe("member registration decisions", () => {
       fiscalYear: 2026,
       gradeCounts: { C: 1, B: 1 },
       appearances: [
-        { title: "秋大会", eventDate: "2026-10-19", grade: "C", resultText: "優勝" },
-        { title: "夏大会", eventDate: "2026-06-10", grade: "B", resultText: null },
-        { title: "春季大会", eventDate: "2026-03-20", grade: "C", resultText: "2回戦敗退" },
+        {
+          tournamentId: "T-new",
+          title: "秋大会",
+          eventDate: "2026-10-19",
+          grade: "C",
+          resultText: "優勝",
+          matches: [
+            {
+              roundNumber: 1,
+              outcome: "win",
+              scoreDifference: 8,
+              resultNote: null,
+              opponentName: "山田太郎",
+              opponentAffiliation: "世界大学かるた会",
+            },
+            {
+              roundNumber: 2,
+              outcome: "loss",
+              scoreDifference: 2,
+              resultNote: null,
+              opponentName: "佐藤花子",
+              opponentAffiliation: "ちはやふるかるた会",
+            },
+          ],
+        },
+        { tournamentId: "T-summer", title: "夏大会", eventDate: "2026-06-10", grade: "B", resultText: null, matches: [] },
+        { tournamentId: "T-old", title: "春季大会", eventDate: "2026-03-20", grade: "C", resultText: "2回戦敗退", matches: [] },
       ],
     });
-    expect(bind).toHaveBeenCalledWith(memberId, "2026-10-20");
+    expect(prepare.mock.results[0].value.bind).toHaveBeenCalledWith(memberId, "2026-10-20");
+    expect(prepare.mock.results[1].value.bind).toHaveBeenCalledWith(memberId);
     expect(prepare.mock.calls[0][0]).toContain("tournament_entries.status = 'selected'");
     expect(prepare.mock.calls[0][0]).toContain("tournaments.status NOT IN ('canceled', 'deleted')");
     vi.useRealTimers();
@@ -205,6 +254,45 @@ describe("member registration decisions", () => {
         "admin@example.com",
       ),
     ).rejects.toBeInstanceOf(MemberAdminError);
+    expect(batch).not.toHaveBeenCalled();
+  });
+});
+
+describe("member bulk updates", () => {
+  it("validates every member before writing all changes in one batch", async () => {
+    const firstId = "M-11111111-1111-4111-8111-111111111111";
+    const secondId = "M-22222222-2222-4222-8222-222222222222";
+    const rows = new Map([
+      [firstId, { member_id:firstId,last_name:"石田",first_name:"洋音",last_name_kana:"いしだ",first_name_kana:"ひろね",display_name:"石田洋音",display_name_kana:"いしだひろね",grade:"C",rank:2,status:"active",dm_enabled:1,discord_user_id:"1",created_at:"2026-01-01",updated_at:"2026-01-01" }],
+      [secondId, { member_id:secondId,last_name:"山田",first_name:"花",last_name_kana:"やまだ",first_name_kana:"はな",display_name:"山田花",display_name_kana:"やまだはな",grade:"B",rank:3,status:"active",dm_enabled:1,discord_user_id:"2",created_at:"2026-01-01",updated_at:"2026-01-01" }],
+    ]);
+    const prepare = vi.fn((sql: string) => ({
+      bind: vi.fn((...args: unknown[]) => ({
+        first: vi.fn().mockResolvedValue(sql.includes("FROM members WHERE") ? rows.get(String(args[0])) : null),
+      })),
+    }));
+    const batch = vi.fn().mockResolvedValue([]);
+    const members = await updateAdminMembers(
+      { DB: { prepare, batch } as unknown as D1Database },
+      [
+        { memberId:firstId,input:{lastName:"石田",firstName:"洋音",lastNameKana:"いしだ",firstNameKana:"ひろね",grade:"B",rank:3,status:"active",dmEnabled:true} },
+        { memberId:secondId,input:{lastName:"山田",firstName:"花子",lastNameKana:"やまだ",firstNameKana:"はなこ",grade:"B",rank:3,status:"active",dmEnabled:false} },
+      ],
+      "admin@example.com",
+    );
+    expect(members).toHaveLength(2);
+    expect(batch).toHaveBeenCalledOnce();
+    expect(batch.mock.calls[0][0]).toHaveLength(5);
+    expect(prepare.mock.calls.filter(([sql]) => String(sql).includes("FROM members WHERE"))).toHaveLength(2);
+  });
+
+  it("does not write anything when one member is invalid", async () => {
+    const batch = vi.fn();
+    await expect(updateAdminMembers(
+      { DB: { prepare: vi.fn(), batch } as unknown as D1Database },
+      [{ memberId:"invalid",input:{lastName:"",firstName:"",lastNameKana:"",firstNameKana:"",grade:"C",rank:1,status:"active",dmEnabled:true} }],
+      "admin@example.com",
+    )).rejects.toMatchObject({ memberId: "invalid" });
     expect(batch).not.toHaveBeenCalled();
   });
 });

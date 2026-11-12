@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   buildAdminTodoItems,
   editTournaments,
+  extractTournamentResultsFromUpload,
   handleAdminRequest,
   listAdminTournaments,
   setTournamentArchivePublished,
@@ -14,6 +15,7 @@ import {
   type AdminEnv,
   type AdminTournament,
 } from "../src/admin";
+import { standardExcelTemplate } from "./excel-auto-fill-fixtures";
 
 const env = {
   DB: {} as D1Database,
@@ -40,6 +42,8 @@ describe("Admin Worker", () => {
 
     expect(script).toBeTruthy();
     expect(() => new Function(script ?? "")).not.toThrow();
+    expect(script).toContain("/api/tournament-results/extract");
+    expect(script).toContain("Excelから個人成績を読み取り中");
   });
 
   it("renders an on-demand member appearance history dialog", async () => {
@@ -54,8 +58,27 @@ describe("Admin Worker", () => {
     expect(html).toContain("['氏名', 'よみがな', '出場級', '段位', '出場歴', '状態', 'DM', '操作']");
     expect(html).toContain("function openMemberHistory(member)");
     expect(html).toContain("'/api/members/' + encodeURIComponent(member.memberId)");
-    expect(html).toContain("history.fiscalYear + '年度：'");
-    expect(html).toContain("['開催月', '大会名', '出場級', '戦績']");
+    expect(html).toContain("'集計開始日'");
+    expect(html).toContain("'集計終了日（大会案内発表日）'");
+    expect(html).toContain("const createHistoryDateSelector = (labelText, initialValue) =>");
+    expect(html).toContain("labelText + 'の年'");
+    expect(html).toContain("labelText + 'の月'");
+    expect(html).toContain("labelText + 'の日'");
+    expect(html).toContain("new Date(Number(yearSelect.value), Number(monthSelect.value), 0).getDate()");
+    expect(html).toContain("'当年度に戻す'");
+    expect(html).toContain("'全期間表示'");
+    expect(html).toContain("startSelector.setValue(fiscalStart)");
+    expect(html).toContain("startSelector.setValue(fullPeriodStart)");
+    expect(html).toContain("appearance.eventDate >= startDate && appearance.eventDate <= endDate");
+    expect(html).not.toContain("大会開催日が指定期間内にある出場歴を集計します。開始日と終了日を含みます。");
+    expect(html).toContain("['開催日', '大会名', '出場級', '戦績', '対戦詳細']");
+    expect(html).toContain("'指定期間の出場履歴はありません。'");
+    expect(html).toContain(".member-history-period { display: grid;");
+    expect(html).toContain(".member-history-date-selects { display: grid;");
+    expect(html).toContain(".member-history-period-actions { display: flex;");
+    expect(html).toContain("member-match-dialog");
+    expect(html).toContain("function memberMatchMark(match)");
+    expect(html).toContain("'結果：' + (appearance.resultText || '未登録')");
   });
 
   it("redirects an unauthenticated browser to Discord login", async () => {
@@ -80,7 +103,7 @@ describe("Admin Worker", () => {
 
     expect(response.status).toBe(401);
     await expect(response.json()).resolves.toEqual({
-      error: "Discordでの大会担当者ログインが必要です。",
+      error: "Discordでの担当者ログインが必要です。",
     });
   });
 
@@ -99,6 +122,7 @@ describe("Admin Worker", () => {
     ["todo", "TODO"],
     ["register", "大会新規登録"],
     ["tournaments", "一覧"],
+    ["practice", "練習管理"],
     ["members", "メンバー管理"],
     ["settings", "設定"],
   ])("serves the %s page with tab navigation", async (path, label) => {
@@ -124,6 +148,45 @@ describe("Admin Worker", () => {
     const script = html.match(/<script>([\s\S]*)<\/script>/)?.[1];
     expect(script).toBeTruthy();
     expect(() => new Function(script!)).not.toThrow();
+  });
+
+  it("labels the development management portal without changing production", async () => {
+    const developmentResponse = await handleAdminRequest(
+      new Request("https://admin.example.com/register"),
+      { ...env, ENVIRONMENT: "development" },
+      authenticatedContext(),
+    );
+    const developmentHtml = await developmentResponse.text();
+    expect(developmentHtml).toContain("<h1>運営管理ポータル（開発版）</h1>");
+    expect(developmentHtml).toContain(
+      "<title>大会新規登録 | 埼玉大学かるた会 運営管理ポータル（開発版）</title>",
+    );
+
+    const productionResponse = await handleAdminRequest(
+      new Request("https://admin.example.com/register"),
+      env,
+      authenticatedContext(),
+    );
+    const productionHtml = await productionResponse.text();
+    expect(productionHtml).toContain("<h1>運営管理ポータル</h1>");
+    expect(productionHtml).not.toContain("運営管理ポータル（開発版）");
+  });
+
+  it("filters the member list by membership status", async () => {
+    const response = await handleAdminRequest(
+      new Request("https://admin.example.com/members"),
+      env,
+      authenticatedContext(),
+    );
+    const html = await response.text();
+    expect(html).toContain('id="member-status-filter"');
+    expect(html).toContain('<option value="all">すべて</option>');
+    expect(html).toContain('<option value="active">有効</option>');
+    expect(html).toContain('<option value="inactive">無効</option>');
+    expect(html).toContain('<option value="pending">確認待ち</option>');
+    expect(html).toContain('<option value="rejected">却下</option>');
+    expect(html).toContain("memberStatusFilter?.addEventListener('change', renderMemberList)");
+    expect(html).toContain("memberStatusFilter.disabled = count > 0");
   });
 
   it("groups tournament pages under a secondary navigation and renders the settings categories", async () => {
@@ -203,6 +266,151 @@ describe("Admin Worker", () => {
     expect(settingsHtml).toContain('>基準と同じ</option><option value="custom">自由設定</option>');
     expect(settingsHtml).toContain("timeInput.hidden = modeSelect.value !== 'custom'");
     expect(settingsHtml).toContain("fetch('/api/settings/deadlines')");
+    expect(settingsHtml).toContain('id="practice-schedule-settings-form"');
+    expect(settingsHtml).toContain('name="morningStartTime"');
+    expect(settingsHtml).toContain('name="defaultTimeBand"');
+    expect(settingsHtml).toContain('id="practice-venue-setting-rows"');
+    expect(settingsHtml).toContain("fetch('/api/settings/practice-schedules')");
+  });
+
+  it("renders practice schedule management only in the admin portal", async () => {
+    const response = await handleAdminRequest(
+      new Request("https://admin.example.com/practice"),
+      env,
+      authenticatedContext(),
+    );
+    const html = await response.text();
+
+    expect(html).toContain('href="/practice" aria-current="page">練習管理</a>');
+    expect(html).toContain('id="practice-schedule-form"');
+    expect(html).toContain('id="practice-schedule-rows"');
+    expect(html).toContain('id="practice-schedule-list"');
+    expect(html).toContain('id="practice-schedule-edit-dialog"');
+    expect(html).toContain("fetch('/api/practice/schedules'");
+    expect(html).toContain("method: 'POST'");
+    expect(html).toContain("method: 'PATCH'");
+    expect(html).toContain("method: 'DELETE'");
+    expect(html).toContain("Discordの同月カレンダーも自動的に更新されます。");
+    expect(html).toContain("practice-schedule-card-note");
+    expect(html).toContain("const defaultStart = practiceScheduleSettings[timeBand + 'StartTime']");
+    expect(html).toContain("function practiceScheduleVenueField()");
+    expect(html).toContain("practiceScheduleSettings.venues.forEach((venue)");
+    expect(html).toContain("input.value = practiceScheduleSettings.defaultVenue");
+    expect(html).toContain("'practice-venue-preset-toggle', '▼'");
+    expect(html).toContain("input.value = venue.name");
+    expect(html).toContain("fetch('/api/settings/practice-schedules')");
+    expect(html).toContain('data-page="practice"');
+  });
+
+  it("registers practice schedules through the authenticated admin API", async () => {
+    type Statement = { sql: string; values: unknown[] };
+    const batched: Statement[] = [];
+    const adminDb = {
+      prepare(sql: string) {
+        return {
+          bind: (...values: unknown[]) => ({ sql, values }),
+          all: vi.fn().mockResolvedValue({ results: [] }),
+        };
+      },
+      async batch(statements: Statement[]) {
+        batched.push(...statements);
+        return statements.map(() => ({ success: true }));
+      },
+    };
+    const response = await handleAdminRequest(
+      new Request("https://admin.example.com/api/practice/schedules", {
+        method: "POST",
+        headers: {
+          Origin: "https://admin.example.com",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          schedules: [{ practiceDate: "2026-11-01", title: "通常練習" }],
+        }),
+      }),
+      { ...env, DB: adminDb as unknown as D1Database },
+      authenticatedContext(),
+    );
+
+    expect(response.status).toBe(201);
+    expect(batched).toHaveLength(2);
+    expect(batched[0].sql).toContain("created_by_admin_identity");
+    expect(batched[0].values).toContain("admin@example.com");
+    await expect(response.json()).resolves.toMatchObject({ schedules: [] });
+  });
+
+  it("edits practice schedules through the practice administrator API", async () => {
+    const prepared: string[] = [];
+    const run = vi.fn().mockResolvedValue({ meta: { changes: 1 } });
+    const all = vi.fn().mockResolvedValue({ results: [] });
+    const adminDb = {
+      prepare(sql: string) {
+        prepared.push(sql);
+        return {
+          bind: (..._values: unknown[]) => sql.includes("SELECT practice_date")
+            ? { first: vi.fn().mockResolvedValue({ practice_date: "2026-11-01" }) }
+            : { run, all, sql },
+          all,
+        };
+      },
+      async batch(statements: Array<{ sql?: string }>) {
+        return statements.map((_, index) => ({ meta: { changes: index === 0 ? 1 : 0 } }));
+      },
+    };
+    const response = await handleAdminRequest(
+      new Request("https://admin.example.com/api/practice/schedules/PS-11111111-1111-4111-8111-111111111111", {
+        method: "PATCH",
+        headers: {
+          Origin: "https://admin.example.com",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          practiceDate: "2026-11-03",
+          startTime: "18:00",
+          endTime: "21:30",
+          title: "変更後の練習",
+          location: "大久保東公民館",
+          note: "変更あり",
+        }),
+      }),
+      { ...env, DB: adminDb as unknown as D1Database },
+      authenticatedContext(),
+    );
+
+    expect(response.status).toBe(200);
+    expect(prepared.some((sql) => sql.includes("SET practice_date = ?"))).toBe(true);
+    await expect(response.json()).resolves.toMatchObject({ schedules: [] });
+  });
+
+  it("cancels a practice schedule through the practice administrator API", async () => {
+    const prepared: string[] = [];
+    const all = vi.fn().mockResolvedValue({ results: [] });
+    const adminDb = {
+      prepare(sql: string) {
+        prepared.push(sql);
+        return {
+          bind: (..._values: unknown[]) => sql.includes("SELECT practice_date")
+            ? { first: vi.fn().mockResolvedValue({ practice_date: "2026-11-03" }) }
+            : { sql },
+          all,
+        };
+      },
+      async batch(statements: Array<{ sql?: string }>) {
+        return statements.map(() => ({ meta: { changes: 1 } }));
+      },
+    };
+    const response = await handleAdminRequest(
+      new Request("https://admin.example.com/api/practice/schedules/PS-11111111-1111-4111-8111-111111111111", {
+        method: "DELETE",
+        headers: { Origin: "https://admin.example.com" },
+      }),
+      { ...env, DB: adminDb as unknown as D1Database },
+      authenticatedContext(),
+    );
+
+    expect(response.status).toBe(200);
+    expect(prepared.some((sql) => sql.includes("status = 'canceled'"))).toBe(true);
+    await expect(response.json()).resolves.toMatchObject({ schedules: [] });
   });
 
   it("renders a simple TODO page with one-tap completion actions", async () => {
@@ -428,12 +636,20 @@ describe("Admin Worker", () => {
     expect(html).toContain("回答受付中のみ変更可");
     expect(html).toContain('name="editGrades" value="D"');
     expect(html).toContain("1. 申込確認名簿（抽選前・");
+    expect(html).toContain("/api/rosters/application-check");
+    expect(html).toContain("氏名と級を保存前に照合します");
     expect(html).not.toContain("抽選なしで全員を受け入れる大会では、この項目を飛ばし");
     expect(html).toContain("2. 抽選結果・確定名簿・参加費・当日案内");
     expect(html).toContain("3. 大会結果");
     expect(html).toContain("結果を保存して公開");
     expect(html).toContain("/api/tournament-results/batch");
+    expect(html).toContain("対戦詳細だけを保存");
+    expect(html).toContain("renderMatchEditor(control, prediction.matches, false)");
+    expect(html).toContain("resultText: control.originalValue");
     expect(html).toContain("選手ごとの当落・入金状態");
+    expect(html).toContain("/api/rosters/lottery-predict");
+    expect(html).toContain("まだ保存はされていません");
+    expect(html).toContain("control.lastAutoFilledStatus = prediction.entryStatus");
     expect(html).toContain("rosterBox.append(element('strong', '', '確定名簿'))");
     expect(html).not.toContain("確定名簿（PDF・Excel／Excelは検索可能なPDFへ自動変換）");
     expect(html).toContain("参加費・当日案内");
@@ -466,7 +682,7 @@ describe("Admin Worker", () => {
     expect(html).toContain("--control-padding-block: 8px;");
     expect(html).toContain("--control-padding-inline: 10px;");
     expect(html).toContain("padding: var(--control-padding-block) var(--control-padding-inline)");
-    expect(html).toContain("body { margin: 0; font-size: var(--font-size-body);");
+    expect(html).toContain("body { margin: 0; color: var(--site-ink); background: var(--site-background); font-size: var(--font-size-body);");
     expect(html).toContain("button, .todo-link { min-height: 44px;");
     expect(html).toContain(".card-title-actions h3 { min-width: 0; font-size: var(--font-size-page);");
     expect(html).toContain(".entry-management { min-width: 0; max-width: 100%; margin: 5px 0 0;");
@@ -484,6 +700,18 @@ describe("Admin Worker", () => {
     expect(html).toContain("document.createElement('details')");
     expect(html).toContain("entry-management-body");
     expect(html).toContain("archive-management-body");
+    expect(html).toContain("確定名簿・抽選結果・参加費・当日案内を一括保存");
+    expect(html).toContain("選択したファイルは一括保存または送信時にアップロードします。");
+    expect(html).toContain("const collectLotteryChanges = () =>");
+    expect(html).toContain("const persistRoster = async (selectedRosterFile) =>");
+    expect(html).toContain("const persistLotteryChanges = async (changes) =>");
+    expect(html).toContain("大会お知らせと通常の結果DMは送信しません");
+    const organizerPaymentHandler = html.slice(
+      html.indexOf("saveOrganizerStatus.addEventListener('click'"),
+      html.indexOf("organizerStatusBox.append"),
+    );
+    expect(organizerPaymentHandler).toContain("await loadTodoCount()");
+    expect(html).not.toContain("参加費・案内を更新");
     expect(html).toContain("抽選結果・確定名簿・参加費・当日案内を保存して送信");
     expect(html).toContain("/api/lottery-results/send");
     expect(html).toContain("entriesBody.promotionDmQueued");
@@ -593,6 +821,72 @@ describe("Admin Worker", () => {
     expect(batch).not.toHaveBeenCalled();
   });
 
+  it("loads confirmed participants and analyzes an uploaded result workbook without saving it", async () => {
+    const tournamentId = "T-11111111-1111-4111-8111-111111111111";
+    const memberId = "M-11111111-1111-4111-8111-111111111111";
+    const tournament = {
+      tournament_id: tournamentId,
+      registration_group_id: null,
+      title: "結果読取大会",
+      event_start_date: "2026-11-01",
+      event_end_date: "2026-11-01",
+      grade: "C",
+      all_grades: 0,
+      tournament_type: "official",
+      venue: null,
+      true_deadline: "2026-10-28T14:59:00.000Z",
+      internal_deadline: "2026-10-25T14:59:00.000Z",
+      document_url: null,
+      status: "applied",
+      workflow_stage: "confirmed",
+      closure_reason: null,
+    };
+    const prepare = vi.fn((sql: string) => ({
+      bind: vi.fn(() => ({
+        all: vi.fn().mockResolvedValue({
+          results: sql.includes("FROM tournament_entries")
+            ? [{
+              tournament_id: tournamentId,
+              member_id: memberId,
+              display_name: "石田洋音",
+              result_grade: "C",
+            }]
+            : [tournament],
+        }),
+      })),
+    }));
+    const form = new FormData();
+    const workbookBytes = Uint8Array.from(standardExcelTemplate()).buffer;
+    form.append("file", new File(
+      [workbookBytes],
+      "results.xlsx",
+      { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" },
+    ));
+    form.append("tournamentIds", JSON.stringify([tournamentId]));
+
+    const report = await extractTournamentResultsFromUpload(
+      { DB: { prepare } as unknown as D1Database },
+      new Request("https://admin.example.com/api/tournament-results/extract", {
+        method: "POST",
+        body: form,
+      }),
+    );
+
+    expect(report).toMatchObject({
+      matchedCount: 0,
+      reviewCount: 0,
+      notFoundCount: 1,
+      predictions: [{
+        tournamentId,
+        memberId,
+        displayName: "石田洋音",
+        grade: "C",
+        status: "not_found",
+        resultText: null,
+      }],
+    });
+  });
+
   it.each([
     { documentType: "roster", fileLabel: "選手名簿" },
     { documentType: "results", fileLabel: "大会結果" },
@@ -627,7 +921,7 @@ describe("Admin Worker", () => {
     const form = new FormData();
     form.append("file", new File(
       [new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0, 0, 0, 0])],
-      "confirmed.xlsx",
+      "譁�蟄怜喧縺励◆螟ｧ莨夂ｵ先棡.xlsx",
       { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" },
     ));
     form.append("documentType", documentType);
@@ -653,6 +947,8 @@ describe("Admin Worker", () => {
     expect(result.conversion_status).toBe("ready");
     expect(result.source_file_name).toBe(`2026年11月_埼玉大会_C級_${fileLabel}.xlsx`);
     expect(put).toHaveBeenCalledOnce();
+    expect(String(put.mock.calls[0][0])).toContain(`2026年11月_埼玉大会_C級_${fileLabel}.xlsx`);
+    expect(String(put.mock.calls[0][0])).not.toContain("譁�蟄怜喧");
     expect(put.mock.calls[0][2].httpMetadata.contentType).toContain("spreadsheetml");
     expect(run).toHaveBeenCalledTimes(3);
   });
@@ -861,8 +1157,74 @@ describe("Admin Worker", () => {
       "discord:admin",
     );
 
-    expect(result).toEqual({ entryCount: 2, changedCount: 2 });
+    expect(result).toEqual({ entryCount: 2, changedCount: 2, matchesSavedCount: 0 });
     expect(batch).toHaveBeenCalledTimes(2);
+  });
+
+  it("replaces and saves detailed matches together with an entrant result", async () => {
+    const statements: Array<{ sql: string; values: unknown[] }> = [];
+    const prepare = vi.fn((sql: string) => ({
+      bind: vi.fn((...values: unknown[]) => ({
+        first: vi.fn().mockResolvedValue({ result_text: null }),
+        sql,
+        values,
+      })),
+    }));
+    const batch = vi.fn(async (items: Array<{ sql: string; values: unknown[] }>) => {
+      statements.push(...items);
+      return items.map(() => ({ success: true }));
+    });
+
+    const result = await updateTournamentEntryResultsBatch(
+      { DB: { prepare, batch } as unknown as D1Database },
+      [{
+        tournamentId: "T-11111111-1111-4111-8111-111111111111",
+        memberId: "M-11111111-1111-4111-8111-111111111111",
+        resultText: "3回戦敗退",
+        matches: [
+          {
+            roundNumber: 1,
+            outcome: "win",
+            scoreDifference: 8,
+            resultNote: null,
+            opponentName: "山田太郎",
+            opponentAffiliation: "世界大学かるた会",
+            sourceSheetName: "C級",
+            sourceCellReference: "F12",
+          },
+          {
+            roundNumber: 2,
+            outcome: "loss",
+            scoreDifference: 2,
+            resultNote: null,
+            opponentName: "佐藤花子",
+            opponentAffiliation: "ちはやふるかるた会",
+            sourceSheetName: "C級",
+            sourceCellReference: "I12",
+          },
+        ],
+      }],
+      "discord:admin",
+    );
+
+    expect(result).toEqual({ entryCount: 1, changedCount: 1, matchesSavedCount: 2 });
+    expect(statements.some((item) => item.sql.includes("DELETE FROM tournament_entry_matches"))).toBe(true);
+    const inserts = statements.filter((item) => item.sql.includes("INSERT INTO tournament_entry_matches"));
+    expect(inserts).toHaveLength(2);
+    expect(inserts[0].values).toEqual(expect.arrayContaining([
+      1,
+      "win",
+      8,
+      "山田太郎",
+      "世界大学かるた会",
+    ]));
+    expect(inserts[1].values).toEqual(expect.arrayContaining([
+      2,
+      "loss",
+      2,
+      "佐藤花子",
+      "ちはやふるかるた会",
+    ]));
   });
 
   it("publishes a complete tournament archive", async () => {

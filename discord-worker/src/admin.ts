@@ -16,6 +16,7 @@ import {
   listPendingMemberRegistrations,
   MemberAdminError,
   updateAdminMember,
+  updateAdminMembers,
   type AdminMember,
   type AdminMemberAppearanceHistory,
   type AdminMemberRegistrationRequest,
@@ -28,6 +29,7 @@ import {
   buildGuidanceFilename,
   buildOrganizerPaymentFilename,
   DocumentUploadError,
+  MAX_GUIDANCE_BYTES,
   storeParticipantGuidanceDocument,
   uploadApplicationRoster,
   uploadTournamentDocument,
@@ -37,6 +39,7 @@ import {
 import {
   handleAdminAuthRequest,
   readAdminDiscordPrincipal,
+  type AdminPermission,
   type AdminAuthEnv,
 } from "./admin-auth";
 import {
@@ -63,8 +66,48 @@ import {
   saveDeadlineAutomationSettings,
 } from "./deadline-settings";
 import { createDatabaseCsvArchive } from "./database-export";
+import {
+  ApplicationRosterGenerationError,
+  generateApplicationRoster as createFilledApplicationRoster,
+  type ExcelProfileEnv,
+} from "./application-roster-generation";
+import {
+  extractTournamentResults,
+  ResultAutoFillError,
+  type ResultExtractionCandidate,
+  type ResultExtractionReport,
+} from "./result-auto-fill";
+import {
+  checkApplicationRoster,
+  extractLotteryRoster,
+  type ApplicationRosterReport,
+  type LotteryRosterReport,
+  type RosterExtractionCandidate,
+} from "./roster-auto-fill";
+import {
+  cancelPracticeSchedule,
+  createPracticeSchedules,
+  listPracticeSchedules,
+  updatePracticeSchedule,
+} from "./practice/schedules";
+import {
+  getPracticeScheduleSettings,
+  PracticeScheduleSettingError,
+  resetPracticeScheduleSettings,
+  savePracticeScheduleSettings,
+} from "./practice/schedule-settings";
+import { PracticeError } from "./practice/service";
+import {
+  getSiteDesignSetting,
+  resetSiteDesignSetting,
+  saveSiteDesignSetting,
+  serveSiteBanner,
+  SiteDesignError,
+} from "./site-design";
 
-export interface AdminEnv extends TournamentEnv, DocumentEnv, AdminAuthEnv {}
+export interface AdminEnv extends TournamentEnv, DocumentEnv, AdminAuthEnv, ExcelProfileEnv {
+  ENVIRONMENT?: string;
+}
 
 type AdminContext = Pick<ExecutionContext, "waitUntil"> &
   Partial<Pick<ExecutionContext, "access">>;
@@ -175,6 +218,31 @@ interface AdminResponseRow {
   waitlist_number: number | null;
   payment_status: "unpaid" | "paid" | null;
   result_text: string | null;
+  matches: TournamentEntryMatch[];
+}
+
+export interface TournamentEntryMatch {
+  roundNumber: number;
+  outcome: "win" | "loss";
+  scoreDifference: number | null;
+  resultNote: string | null;
+  opponentName: string | null;
+  opponentAffiliation: string | null;
+  sourceSheetName: string | null;
+  sourceCellReference: string | null;
+}
+
+interface TournamentEntryMatchRow {
+  tournament_id: string;
+  member_id: string;
+  round_number: number;
+  outcome: "win" | "loss";
+  score_difference: number | null;
+  result_note: string | null;
+  opponent_name: string | null;
+  opponent_affiliation: string | null;
+  source_sheet_name: string | null;
+  source_cell_reference: string | null;
 }
 
 interface AdminArchiveDocumentRow {
@@ -329,11 +397,13 @@ export interface TournamentEntryResultBatchInput {
   tournamentId: string;
   memberId: string;
   resultText: string;
+  matches?: TournamentEntryMatch[];
 }
 
 export interface TournamentEntryResultBatchUpdateResult {
   entryCount: number;
   changedCount: number;
+  matchesSavedCount: number;
 }
 
 export interface TournamentArchivePublishResult {
@@ -674,6 +744,30 @@ export async function listAdminTournaments(
       members.display_name`,
   ).all<AdminResponseRow>();
 
+  const matchRows = await env.DB.prepare(
+    `SELECT tournament_id, member_id, round_number, outcome,
+      score_difference, result_note, opponent_name, opponent_affiliation,
+      source_sheet_name, source_cell_reference
+     FROM tournament_entry_matches
+     ORDER BY tournament_id, member_id, round_number`,
+  ).all<TournamentEntryMatchRow>();
+  const matchesByEntry = new Map<string, TournamentEntryMatch[]>();
+  for (const match of matchRows.results) {
+    const key = `${match.tournament_id}:${match.member_id}`;
+    const current = matchesByEntry.get(key) ?? [];
+    current.push({
+      roundNumber: Number(match.round_number),
+      outcome: match.outcome,
+      scoreDifference: match.score_difference === null ? null : Number(match.score_difference),
+      resultNote: match.result_note,
+      opponentName: match.opponent_name,
+      opponentAffiliation: match.opponent_affiliation,
+      sourceSheetName: match.source_sheet_name,
+      sourceCellReference: match.source_cell_reference,
+    });
+    matchesByEntry.set(key, current);
+  }
+
   const archiveDocuments = await env.DB.prepare(
     `SELECT group_key, document_type, document_url, file_name, file_size, uploaded_at
      FROM tournament_archive_documents
@@ -758,7 +852,10 @@ export async function listAdminTournaments(
   const responsesByTournament = new Map<string, AdminResponseRow[]>();
   for (const response of responseRows.results) {
     const current = responsesByTournament.get(response.tournament_id) ?? [];
-    current.push(response);
+    current.push({
+      ...response,
+      matches: matchesByEntry.get(`${response.tournament_id}:${response.member_id}`) ?? [],
+    });
     responsesByTournament.set(response.tournament_id, current);
   }
 
@@ -1362,10 +1459,51 @@ export async function updateTournamentEntryResultsBatch(
   }
   const seen = new Set<string>();
   const entries = rawEntries.map((entry) => {
+    const roundNumbers = new Set<number>();
+    const matches = entry.matches?.map((match) => {
+      const roundNumber = Number(match.roundNumber);
+      const scoreDifference = match.scoreDifference === null
+        ? null
+        : Number(match.scoreDifference);
+      const normalizedMatch: TournamentEntryMatch = {
+        roundNumber,
+        outcome: match.outcome,
+        scoreDifference,
+        resultNote: match.resultNote === null ? null : String(match.resultNote ?? "").trim() || null,
+        opponentName: match.opponentName === null ? null : String(match.opponentName ?? "").trim() || null,
+        opponentAffiliation: match.opponentAffiliation === null
+          ? null
+          : String(match.opponentAffiliation ?? "").trim() || null,
+        sourceSheetName: match.sourceSheetName === null
+          ? null
+          : String(match.sourceSheetName ?? "").trim() || null,
+        sourceCellReference: match.sourceCellReference === null
+          ? null
+          : String(match.sourceCellReference ?? "").trim() || null,
+      };
+      if (
+        !Number.isInteger(roundNumber) || roundNumber < 1 || roundNumber > 12 ||
+        roundNumbers.has(roundNumber) ||
+        !new Set(["win", "loss"]).has(normalizedMatch.outcome) ||
+        (scoreDifference !== null && (
+          !Number.isInteger(scoreDifference) || scoreDifference < 0 || scoreDifference > 50
+        )) ||
+        (normalizedMatch.resultNote?.length ?? 0) > 50 ||
+        (normalizedMatch.opponentName?.length ?? 0) > 100 ||
+        (normalizedMatch.opponentAffiliation?.length ?? 0) > 200 ||
+        (normalizedMatch.sourceSheetName?.length ?? 0) > 100 ||
+        (normalizedMatch.sourceCellReference?.length ?? 0) > 20
+      ) {
+        throw new AdminRequestError("対戦詳細の指定が不正です。", 400);
+      }
+      roundNumbers.add(roundNumber);
+      return normalizedMatch;
+    });
     const normalized = {
       tournamentId: String(entry.tournamentId ?? ""),
       memberId: String(entry.memberId ?? ""),
       resultText: String(entry.resultText ?? "").trim(),
+      matches,
     };
     if (
       !/^T-[0-9a-f-]{36}$/.test(normalized.tournamentId) ||
@@ -1382,6 +1520,7 @@ export async function updateTournamentEntryResultsBatch(
     return normalized;
   });
   let changedCount = 0;
+  let matchesSavedCount = 0;
   for (const entry of entries) {
     const result = await updateTournamentEntryResult(
       env,
@@ -1391,8 +1530,41 @@ export async function updateTournamentEntryResultsBatch(
       changedByEmail,
     );
     if (result.changed) changedCount += 1;
+    if (entry.matches) {
+      const now = new Date().toISOString();
+      const statements = [
+        env.DB.prepare(
+          `DELETE FROM tournament_entry_matches
+           WHERE tournament_id = ? AND member_id = ?`,
+        ).bind(entry.tournamentId, entry.memberId),
+        ...entry.matches.map((match) => env.DB.prepare(
+          `INSERT INTO tournament_entry_matches (
+            tournament_id, member_id, round_number, outcome,
+            score_difference, result_note, opponent_name, opponent_affiliation,
+            source_sheet_name, source_cell_reference,
+            updated_by_email, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).bind(
+          entry.tournamentId,
+          entry.memberId,
+          match.roundNumber,
+          match.outcome,
+          match.scoreDifference,
+          match.resultNote,
+          match.opponentName,
+          match.opponentAffiliation,
+          match.sourceSheetName,
+          match.sourceCellReference,
+          changedByEmail,
+          now,
+          now,
+        )),
+      ];
+      await env.DB.batch(statements);
+      matchesSavedCount += entry.matches.length;
+    }
   }
-  return { entryCount: entries.length, changedCount };
+  return { entryCount: entries.length, changedCount, matchesSavedCount };
 }
 
 function archiveGroupKey(tournaments: EditableTournamentRow[]): string {
@@ -1429,9 +1601,9 @@ export async function saveConfirmationRoster(
   if (!(file instanceof File) || file.size === 0) {
     throw new DocumentUploadError("申込確認名簿を選択してください。");
   }
-  const extensionMatch = file.name.toLowerCase().match(/\.(pdf|doc|docx|xls|xlsx)$/);
+  const extensionMatch = file.name.toLowerCase().match(/\.(pdf|doc|docx|xls|xlsx|xlsm)$/);
   if (!extensionMatch) {
-    throw new DocumentUploadError("申込確認名簿はPDF・Word・Excel（.xls/.xlsx）のみ登録できます。");
+    throw new DocumentUploadError("申込確認名簿はPDF・Word・Excel（.xls/.xlsx/.xlsm）のみ登録できます。");
   }
   const tournaments = await tournamentIdsFromForm(form, env);
   if (tournaments.some((tournament) => tournament.status !== "applied")) {
@@ -1449,7 +1621,7 @@ export async function saveConfirmationRoster(
     tournaments[0].title,
     grades,
     eventDates,
-    extensionMatch[1] as "pdf" | "doc" | "docx" | "xls" | "xlsx",
+    extensionMatch[1] as "pdf" | "doc" | "docx" | "xls" | "xlsx" | "xlsm",
   );
   const stored = await storeParticipantGuidanceDocument(file, env, uploadedBy, fileName);
   const revision = Number(current?.revision ?? 0) + 1;
@@ -1520,6 +1692,267 @@ export async function queueConfirmationRoster(
   );
 }
 
+interface ResultExtractionCandidateRow {
+  tournament_id: string;
+  member_id: string;
+  display_name: string;
+  result_grade: string;
+}
+
+export async function extractTournamentResultsFromUpload(
+  env: AdminEnv,
+  request: Request,
+): Promise<ResultExtractionReport> {
+  const form = await request.formData();
+  const file = form.get("file");
+  if (!(file instanceof File) || file.size === 0) {
+    throw new DocumentUploadError("大会結果のExcelファイルを選択してください。");
+  }
+  if (file.size > MAX_GUIDANCE_BYTES) {
+    throw new DocumentUploadError("大会結果ファイルは20MB以下にしてください。");
+  }
+  const extension = file.name.toLowerCase().match(/\.(xls|xlsx)$/)?.[1] as
+    | "xls"
+    | "xlsx"
+    | undefined;
+  if (!extension) {
+    throw new DocumentUploadError(
+      "個人成績の自動読取はExcel（.xls・.xlsx）に対応しています。PDFは手入力してください。",
+    );
+  }
+
+  let tournamentIds: string[];
+  try {
+    const parsed = JSON.parse(String(form.get("tournamentIds") ?? "")) as unknown;
+    if (!Array.isArray(parsed)) throw new Error();
+    tournamentIds = parsed.map(String);
+  } catch {
+    throw new DocumentUploadError("対象大会が不正です。");
+  }
+  try {
+    await loadEditableTournaments(env, tournamentIds, tournamentIds.length > 1);
+  } catch (error) {
+    if (error instanceof AdminRequestError) throw new DocumentUploadError(error.message);
+    throw error;
+  }
+  const normalizedTournamentIds = normalizeTournamentIds(tournamentIds);
+  const placeholders = normalizedTournamentIds.map(() => "?").join(", ");
+  const rows = await env.DB.prepare(
+    `SELECT
+      tournament_entries.tournament_id,
+      tournament_entries.member_id,
+      COALESCE(
+        NULLIF(members.display_name, ''),
+        TRIM(members.last_name || members.first_name)
+      ) AS display_name,
+      CASE WHEN tournaments.all_grades = 1 THEN members.grade ELSE tournaments.grade END AS result_grade
+     FROM tournament_entries
+     INNER JOIN tournaments
+       ON tournaments.tournament_id = tournament_entries.tournament_id
+     INNER JOIN members
+       ON members.member_id = tournament_entries.member_id
+     WHERE tournament_entries.tournament_id IN (${placeholders})
+       AND tournament_entries.status IN ('submitted', 'selected')
+       AND tournaments.status <> 'deleted'
+     ORDER BY result_grade, display_name`,
+  ).bind(...normalizedTournamentIds).all<ResultExtractionCandidateRow>();
+  if (rows.results.length === 0) {
+    throw new DocumentUploadError("個人成績を読み取る出場者がいません。");
+  }
+  if (rows.results.length > 100) {
+    throw new DocumentUploadError("個人成績の自動読取は100人までです。");
+  }
+  const candidates: ResultExtractionCandidate[] = rows.results.map((row) => ({
+    tournamentId: row.tournament_id,
+    memberId: row.member_id,
+    displayName: row.display_name,
+    grade: row.result_grade,
+  }));
+
+  const uploadedBytes = new Uint8Array(await file.arrayBuffer());
+  let workbookBytes = uploadedBytes;
+  let temporarySourceKey: string | null = null;
+  let temporaryTargetKey: string | null = null;
+  if (extension === "xlsx") {
+    if (uploadedBytes[0] !== 0x50 || uploadedBytes[1] !== 0x4b) {
+      throw new DocumentUploadError("Excel（.xlsx）形式を確認できませんでした。");
+    }
+  } else {
+    const oleSignature = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1];
+    if (!oleSignature.every((value, index) => uploadedBytes[index] === value)) {
+      throw new DocumentUploadError("Excel（.xls）形式を確認できませんでした。");
+    }
+    const converter = env.DOCUMENT_CONVERTER?.convertR2LegacyExcelToXlsx;
+    if (!env.DOCUMENTS || !converter) {
+      throw new DocumentUploadError("旧式.xlsの変換サービスが設定されていません。");
+    }
+    const temporaryId = crypto.randomUUID();
+    temporarySourceKey = `temporary/result-auto-fill/${temporaryId}/source.xls`;
+    temporaryTargetKey = `temporary/result-auto-fill/${temporaryId}/converted.xlsx`;
+    await env.DOCUMENTS.put(temporarySourceKey, uploadedBytes, {
+      httpMetadata: { contentType: "application/vnd.ms-excel" },
+      customMetadata: { originalName: file.name.slice(0, 500) },
+    });
+    try {
+      await converter({
+        sourceKey: temporarySourceKey,
+        targetKey: temporaryTargetKey,
+        sourceContentType: "application/vnd.ms-excel",
+        sourceFileName: file.name,
+        targetFileName: file.name.replace(/\.xls$/i, ".xlsx"),
+      });
+      const converted = await env.DOCUMENTS.get(temporaryTargetKey);
+      if (!converted) {
+        throw new DocumentUploadError(".xls変換後のExcelファイルを取得できませんでした。");
+      }
+      workbookBytes = new Uint8Array(await converted.arrayBuffer());
+    } finally {
+      await Promise.allSettled([
+        env.DOCUMENTS.delete(temporarySourceKey),
+        env.DOCUMENTS.delete(temporaryTargetKey),
+      ]);
+    }
+  }
+
+  try {
+    return extractTournamentResults(workbookBytes, candidates);
+  } catch (error) {
+    if (error instanceof ResultAutoFillError) {
+      throw new DocumentUploadError(error.message);
+    }
+    throw error;
+  }
+}
+
+type RosterExtractionMode = "application" | "lottery";
+
+export async function extractRosterFromUpload(
+  env: AdminEnv,
+  request: Request,
+  mode: RosterExtractionMode,
+): Promise<ApplicationRosterReport | LotteryRosterReport> {
+  const form = await request.formData();
+  const file = form.get("file");
+  if (!(file instanceof File) || file.size === 0) {
+    throw new DocumentUploadError("名簿のExcelファイルを選択してください。");
+  }
+  if (file.size > MAX_GUIDANCE_BYTES) {
+    throw new DocumentUploadError("名簿ファイルは20MB以下にしてください。");
+  }
+  const extension = file.name.toLowerCase().match(/\.(xls|xlsx|xlsm)$/)?.[1] as
+    | "xls"
+    | "xlsx"
+    | "xlsm"
+    | undefined;
+  if (!extension) {
+    throw new DocumentUploadError(
+      "名簿の自動確認はExcel（.xls・.xlsx・.xlsm）に対応しています。PDF・Wordは目視確認してください。",
+    );
+  }
+
+  let tournamentIds: string[];
+  try {
+    const parsed = JSON.parse(String(form.get("tournamentIds") ?? "")) as unknown;
+    if (!Array.isArray(parsed)) throw new Error();
+    tournamentIds = parsed.map(String);
+  } catch {
+    throw new DocumentUploadError("対象大会が不正です。");
+  }
+  try {
+    await loadEditableTournaments(env, tournamentIds, tournamentIds.length > 1);
+  } catch (error) {
+    if (error instanceof AdminRequestError) throw new DocumentUploadError(error.message);
+    throw error;
+  }
+  const normalizedTournamentIds = normalizeTournamentIds(tournamentIds);
+  const placeholders = normalizedTournamentIds.map(() => "?").join(", ");
+  const rows = await env.DB.prepare(
+    `SELECT
+      tournament_entries.tournament_id,
+      tournament_entries.member_id,
+      COALESCE(
+        NULLIF(members.display_name, ''),
+        TRIM(members.last_name || members.first_name)
+      ) AS display_name,
+      CASE WHEN tournaments.all_grades = 1 THEN members.grade ELSE tournaments.grade END AS result_grade
+     FROM tournament_entries
+     INNER JOIN tournaments
+       ON tournaments.tournament_id = tournament_entries.tournament_id
+     INNER JOIN members
+       ON members.member_id = tournament_entries.member_id
+     WHERE tournament_entries.tournament_id IN (${placeholders})
+       AND tournament_entries.status IN ('submitted', 'selected', 'not_selected')
+       AND tournaments.status <> 'deleted'
+     ORDER BY result_grade, display_name`,
+  ).bind(...normalizedTournamentIds).all<ResultExtractionCandidateRow>();
+  if (rows.results.length === 0) {
+    throw new DocumentUploadError("名簿と照合する申込者がいません。");
+  }
+  if (rows.results.length > 100) {
+    throw new DocumentUploadError("名簿の自動確認は100人までです。");
+  }
+  const candidates: RosterExtractionCandidate[] = rows.results.map((row) => ({
+    tournamentId: row.tournament_id,
+    memberId: row.member_id,
+    displayName: row.display_name,
+    grade: row.result_grade,
+  }));
+
+  const uploadedBytes = new Uint8Array(await file.arrayBuffer());
+  let workbookBytes = uploadedBytes;
+  if (extension === "xlsx" || extension === "xlsm") {
+    if (uploadedBytes[0] !== 0x50 || uploadedBytes[1] !== 0x4b) {
+      throw new DocumentUploadError("Excel（.xlsx・.xlsm）形式を確認できませんでした。");
+    }
+  } else {
+    const oleSignature = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1];
+    if (!oleSignature.every((value, index) => uploadedBytes[index] === value)) {
+      throw new DocumentUploadError("Excel（.xls）形式を確認できませんでした。");
+    }
+    const converter = env.DOCUMENT_CONVERTER?.convertR2LegacyExcelToXlsx;
+    if (!env.DOCUMENTS || !converter) {
+      throw new DocumentUploadError("旧式.xlsの変換サービスが設定されていません。");
+    }
+    const temporaryId = crypto.randomUUID();
+    const temporarySourceKey = `temporary/roster-auto-fill/${temporaryId}/source.xls`;
+    const temporaryTargetKey = `temporary/roster-auto-fill/${temporaryId}/converted.xlsx`;
+    await env.DOCUMENTS.put(temporarySourceKey, uploadedBytes, {
+      httpMetadata: { contentType: "application/vnd.ms-excel" },
+      customMetadata: { originalName: file.name.slice(0, 500) },
+    });
+    try {
+      await converter({
+        sourceKey: temporarySourceKey,
+        targetKey: temporaryTargetKey,
+        sourceContentType: "application/vnd.ms-excel",
+        sourceFileName: file.name,
+        targetFileName: file.name.replace(/\.xls$/i, ".xlsx"),
+      });
+      const converted = await env.DOCUMENTS.get(temporaryTargetKey);
+      if (!converted) {
+        throw new DocumentUploadError(".xls変換後のExcelファイルを取得できませんでした。");
+      }
+      workbookBytes = new Uint8Array(await converted.arrayBuffer());
+    } finally {
+      await Promise.allSettled([
+        env.DOCUMENTS.delete(temporarySourceKey),
+        env.DOCUMENTS.delete(temporaryTargetKey),
+      ]);
+    }
+  }
+
+  try {
+    return mode === "application"
+      ? checkApplicationRoster(workbookBytes, candidates)
+      : extractLotteryRoster(workbookBytes, candidates);
+  } catch (error) {
+    if (error instanceof ResultAutoFillError) {
+      throw new DocumentUploadError(error.message);
+    }
+    throw error;
+  }
+}
+
 export async function uploadTournamentArchiveDocument(
   env: AdminEnv,
   request: Request,
@@ -1536,8 +1969,8 @@ export async function uploadTournamentArchiveDocument(
   }
   const extensionMatch = file.name.toLowerCase().match(/\.([a-z0-9]+)$/);
   const extension = extensionMatch?.[1] ?? "";
-  if (documentType === "roster" && !["pdf", "xls", "xlsx"].includes(extension)) {
-    throw new DocumentUploadError("確定名簿はPDF・Excel（.xls/.xlsx）のみ登録できます。");
+  if (documentType === "roster" && !["pdf", "xls", "xlsx", "xlsm"].includes(extension)) {
+    throw new DocumentUploadError("確定名簿はPDF・Excel（.xls/.xlsx/.xlsm）のみ登録できます。");
   }
   if (documentType === "results" && !["pdf", "xls", "xlsx"].includes(extension)) {
     throw new DocumentUploadError("大会結果はPDF・Excel（.xls/.xlsx）のみ登録できます。");
@@ -2848,7 +3281,7 @@ export async function editTournaments(
 const securityHeaders = {
   "Cache-Control": "no-store",
   "Content-Security-Policy":
-    "default-src 'none'; connect-src 'self'; img-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+    "default-src 'none'; connect-src 'self'; img-src 'self' blob:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
   "Referrer-Policy": "no-referrer",
   "X-Content-Type-Options": "nosniff",
   "X-Frame-Options": "DENY",
@@ -2863,19 +3296,48 @@ function isSameOrigin(request: Request): boolean {
   return origin === new URL(request.url).origin;
 }
 
-type AdminPage = "todo" | "register" | "tournaments" | "members" | "settings";
-type AdminSection = "tournament-management" | "members" | "settings";
+type AdminPage = "todo" | "register" | "tournaments" | "practice" | "members" | "settings";
+type AdminSection = "tournament-management" | "practice" | "members" | "settings";
 
-function adminHtml(page: AdminPage): string {
+function defaultAdminPath(permissions: AdminPermission[]): string {
+  return permissions.includes("tournament") ? "/register" : "/practice";
+}
+
+function pagePermission(page: AdminPage): AdminPermission | null {
+  if (page === "practice") return "practice";
+  if (["todo", "register", "tournaments"].includes(page)) return "tournament";
+  return null;
+}
+
+function apiPermission(pathname: string): AdminPermission | null {
+  if (pathname === "/api/session") return null;
+  if (pathname === "/api/settings/design") return null;
+  if (pathname === "/api/settings/practice-schedules") return "practice";
+  if (pathname.startsWith("/api/practice/")) return "practice";
+  if (pathname === "/api/members" || pathname.startsWith("/api/members/")) return null;
+  if (pathname === "/api/member-requests" || pathname.startsWith("/api/member-requests/")) return null;
+  return pathname.startsWith("/api/") ? "tournament" : null;
+}
+
+function adminHtml(
+  page: AdminPage,
+  permissions: AdminPermission[],
+  environment?: string,
+): string {
+  const canManageTournaments = permissions.includes("tournament");
+  const canManagePractice = permissions.includes("practice");
   const pageTitle = {
     todo: "TODO",
     register: "大会新規登録",
     tournaments: "大会一覧・回答集計",
+    practice: "練習管理",
     members: "メンバー管理",
     settings: "設定",
   }[page];
   const section: AdminSection = page === "members"
     ? "members"
+    : page === "practice"
+    ? "practice"
     : page === "settings"
     ? "settings"
     : "tournament-management";
@@ -2887,13 +3349,16 @@ function adminHtml(page: AdminPage): string {
     tab === page ? ' aria-current="page"' : "";
   const hiddenPage = (tab: AdminPage): string =>
     tab === page ? "" : " hidden";
+  const portalName = environment === "development"
+    ? "運営管理ポータル（開発版）"
+    : "運営管理ポータル";
 
   return String.raw`<!doctype html>
 <html lang="ja">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>${pageTitle} | 埼玉大学かるた会 運営管理ポータル</title>
+  <title>${pageTitle} | 埼玉大学かるた会 ${portalName}</title>
   <style>
     :root {
       color-scheme: light;
@@ -2913,10 +3378,20 @@ function adminHtml(page: AdminPage): string {
       --control-padding-inline: 10px;
       --button-padding-block: 8px;
       --button-padding-inline: 14px;
+      --site-primary: #3658b2;
+      --site-primary-dark: #294796;
+      --site-primary-light: #edf1ff;
+      --site-background: #f4f6fa;
+      --site-line: #dce1eb;
+      --site-ink: #172033;
+      --site-muted: #596579;
+      --site-on-primary: #ffffff;
     }
     * { box-sizing: border-box; }
-    body { margin: 0; font-size: var(--font-size-body); line-height: 1.5; }
-    header { background: #293c74; color: white; padding: 18px 24px; box-shadow: 0 2px 8px #17203322; }
+    body { margin: 0; color: var(--site-ink); background: var(--site-background); font-size: var(--font-size-body); line-height: 1.5; }
+    header { background-color: var(--site-primary-dark); background-image: linear-gradient(135deg, var(--site-primary-dark), var(--site-primary)); background-position: center; background-size: cover; color: var(--site-on-primary); padding: 18px 24px; box-shadow: 0 2px 8px #17203322; }
+    header.has-site-banner { min-height: 140px; display: flex; align-items: center; }
+    header.has-site-banner .header-inner { width: 100%; }
     .header-inner { max-width: 1080px; margin: auto; display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }
     .admin-brand { display: grid; gap: 1px; }
     .admin-brand-name { color: #dbe4ff; font-size: var(--font-size-meta); font-weight: 650; letter-spacing: .04em; }
@@ -2929,14 +3404,14 @@ function adminHtml(page: AdminPage): string {
     .tab-bar { background: white; border-bottom: 1px solid #dce1eb; box-shadow: 0 2px 8px #1720330a; }
     .tabs { max-width: 1080px; margin: auto; padding: 0 18px; display: flex; gap: 4px; overflow-x: auto; }
     .tab { position: relative; display: inline-flex; align-items: center; color: #596579; text-decoration: none; font-weight: 700; white-space: nowrap; padding: 15px 18px 12px; border-bottom: 3px solid transparent; }
-    .tab:hover { color: #294796; background: #f6f8ff; }
+    .tab:hover { color: var(--site-primary-dark); background: var(--site-primary-light); }
     .subtab-bar { position: sticky; top: 16px; background: transparent; border: 0; }
     .subtab-bar[hidden] { display: none; }
     .subtabs { display: grid; gap: 2px; padding: 2px 18px 2px 0; border-right: 1px solid #dce1eb; }
     .subtab { position: relative; display: block; width: 100%; color: #596579; text-decoration: none; font-size: var(--font-size-body); font-weight: 750; white-space: nowrap; padding: 8px 36px 8px 10px; border: 0; border-left: 3px solid transparent; border-radius: 0; text-align: left; transition: color .15s ease, background .15s ease, border-color .15s ease; }
-    .subtab:hover { color: #294796; background: #f4f6fb; }
-    .subtab.active { color: #294796; background: #eef2fb; border-left-color: #3658b2; }
-    .tab.active { color: #294796; border-bottom-color: #3658b2; }
+    .subtab:hover { color: var(--site-primary-dark); background: var(--site-primary-light); }
+    .subtab.active { color: var(--site-primary-dark); background: var(--site-primary-light); border-left-color: var(--site-primary); }
+    .tab.active { color: var(--site-primary-dark); border-bottom-color: var(--site-primary); }
     .request-badge { position: absolute; top: 2px; right: 1px; min-width: 20px; height: 20px; padding: 0 5px; border-radius: 999px; display: inline-flex; align-items: center; justify-content: center; color: white; background: #d92d20; box-shadow: 0 0 0 2px white; font-size: var(--font-size-meta); font-weight: 800; line-height: 1; }
     .subtab .request-badge { top: 50%; right: 9px; transform: translateY(-50%); min-width: 18px; height: 18px; box-shadow: none; }
     main { max-width: 1080px; margin: 24px auto; padding: 0 18px 48px; }
@@ -2975,11 +3450,11 @@ function adminHtml(page: AdminPage): string {
     .application-method-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 12px; }
     .application-method-fields > .wide { grid-column: 1 / -1; }
     .actions { margin-top: 24px; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
-    button { border: 0; border-radius: var(--control-radius); padding: var(--button-padding-block) var(--button-padding-inline); background: #3658b2; color: white; font: inherit; font-size: var(--font-size-control); font-weight: 700; cursor: pointer; }
-    button:hover { background: #294796; }
+    button { border: 0; border-radius: var(--control-radius); padding: var(--button-padding-block) var(--button-padding-inline); background: var(--site-primary); color: var(--site-on-primary); font: inherit; font-size: var(--font-size-control); font-weight: 700; cursor: pointer; }
+    button:hover { background: var(--site-primary-dark); }
     button:disabled { opacity: .55; cursor: wait; }
-    button.secondary { padding: 7px 12px; color: #294796; background: #edf1ff; }
-    button.secondary:hover { background: #dfe6ff; }
+    button.secondary { padding: 7px 12px; color: var(--site-primary-dark); background: var(--site-primary-light); }
+    button.secondary:hover { background: var(--site-line); }
     #result { min-height: 1.5em; font-weight: 650; }
     #result.ok { color: #17643a; }
     #result.error { color: #b42318; }
@@ -3054,6 +3529,8 @@ function adminHtml(page: AdminPage): string {
     .todo-payment-amount { color: #263550; font-weight: 700; white-space: nowrap; }
     .todo-payment-total { color: #172033; font-weight: 800; white-space: nowrap; }
     .todo-resource-link { color: #294796; font-weight: 750; text-underline-offset: 2px; white-space: nowrap; }
+    .todo-roster-generate { appearance: none; border: 0; border-bottom: 1px solid currentColor; background: transparent; color: #294796; padding: 0; font: inherit; font-weight: 750; cursor: pointer; }
+    .todo-roster-generate:disabled { color: #8993a6; cursor: wait; }
     .todo-action { min-width: 170px; }
     .todo-link { display: inline-flex; align-items: center; justify-content: center; min-width: 160px; padding: 8px 12px; border-radius: var(--control-radius); color: white; background: #3658b2; text-decoration: none; font-size: var(--font-size-control); font-weight: 700; }
     .todo-link:hover { background: #294796; }
@@ -3091,6 +3568,28 @@ function adminHtml(page: AdminPage): string {
     .result-row select { padding-block: 6px; }
     .result-row button { padding: 6px 10px; white-space: nowrap; }
     .result-row .entry-result { grid-column: 1 / -1; }
+    .result-auto-fill-status { grid-column: 1 / -1; min-height: 1.2em; color: #697386; font-size: var(--font-size-meta); line-height: 1.35; }
+    .result-auto-fill-status:empty { display: none; }
+    .result-auto-fill-status.matched { color: #187746; }
+    .result-auto-fill-status.needs-review { color: #a55d00; }
+    .roster-check-summary { color: #596579; font-size: var(--font-size-meta); line-height: 1.4; }
+    .roster-check-summary.matched { color: #187746; }
+    .roster-check-summary.needs-review { color: #a55d00; }
+    .roster-check-list { display: grid; gap: 3px; margin: 0; padding: 0; list-style: none; font-size: var(--font-size-meta); }
+    .roster-check-list li { display: flex; align-items: baseline; gap: 6px; }
+    .roster-check-list .matched { color: #187746; }
+    .roster-check-list .needs-review { color: #a55d00; }
+    .match-editor { grid-column: 1 / -1; margin: 2px 0 5px; }
+    .match-editor > summary { cursor: pointer; color: #294796; font-size: var(--font-size-note); font-weight: 750; }
+    .match-editor-list { display: grid; gap: 6px; margin-top: 7px; }
+    .match-edit-row { display: grid; grid-template-columns: 4.5em 5.5em 5em minmax(95px, .8fr) minmax(130px, 1fr) minmax(150px, 1.15fr) auto; gap: 6px; align-items: center; }
+    .match-round { color: #465166; font-size: var(--font-size-note); font-weight: 750; white-space: nowrap; }
+    .match-edit-row input, .match-edit-row select { min-width: 0; padding: 5px 7px; font-size: var(--font-size-note); }
+    .match-edit-row .match-remove { width: auto; padding: 5px 8px; color: #a12822; background: #fdecea; font-size: var(--font-size-note); }
+    .match-editor-empty { color: #8992a3; font-size: var(--font-size-note); }
+    .match-editor-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 7px 10px; margin-top: 7px; }
+    .match-add, .match-save { width: auto; padding: 5px 9px; font-size: var(--font-size-note); }
+    .match-save-status { color: #697386; font-size: var(--font-size-note); }
     .guidance-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; align-items: start; }
     .guidance-subsection { display: grid; gap: 9px; min-width: 0; max-width: 100%; padding: 10px 0; border: 0; border-radius: 0; background: transparent; }
     .guidance-subsection h6 { margin: 0; color: #263550; font-size: var(--font-size-body); }
@@ -3161,7 +3660,15 @@ function adminHtml(page: AdminPage): string {
     .member-link { color: #596579; font-size: var(--font-size-note); }
     .member-history-link { appearance: none; width: auto; padding: 0; color: #294796; background: transparent; border: 0; border-radius: 0; font-size: var(--font-size-body); font-weight: 750; text-decoration: underline; text-underline-offset: 3px; }
     .member-history-link:hover { color: #1f397c; background: transparent; }
-    .member-history-summary { margin: 0 0 14px; color: #465166; font-weight: 700; }
+    .member-history-period { display: grid; grid-template-columns: max-content auto max-content max-content; gap: 6px 8px; align-items: end; justify-content: start; margin: 10px 0; padding: 8px 0; border-top: 1px solid #e7eaf0; border-bottom: 1px solid #e7eaf0; }
+    .member-history-date-group { min-width: 0; margin: 0; padding: 0; border: 0; }
+    .member-history-date-group legend { margin-bottom: 3px; padding: 0; color: #596579; font-size: var(--font-size-meta); font-weight: 750; }
+    .member-history-date-selects { display: grid; grid-template-columns: 78px 58px 58px; gap: 4px; }
+    .member-history-date-selects select { width: 100%; min-width: 0; min-height: 34px; padding: 4px 5px; font-size: var(--font-size-note); }
+    .member-history-period-separator { padding-bottom: 6px; color: #697386; font-size: var(--font-size-note); font-weight: 750; }
+    .member-history-period-actions { display: flex; align-items: center; gap: 5px; }
+    .member-history-period-action { flex: 0 0 auto; min-height: 34px; padding: 5px 7px; font-size: var(--font-size-meta); white-space: nowrap; }
+    .member-history-summary { margin: 0 0 10px; color: #465166; font-size: var(--font-size-body); font-weight: 700; }
     .member-history-table-wrap { overflow-x: auto; }
     .member-history-table { width: 100%; border-collapse: collapse; white-space: nowrap; }
     .member-history-table th, .member-history-table td { padding: 9px 10px; border-bottom: 1px solid #e7eaf0; text-align: left; }
@@ -3169,6 +3676,17 @@ function adminHtml(page: AdminPage): string {
     .member-history-table td { font-size: var(--font-size-body); }
     .member-history-table tr:last-child td { border-bottom: 0; }
     .member-history-loading { padding: 24px 0; color: #697386; text-align: center; }
+    .member-history-detail { appearance: none; width: auto; padding: 1px 0; border: 0; border-bottom: 1px solid currentColor; border-radius: 0; color: #294796; background: transparent; font-size: var(--font-size-note); font-weight: 750; }
+    .member-match-list { display: grid; gap: 0; margin: 12px 0 0; padding: 0; list-style: none; }
+    .member-match-list li { display: grid; grid-template-columns: 5em 3.5em minmax(100px, .8fr) minmax(140px, 1fr); gap: 8px; align-items: baseline; padding: 9px 0; border-bottom: 1px solid #e7eaf0; }
+    .member-match-mark { font-weight: 850; }
+    .member-match-mark.win { color: #17643a; }
+    .member-match-mark.loss { color: #b42318; }
+    .member-match-affiliation { color: #697386; font-size: var(--font-size-note); }
+    .member-match-final { margin: 14px 0 0; font-weight: 800; }
+    .member-list-actions { display: flex; align-items: end; gap: 9px; flex-wrap: wrap; }
+    .member-list-actions label { gap: 3px; color: #596579; font-size: var(--font-size-meta); }
+    .member-list-actions select { min-width: 120px; padding: 7px 9px; }
     #request-status { color: #697386; margin-bottom: 12px; }
     #request-list { display: grid; gap: 12px; }
     .request-card { border: 1px solid #dce1eb; border-radius: 10px; padding: 16px; }
@@ -3199,8 +3717,8 @@ function adminHtml(page: AdminPage): string {
     .settings-layout { display: grid; grid-template-columns: 210px minmax(0, 1fr); gap: 28px; align-items: start; }
     .settings-menu { position: sticky; top: 16px; display: grid; gap: 2px; padding: 2px 18px 2px 0; border-right: 1px solid #dce1eb; }
     .settings-menu-item { appearance: none; width: 100%; padding: 10px 12px; border: 0; border-left: 3px solid transparent; border-radius: 0; color: #697386; background: transparent; font: inherit; font-size: var(--font-size-body); font-weight: 700; text-align: left; cursor: pointer; transition: color .15s ease, background .15s ease, border-color .15s ease; }
-    .settings-menu-item:hover { color: #294796; background: #f4f6fb; }
-    .settings-menu-item[aria-selected="true"] { color: #294796; border-left-color: #3658b2; background: #eef2fb; }
+    .settings-menu-item:hover { color: var(--site-primary-dark); background: var(--site-primary-light); }
+    .settings-menu-item[aria-selected="true"] { color: var(--site-primary-dark); border-left-color: var(--site-primary); background: var(--site-primary-light); }
     .settings-content { min-width: 0; padding-top: 2px; }
     .settings-panel { min-width: 0; padding: 0; border: 0; border-radius: 0; background: transparent; }
     .settings-panel[hidden] { display: none; }
@@ -3210,11 +3728,64 @@ function adminHtml(page: AdminPage): string {
     .settings-panel ul { margin: 0; padding: 0; list-style: none; color: #465166; font-size: var(--font-size-body); }
     .settings-panel li { padding: 10px 0; border-top: 1px solid #e7eaf0; }
     .settings-panel li:first-child { border-top: 0; }
+    body[data-can-manage-tournaments="false"] .tournament-setting { display: none !important; }
+    body[data-can-manage-practice="false"] .practice-setting { display: none !important; }
+    .design-settings-controls { display: grid; grid-template-columns: minmax(180px, .65fr) minmax(260px, 1.35fr) auto; gap: 12px; align-items: end; }
+    .design-settings-controls > label { color: #263550; font-weight: 750; }
+    .design-color-controls { display: grid; grid-template-columns: 54px minmax(0, 1fr); gap: 7px; margin-top: 5px; }
+    .design-color-controls input[type="color"] { min-height: 40px; padding: 3px; cursor: pointer; }
+    .design-preview { overflow: hidden; margin-top: 18px; border: 1px solid var(--site-line); border-radius: 12px; background: var(--site-background); }
+    .design-preview-header { display: grid; gap: 2px; min-height: 108px; padding: 20px; color: var(--site-on-primary); background-color: var(--site-primary-dark); background-image: linear-gradient(#00000038, #00000038); background-position: center; background-size: cover; align-content: center; }
+    .design-preview-header strong { font-size: 1.05rem; }
+    .design-preview-header span { opacity: .86; }
+    .design-preview-body { padding: 15px; }
+    .design-preview-tabs { display: flex; gap: 18px; border-bottom: 1px solid var(--site-line); }
+    .design-preview-tabs span { padding: 7px 2px; color: var(--site-muted); font-weight: 750; }
+    .design-preview-tabs .active { color: var(--site-primary-dark); border-bottom: 3px solid var(--site-primary); }
+    .design-preview-card { margin-top: 13px; padding: 14px; border: 1px solid var(--site-line); border-radius: 10px; background: white; color: var(--site-ink); }
+    .design-preview-card p { margin: 4px 0 12px; color: var(--site-muted); }
+    .design-preview-card button { background: var(--site-primary); color: var(--site-on-primary); }
+    .design-settings-actions { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; margin-top: 14px; }
+    .member-card.has-unsaved-changes { border-left: 4px solid var(--site-primary); }
+    .member-bulk-bar { position: fixed; left: 50%; bottom: max(14px, env(safe-area-inset-bottom)); z-index: 30; transform: translateX(-50%); display: flex; align-items: center; gap: 10px; width: min(720px, calc(100% - 28px)); padding: 11px 13px; border: 1px solid var(--site-line); border-radius: 12px; color: var(--site-ink); background: #fffffff2; box-shadow: 0 12px 36px #17203330; backdrop-filter: blur(12px); }
+    .member-bulk-bar[hidden] { display: none; }
+    .member-bulk-bar strong { margin-right: auto; }
+    .member-bulk-bar .status-message { flex: 1 1 auto; }
+    .member-bulk-bar button { flex: 0 0 auto; }
     .settings-status { flex: 0 0 auto; padding: 2px 0; color: #7a8497; background: transparent; font-size: var(--font-size-meta); font-weight: 750; white-space: nowrap; }
     .database-export-actions { display: flex; align-items: center; gap: 12px; margin-top: 16px; flex-wrap: wrap; }
     .database-download { display: inline-flex; align-items: center; justify-content: center; border-radius: var(--control-radius); padding: var(--button-padding-block) var(--button-padding-inline); color: white; background: #3658b2; font-size: var(--font-size-control); font-weight: 700; text-decoration: none; }
     .database-download:hover { background: #294796; }
     .database-export-warning { max-width: 720px; margin-top: 16px !important; padding: 10px 12px; border-left: 4px solid #da8c10; color: #6f4b12 !important; background: #fff7e8; font-size: var(--font-size-note) !important; }
+    .practice-schedule-intro { margin: -8px 0 18px; color: #596579; }
+    .practice-schedule-rows { display: grid; gap: 10px; }
+    .practice-schedule-row { display: grid; grid-template-columns: minmax(130px, 1.1fr) minmax(92px, .7fr) minmax(92px, .7fr) minmax(130px, 1fr) minmax(130px, 1fr) minmax(150px, 1.2fr) auto; gap: 8px; align-items: end; padding: 12px; border-radius: 9px; background: #f5f7fb; }
+    .practice-schedule-row label { min-width: 0; color: #596579; font-size: var(--font-size-meta); }
+    .practice-schedule-row input, .practice-schedule-row select { min-height: 38px; padding: 7px 8px; background: white; }
+    .practice-venue-combobox { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) 38px; gap: 0; }
+    .practice-venue-combobox > input { border-radius: var(--control-radius) 0 0 var(--control-radius); }
+    button.practice-venue-preset-toggle { min-height: 38px; padding: 0; border: 1px solid #b9c1d0; border-left: 0; border-radius: 0 var(--control-radius) var(--control-radius) 0; color: #465166; background: #f5f7fb; }
+    button.practice-venue-preset-toggle:hover, button.practice-venue-preset-toggle[aria-expanded="true"] { color: var(--site-primary-dark); background: var(--site-primary-light); }
+    .practice-venue-preset-menu { position: absolute; z-index: 20; top: calc(100% + 4px); left: 0; right: 0; display: grid; overflow: hidden; padding: 4px; border: 1px solid #b9c1d0; border-radius: 8px; background: white; box-shadow: 0 8px 22px #17203324; }
+    .practice-venue-preset-menu[hidden] { display: none; }
+    button.practice-venue-preset-option { width: 100%; min-height: 36px; padding: 7px 9px; color: #263550; background: white; text-align: left; }
+    button.practice-venue-preset-option:hover { color: var(--site-primary-dark); background: var(--site-primary-light); }
+    button.practice-schedule-remove, button.practice-schedule-add { white-space: nowrap; color: #294796; background: #edf1ff; }
+    button.practice-schedule-remove:hover, button.practice-schedule-add:hover { background: #dfe6ff; }
+    button.practice-schedule-remove:disabled { opacity: .4; cursor: default; }
+    .practice-schedule-actions { justify-content: flex-end; }
+    .practice-schedule-actions .status-message { margin-right: auto; }
+    .practice-schedule-list { display: grid; gap: 10px; }
+    .practice-schedule-card { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 12px 14px; border: 1px solid #dce1eb; border-radius: 9px; }
+    .practice-schedule-card-title { font-weight: 800; }
+    .practice-schedule-card-meta { margin-top: 3px; color: #596579; font-size: var(--font-size-note); }
+    .practice-schedule-card-note { margin-top: 6px; padding: 6px 8px; border-left: 3px solid var(--site-primary); border-radius: 0 6px 6px 0; color: var(--site-ink); background: var(--site-primary-light); font-size: var(--font-size-note); white-space: pre-wrap; }
+    .practice-schedule-card-status { display: inline-flex; margin-left: 7px; padding: 2px 7px; border-radius: 999px; color: #596579; background: #edf0f5; font-size: var(--font-size-meta); font-weight: 750; vertical-align: middle; }
+    .practice-schedule-card-status.scheduled { color: #17643a; background: #e4f7ec; }
+    .practice-schedule-card-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; flex-wrap: wrap; }
+    .practice-schedule-counts { display: flex; flex-wrap: wrap; gap: 6px; }
+    .practice-schedule-counts span { padding: 4px 8px; border-radius: 999px; color: #294796; background: #edf1ff; font-size: var(--font-size-meta); font-weight: 800; white-space: nowrap; }
+    .practice-schedule-empty { padding: 24px 12px; border: 1px dashed #cfd6e3; border-radius: 9px; color: #697386; text-align: center; }
     .message-settings-workspace { display: grid; grid-template-columns: 230px minmax(0, 1fr); min-width: 0; border-top: 1px solid #dce1eb; }
     .message-template-list { min-width: 0; padding: 8px 16px 8px 0; border-right: 1px solid #dce1eb; }
     .message-template-category { border-bottom: 1px solid #e7eaf0; }
@@ -3250,6 +3821,25 @@ function adminHtml(page: AdminPage): string {
     .deadline-settings-fixed { color: #697386; font-size: var(--font-size-note); }
     .deadline-settings-actions { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; margin-top: 14px; }
     .deadline-settings-actions .status-message { margin-left: 2px; }
+    .practice-setting-block { margin-top: 30px; padding-top: 24px; border-top: 1px solid #dce1eb; }
+    .practice-setting-block h4 { margin: 0 0 7px; font-size: var(--font-size-section); }
+    .practice-period-grid { display: grid; grid-template-columns: repeat(3, minmax(150px, 1fr)); gap: 10px; max-width: 760px; }
+    .practice-period-card { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 12px; border: 1px solid #dce1eb; border-radius: 9px; background: #f8f9fc; }
+    .practice-period-card strong { grid-column: 1 / -1; }
+    .practice-period-card label, .practice-default-grid label { color: #465166; font-size: var(--font-size-note); font-weight: 750; }
+    .practice-default-grid label { gap: 2px; }
+    .practice-period-card input { display: block; width: 100%; margin-top: 4px; }
+    .practice-default-grid select { display: block; width: 100%; margin-top: 0; }
+    .practice-default-grid { display: grid; grid-template-columns: repeat(2, minmax(180px, 280px)); gap: 10px; margin-top: 13px; }
+    .practice-venue-settings { display: grid; gap: 8px; max-width: 760px; margin-top: 18px; }
+    .practice-venue-settings-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .practice-venue-settings-head h5 { margin: 0; font-size: var(--font-size-body); }
+    #practice-venue-setting-rows { display: grid; gap: 12px; }
+    .practice-venue-row { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(100px, .55fr) auto; gap: 8px; align-items: end; }
+    .practice-venue-row label { gap: 2px; color: #465166; font-size: var(--font-size-note); font-weight: 750; }
+    .practice-venue-row input { display: block; width: 100%; margin-top: 0; }
+    .practice-venue-row button { min-height: 40px; }
+    @media (max-width: 760px) { .practice-period-grid, .practice-default-grid { grid-template-columns: 1fr; } .practice-venue-row { grid-template-columns: 1fr 1fr; } .practice-venue-row button { grid-column: 1 / -1; } }
     .manual-workspace { display: grid; grid-template-columns: 190px minmax(0, 1fr); min-width: 0; border-top: 1px solid #dce1eb; }
     .manual-menu { position: sticky; top: 16px; display: grid; align-content: start; gap: 13px; min-width: 0; padding: 13px 16px 13px 0; border-right: 1px solid #dce1eb; }
     .manual-menu-group { display: grid; gap: 2px; }
@@ -3276,6 +3866,8 @@ function adminHtml(page: AdminPage): string {
     .manual-troubles dd { margin: 3px 0 0; color: #596579; font-size: var(--font-size-note); line-height: 1.65; }
     @media (max-width: 680px) {
       .grid, .grade-date-grid, .application-method-fields, .response-sections, .member-grid, .request-comparison, .entry-row, .archive-documents, .guidance-fields, .guidance-guide-grid, .payment-setup-grid, .result-row, .settings-layout, .message-settings-workspace, main.tournament-workspace { grid-template-columns: minmax(0, 1fr); }
+      .match-edit-row { grid-template-columns: 4.5em minmax(0, 1fr) minmax(0, 1fr); padding-bottom: 7px; border-bottom: 1px solid #edf0f5; }
+      .match-edit-row .match-opponent, .match-edit-row .match-affiliation { grid-column: 1 / -1; }
       input, select, textarea { min-height: 44px; font-size: var(--font-size-touch-control); }
       button, .todo-link { min-height: 44px; }
       #member-list.has-members { overflow: visible; border: 0; border-radius: 0; display: grid; gap: 10px; }
@@ -3285,6 +3877,10 @@ function adminHtml(page: AdminPage): string {
       .member-summary-item::before { content: attr(data-label); display: block; margin-bottom: 3px; color: #697386; font-size: var(--font-size-meta); font-weight: 650; }
       .member-summary-item:nth-child(-n + 2) { grid-column: 1 / -1; }
       .member-row-actions { grid-column: 1 / -1; display: flex; align-items: center; gap: 10px; }
+      .member-history-period { grid-template-columns: minmax(0, 1fr); }
+      .member-history-period-separator { display: none; }
+      .member-history-period-actions { justify-content: flex-start; }
+      .member-history-date-selects select { min-height: 38px; font-size: var(--font-size-note); }
       .entry-row, .entry-row.has-waitlist, .entry-row.has-payment { grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 8px; }
       .entry-name { grid-column: 1 / -1; min-width: 0; overflow-wrap: anywhere; }
       .entry-status-field { grid-column: 1; }
@@ -3340,14 +3936,34 @@ function adminHtml(page: AdminPage): string {
       .list-controls label { flex: 1 1 100%; }
       .todo-card { grid-template-columns: minmax(0, 1fr); }
       .todo-action, .todo-link { width: 100%; }
+      .practice-schedule-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .practice-schedule-card { align-items: flex-start; flex-direction: column; }
+      html, body { max-width: 100%; overflow-x: hidden; }
+      main, .admin-page-content, #tournament-list, .tournament-card, .tournament-card > * { min-width: 0; max-width: 100%; }
+      .tournament-card { overflow: hidden; }
+      .card-heading { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+      .card-title-actions { align-items: flex-start; flex-wrap: wrap; overflow-wrap: anywhere; }
+      .card-title-actions h3 { flex: 1 1 100%; overflow-wrap: anywhere; }
+      .workflow-progress { flex-wrap: wrap; overflow: visible; white-space: normal; }
+      .meta { overflow-wrap: anywhere; }
+      .status-row, .status-row label, .card-status-control { width: 100%; min-width: 0; }
+      .status-row select, .card-status-select { width: 100%; min-width: 0; }
+      .response-person { grid-template-columns: 3.5em minmax(0, 1fr); overflow-wrap: anywhere; }
+      .design-settings-controls { grid-template-columns: minmax(0, 1fr); }
+      .design-settings-controls > button { width: 100%; }
+      .member-bulk-bar { align-items: stretch; flex-wrap: wrap; }
+      .member-bulk-bar strong, .member-bulk-bar .status-message { flex: 1 1 100%; }
+      .member-bulk-bar button { flex: 1 1 calc(50% - 5px); }
+      header.has-site-banner { min-height: 90px; }
     }
   </style>
 </head>
-<body data-page="${page}">
-  <header><div class="header-inner"><div class="admin-brand"><span class="admin-brand-name">埼玉大学かるた会</span><h1>運営管理ポータル</h1></div><span class="identity-wrap"><span id="identity">認証情報を確認中…</span><a id="logout" href="/auth/logout" hidden>ログアウト</a></span></div></header>
+<body data-page="${page}" data-can-manage-tournaments="${String(canManageTournaments)}" data-can-manage-practice="${String(canManagePractice)}">
+  <header><div class="header-inner"><div class="admin-brand"><span class="admin-brand-name">埼玉大学かるた会</span><h1>${portalName}</h1></div><span class="identity-wrap"><span id="identity">認証情報を確認中…</span><a id="logout" href="/auth/logout" hidden>ログアウト</a></span></div></header>
   <div class="tab-bar">
     <nav class="tabs" aria-label="管理画面メニュー">
-      <a class="${tabClass("tournament-management")}" href="/register"${section === "tournament-management" ? ' aria-current="true"' : ""}>大会管理<span id="tournament-todo-count-badge" class="request-badge" role="status" aria-live="polite" hidden>0</span></a>
+      ${canManageTournaments ? `<a class="${tabClass("tournament-management")}" href="/register"${section === "tournament-management" ? ' aria-current="true"' : ""}>大会管理<span id="tournament-todo-count-badge" class="request-badge" role="status" aria-live="polite" hidden>0</span></a>` : ""}
+      ${canManagePractice ? `<a class="${tabClass("practice")}" href="/practice"${currentPage("practice")}>練習管理</a>` : ""}
       <a class="${tabClass("members")}" href="/members"${currentPage("members")}>メンバー管理<span id="pending-request-badge" class="request-badge" role="status" aria-live="polite" hidden>0</span></a>
       <a class="${tabClass("settings")}" href="/settings"${currentPage("settings")}>設定</a>
     </nav>
@@ -3413,6 +4029,19 @@ function adminHtml(page: AdminPage): string {
       <div id="list-status" role="status" aria-live="polite">読み込み中…</div>
       <div id="tournament-list"></div>
     </section>
+    <section class="panel" aria-labelledby="practice-schedule-title"${hiddenPage("practice")}>
+      <h2 id="practice-schedule-title">練習日程を登録</h2>
+      <p class="practice-schedule-intro">複数の日程をまとめて登録し、かるた練習帖からDiscordへ案内します。</p>
+      <form id="practice-schedule-form">
+        <div id="practice-schedule-rows" class="practice-schedule-rows"></div>
+        <div class="actions practice-schedule-actions"><span id="practice-schedule-result" class="status-message" role="status" aria-live="polite"></span><button id="practice-schedule-add" type="button" class="practice-schedule-add">日程を追加</button><button id="practice-schedule-submit" type="submit">まとめて登録</button></div>
+      </form>
+    </section>
+    <section class="panel" aria-labelledby="practice-schedule-list-title"${hiddenPage("practice")}>
+      <div class="list-heading"><h2 id="practice-schedule-list-title">登録済み日程</h2><button id="refresh-practice-schedules" type="button" class="secondary">再読み込み</button></div>
+      <div id="practice-schedule-list-status" class="status-message" role="status" aria-live="polite">読み込み中…</div>
+      <div id="practice-schedule-list" class="practice-schedule-list"></div>
+    </section>
     <section class="panel" aria-labelledby="request-list-title"${hiddenPage("members")}>
       <h2 id="request-list-title">登録・変更申請</h2>
       <div id="request-status" role="status" aria-live="polite">読み込み中…</div>
@@ -3421,23 +4050,46 @@ function adminHtml(page: AdminPage): string {
     <section class="panel" aria-labelledby="member-list-title"${hiddenPage("members")}>
       <div class="list-heading">
         <h2 id="member-list-title">メンバー管理</h2>
-        <button id="refresh-members" type="button" class="secondary">再読み込み</button>
+        <div class="member-list-actions"><label>ステータス<select id="member-status-filter"><option value="all">すべて</option><option value="active">有効</option><option value="inactive">無効</option><option value="pending">確認待ち</option><option value="rejected">却下</option></select></label><button id="refresh-members" type="button" class="secondary">再読み込み</button></div>
       </div>
       <div id="member-status" role="status" aria-live="polite">読み込み中…</div>
       <div id="member-list"></div>
       <div class="footnote">Discord IDそのものは管理画面に表示しません。氏名・よみがな・出場級・段位・在籍状態・DM送信設定の変更履歴は担当者情報とともに保存されます。</div>
     </section>
+    <div id="member-bulk-bar" class="member-bulk-bar" role="region" aria-label="メンバー変更の一括保存" hidden>
+      <strong id="member-bulk-count">変更はありません</strong>
+      <span id="member-bulk-message" class="status-message" role="status" aria-live="polite"></span>
+      <button id="discard-member-changes" type="button" class="secondary">変更を破棄</button>
+      <button id="save-member-changes" type="button">変更を一括保存</button>
+    </div>
     <section class="panel" aria-labelledby="settings-title"${hiddenPage("settings")}>
       <div class="settings-heading"><div class="settings-title-row"><h2 id="settings-title">設定</h2><span class="desktop-recommended">PC推奨</span></div></div>
       <div class="settings-layout">
         <nav class="settings-menu" role="tablist" aria-label="設定項目">
-          <button class="settings-menu-item" type="button" role="tab" aria-selected="true" aria-controls="message-settings" data-settings-view="messages">Discord Botメッセージ</button>
+          <button class="settings-menu-item" type="button" role="tab" aria-selected="true" aria-controls="design-settings" data-settings-view="design">デザイン</button>
+          <button class="settings-menu-item tournament-setting" type="button" role="tab" aria-selected="false" aria-controls="message-settings" data-settings-view="messages">Discord Botメッセージ</button>
           <button class="settings-menu-item" type="button" role="tab" aria-selected="false" aria-controls="deadline-settings" data-settings-view="deadlines">自動入力・期限</button>
-          <button class="settings-menu-item" type="button" role="tab" aria-selected="false" aria-controls="database-settings" data-settings-view="database">データ管理</button>
-          <button class="settings-menu-item" type="button" role="tab" aria-selected="false" aria-controls="manual-settings" data-settings-view="manuals">運用マニュアル</button>
+          <button class="settings-menu-item tournament-setting" type="button" role="tab" aria-selected="false" aria-controls="database-settings" data-settings-view="database">データ管理</button>
+          <button class="settings-menu-item tournament-setting" type="button" role="tab" aria-selected="false" aria-controls="manual-settings" data-settings-view="manuals">運用マニュアル</button>
         </nav>
         <div class="settings-content">
-          <section class="settings-panel" id="message-settings" role="tabpanel">
+          <section class="settings-panel" id="design-settings" role="tabpanel">
+            <div class="settings-panel-head"><h3>ページデザイン</h3><span id="design-settings-customized" class="settings-status">読み込み中…</span></div>
+            <p>管理画面とメンバーポータルに共通するメインカラーとヘッダーバナーを設定します。</p>
+            <form id="design-settings-form" class="design-settings-form">
+              <div class="design-settings-controls">
+                <label>メインカラー<span class="design-color-controls"><input id="design-primary-color" type="color" name="primaryColorPicker" value="#3658b2"><input id="design-primary-code" name="primaryColor" value="#3658b2" maxlength="7" pattern="#[0-9A-Fa-f]{6}" required></span></label>
+                <label>ヘッダーバナー <span class="optional">JPEG・PNG・WebP、5MB以内</span><input id="design-banner-file" type="file" name="banner" accept="image/jpeg,image/png,image/webp"></label>
+                <button id="remove-design-banner" type="button" class="secondary">バナー画像を外す</button>
+              </div>
+              <div class="design-preview" id="design-preview">
+                <div class="design-preview-header"><strong>埼玉大学かるた会</strong><span>ポータルのヘッダー</span></div>
+                <div class="design-preview-body"><div class="design-preview-tabs"><span class="active">選択中のタブ</span><span>通常のタブ</span></div><div class="design-preview-card"><strong>カード表示</strong><p>文字色と背景色はメインカラーから自動調整されます。</p><button type="button">ボタン</button></div></div>
+              </div>
+              <div class="design-settings-actions"><button id="save-design-settings" type="submit">デザインを保存</button><button id="reset-design-settings" type="button" class="secondary">初期設定に戻す</button><span id="design-settings-result" class="status-message" role="status" aria-live="polite"></span></div>
+            </form>
+          </section>
+          <section class="settings-panel tournament-setting" id="message-settings" role="tabpanel" hidden>
             <div class="settings-panel-head"><h3>Discord Botメッセージ</h3><span class="settings-status">本文のみ編集</span></div>
             <p>通知を選択して本文を変更します。大会名・氏名・期限・リンク・ボタンなどの自動表示部分は変更されません。</p>
             <div id="message-setting-status" class="status-message" role="status" aria-live="polite">読み込み中…</div>
@@ -3454,9 +4106,10 @@ function adminHtml(page: AdminPage): string {
           </section>
           <section class="settings-panel" id="deadline-settings" role="tabpanel" hidden>
             <div class="settings-panel-head"><h3>自動入力・期限</h3><span id="deadline-settings-customized" class="settings-status">読み込み中…</span></div>
-            <p>大会新規登録と参加費案内で自動入力する期限、未回答リマインダーの送信日時を設定します。保存済みの大会日時は変更されません。</p>
-            <div id="deadline-setting-status" class="status-message" role="status" aria-live="polite">読み込み中…</div>
-            <form id="deadline-settings-form">
+            <div class="tournament-setting">
+              <p>大会新規登録と参加費案内で自動入力する期限、未回答リマインダーの送信日時を設定します。保存済みの大会日時は変更されません。</p>
+              <div id="deadline-setting-status" class="status-message" role="status" aria-live="polite">読み込み中…</div>
+              <form id="deadline-settings-form">
               <div class="deadline-settings-table-wrap">
                 <table class="deadline-settings-table">
                   <thead><tr><th>自動設定する項目</th><th>基準</th><th>何日前</th><th>時刻</th></tr></thead>
@@ -3468,16 +4121,38 @@ function adminHtml(page: AdminPage): string {
                   </tbody>
                 </table>
               </div>
-              <div class="deadline-settings-actions"><button id="save-deadline-settings" type="submit">設定を保存</button><button id="reset-deadline-settings" type="button" class="secondary">初期値に戻す</button><span id="deadline-settings-result" class="status-message" role="status" aria-live="polite"></span></div>
-            </form>
+                <div class="deadline-settings-actions"><button id="save-deadline-settings" type="submit">設定を保存</button><button id="reset-deadline-settings" type="button" class="secondary">初期値に戻す</button><span id="deadline-settings-result" class="status-message" role="status" aria-live="polite"></span></div>
+              </form>
+            </div>
+            <div class="practice-setting practice-setting-block">
+              <h4>練習日程</h4>
+              <p>カレンダーに表示する時間帯と会場略称、新規日程の初期値を設定します。正式な時刻・会場名・連絡事項はDiscord本文とポータルにそのまま表示されます。</p>
+              <div id="practice-schedule-setting-status" class="status-message" role="status" aria-live="polite">読み込み中…</div>
+              <form id="practice-schedule-settings-form">
+                <div class="practice-period-grid">
+                  <div class="practice-period-card"><strong>午前</strong><label>開始<input type="time" name="morningStartTime" required></label><label>終了<input type="time" name="morningEndTime" required></label></div>
+                  <div class="practice-period-card"><strong>午後</strong><label>開始<input type="time" name="afternoonStartTime" required></label><label>終了<input type="time" name="afternoonEndTime" required></label></div>
+                  <div class="practice-period-card"><strong>夜間</strong><label>開始<input type="time" name="eveningStartTime" required></label><label>終了<input type="time" name="eveningEndTime" required></label></div>
+                </div>
+                <div class="practice-default-grid">
+                  <label>新規日程の既定時間帯<select name="defaultTimeBand"><option value="morning">午前</option><option value="afternoon">午後</option><option value="evening">夜間</option></select></label>
+                  <label>新規日程の既定会場<select name="defaultVenue"></select></label>
+                </div>
+                <div class="practice-venue-settings">
+                  <div class="practice-venue-settings-head"><h5>会場とカレンダー用略称</h5><button id="add-practice-venue-setting" type="button" class="secondary">会場を追加</button></div>
+                  <div id="practice-venue-setting-rows"></div>
+                </div>
+                <div class="deadline-settings-actions"><button id="save-practice-schedule-settings" type="submit">練習日程設定を保存</button><button id="reset-practice-schedule-settings" type="button" class="secondary">初期値に戻す</button><span id="practice-schedule-settings-result" class="status-message" role="status" aria-live="polite"></span></div>
+              </form>
+            </div>
           </section>
-          <section class="settings-panel" id="database-settings" role="tabpanel" hidden>
+          <section class="settings-panel tournament-setting" id="database-settings" role="tabpanel" hidden>
             <div class="settings-panel-head"><h3>データ管理</h3><span class="settings-status">管理者限定</span></div>
             <p>D1データベースの全データを、1テーブルにつき1つのCSVファイルとしてZIPにまとめてダウンロードします。</p>
             <div class="database-export-actions"><a class="database-download" href="/api/settings/database-export" download>CSVを一括ダウンロード</a></div>
             <p class="database-export-warning">氏名・よみがな・Discord IDなどの個人情報を含みます。ダウンロードしたファイルは共有せず、安全な場所で管理してください。</p>
           </section>
-          <section class="settings-panel" id="manual-settings" role="tabpanel" hidden>
+          <section class="settings-panel tournament-setting" id="manual-settings" role="tabpanel" hidden>
             <div class="settings-panel-head"><h3>運用マニュアル</h3><span class="settings-status">草案</span></div>
             <div class="manual-workspace">
               <nav class="manual-menu" role="tablist" aria-label="運用マニュアル目次">
@@ -3527,6 +4202,21 @@ function adminHtml(page: AdminPage): string {
     </section>
     </div>
   </main>
+  <dialog id="practice-schedule-edit-dialog">
+    <form id="practice-schedule-edit-form" class="dialog-form">
+      <h2>練習日程を編集</h2>
+      <input type="hidden" name="scheduleId">
+      <div class="grid">
+        <label>練習日<input type="date" name="practiceDate" required></label>
+        <label>練習名<input name="title" maxlength="100" required></label>
+        <label>開始時刻<input type="time" name="startTime"></label>
+        <label>終了時刻<input type="time" name="endTime"></label>
+        <label class="wide">会場<input name="location" maxlength="100"></label>
+        <label class="wide">連絡事項<textarea name="note" maxlength="500" rows="3"></textarea></label>
+      </div>
+      <div class="dialog-actions"><span id="practice-schedule-edit-result" class="status-message" role="status" aria-live="polite"></span><button id="practice-schedule-edit-cancel" type="button" class="secondary">キャンセル</button><button id="practice-schedule-edit-save" type="submit">変更を保存</button></div>
+    </form>
+  </dialog>
   <dialog id="status-confirm-dialog">
     <div class="dialog-form">
       <h2>大会ステータスを変更しますか？</h2>
@@ -3559,10 +4249,18 @@ function adminHtml(page: AdminPage): string {
       <div class="dialog-actions"><button id="close-member-history" type="button" class="secondary">閉じる</button></div>
     </div>
   </dialog>
+  <dialog id="member-match-dialog">
+    <div class="dialog-form">
+      <h2 id="member-match-title">対戦詳細</h2>
+      <div id="member-match-content"></div>
+      <div class="dialog-actions"><button id="close-member-match" type="button" class="secondary">閉じる</button></div>
+    </div>
+  </dialog>
   <script>
     const currentPage = document.body.dataset.page;
     const settingsMenuItems = [...document.querySelectorAll('[data-settings-view]')];
     const settingsPanels = {
+      design: document.querySelector('#design-settings'),
       messages: document.querySelector('#message-settings'),
       deadlines: document.querySelector('#deadline-settings'),
       database: document.querySelector('#database-settings'),
@@ -3577,14 +4275,15 @@ function adminHtml(page: AdminPage): string {
     }
     manualMenuItems.forEach((item) => item.addEventListener('click', () => selectManualView(item.dataset.manualView)));
     function selectSettingsView(name, updateHash = true) {
-      const selected = Object.hasOwn(settingsPanels, name) ? name : 'messages';
+      const requested = Object.hasOwn(settingsPanels, name) ? name : 'design';
+      const selected = settingsMenuItems.some((item) => item.dataset.settingsView === requested && item.offsetParent !== null) ? requested : 'design';
       settingsMenuItems.forEach((item) => item.setAttribute('aria-selected', String(item.dataset.settingsView === selected)));
       Object.entries(settingsPanels).forEach(([key, panel]) => { panel.hidden = key !== selected; });
       if (updateHash) history.replaceState(null, '', '#settings-' + selected);
     }
     settingsMenuItems.forEach((item) => item.addEventListener('click', () => selectSettingsView(item.dataset.settingsView)));
     if (currentPage === 'settings') {
-      const settingsHash = location.hash.startsWith('#settings-') ? location.hash.slice(10) : 'messages';
+      const settingsHash = location.hash.startsWith('#settings-') ? location.hash.slice(10) : 'design';
       selectSettingsView(settingsHash, false);
       window.addEventListener('hashchange', () => selectSettingsView(location.hash.slice(10), false));
     }
@@ -3620,10 +4319,22 @@ function adminHtml(page: AdminPage): string {
     const memberList = document.querySelector('#member-list');
     const memberStatus = document.querySelector('#member-status');
     const refreshMembers = document.querySelector('#refresh-members');
+    const memberStatusFilter = document.querySelector('#member-status-filter');
     const memberHistoryDialog = document.querySelector('#member-history-dialog');
     const memberHistoryTitle = document.querySelector('#member-history-title');
     const memberHistoryContent = document.querySelector('#member-history-content');
     const closeMemberHistory = document.querySelector('#close-member-history');
+    const memberMatchDialog = document.querySelector('#member-match-dialog');
+    const memberMatchTitle = document.querySelector('#member-match-title');
+    const memberMatchContent = document.querySelector('#member-match-content');
+    const closeMemberMatch = document.querySelector('#close-member-match');
+    const memberBulkBar = document.querySelector('#member-bulk-bar');
+    const memberBulkCount = document.querySelector('#member-bulk-count');
+    const memberBulkMessage = document.querySelector('#member-bulk-message');
+    const discardMemberChanges = document.querySelector('#discard-member-changes');
+    const saveMemberChanges = document.querySelector('#save-member-changes');
+    const pendingMemberChanges = new Map();
+    let loadedMembers = [];
     const requestList = document.querySelector('#request-list');
     const requestStatus = document.querySelector('#request-status');
     const pendingRequestBadge = document.querySelector('#pending-request-badge');
@@ -3650,6 +4361,184 @@ function adminHtml(page: AdminPage): string {
     const deadlineSettingsResult = document.querySelector('#deadline-settings-result');
     const saveDeadlineSettings = document.querySelector('#save-deadline-settings');
     const resetDeadlineSettings = document.querySelector('#reset-deadline-settings');
+    const practiceScheduleSettingsForm = document.querySelector('#practice-schedule-settings-form');
+    const practiceScheduleSettingStatus = document.querySelector('#practice-schedule-setting-status');
+    const practiceScheduleSettingsResult = document.querySelector('#practice-schedule-settings-result');
+    const practiceVenueSettingRows = document.querySelector('#practice-venue-setting-rows');
+    const addPracticeVenueSetting = document.querySelector('#add-practice-venue-setting');
+    const savePracticeScheduleSettings = document.querySelector('#save-practice-schedule-settings');
+    const resetPracticeScheduleSettings = document.querySelector('#reset-practice-schedule-settings');
+    const designSettingsForm = document.querySelector('#design-settings-form');
+    const designPrimaryColor = document.querySelector('#design-primary-color');
+    const designPrimaryCode = document.querySelector('#design-primary-code');
+    const designBannerFile = document.querySelector('#design-banner-file');
+    const removeDesignBanner = document.querySelector('#remove-design-banner');
+    const designPreview = document.querySelector('#design-preview');
+    const designSettingsCustomized = document.querySelector('#design-settings-customized');
+    const designSettingsResult = document.querySelector('#design-settings-result');
+    const saveDesignSettings = document.querySelector('#save-design-settings');
+    const resetDesignSettings = document.querySelector('#reset-design-settings');
+    const practiceScheduleForm = document.querySelector('#practice-schedule-form');
+    const practiceScheduleRows = document.querySelector('#practice-schedule-rows');
+    const practiceScheduleResult = document.querySelector('#practice-schedule-result');
+    const practiceScheduleAdd = document.querySelector('#practice-schedule-add');
+    const practiceScheduleSubmit = document.querySelector('#practice-schedule-submit');
+    const practiceScheduleList = document.querySelector('#practice-schedule-list');
+    const practiceScheduleListStatus = document.querySelector('#practice-schedule-list-status');
+    const refreshPracticeSchedules = document.querySelector('#refresh-practice-schedules');
+    const practiceScheduleEditDialog = document.querySelector('#practice-schedule-edit-dialog');
+    const practiceScheduleEditForm = document.querySelector('#practice-schedule-edit-form');
+    const practiceScheduleEditResult = document.querySelector('#practice-schedule-edit-result');
+    const practiceScheduleEditCancel = document.querySelector('#practice-schedule-edit-cancel');
+    const practiceScheduleEditSave = document.querySelector('#practice-schedule-edit-save');
+    let loadedPracticeSchedules = [];
+    let loadedSiteDesign = null;
+    let pendingBannerRemoval = false;
+    let pendingBannerPreviewUrl = '';
+    function applySiteDesign(design) {
+      if (!design) return;
+      const root = document.documentElement.style;
+      root.setProperty('--site-primary', design.primaryColor);
+      root.setProperty('--site-primary-dark', design.primaryDark);
+      root.setProperty('--site-primary-light', design.primaryLight);
+      root.setProperty('--site-background', design.backgroundColor);
+      root.setProperty('--site-line', design.lineColor);
+      root.setProperty('--site-ink', design.textColor);
+      root.setProperty('--site-muted', design.mutedTextColor);
+      root.setProperty('--site-on-primary', design.textOnPrimary);
+      const header = document.querySelector('body > header');
+      header.classList.toggle('has-site-banner', Boolean(design.bannerUrl));
+      header.style.backgroundImage = design.bannerUrl
+        ? 'linear-gradient(#0000004d,#0000004d),url("' + design.bannerUrl + '")'
+        : 'linear-gradient(135deg,' + design.primaryDark + ',' + design.primaryColor + ')';
+    }
+    function colorChannels(value) {
+      return [1, 3, 5].map((index) => Number.parseInt(value.slice(index, index + 2), 16));
+    }
+    function colorHex(channels) {
+      return '#' + channels.map((channel) => Math.round(channel).toString(16).padStart(2, '0')).join('');
+    }
+    function mixColor(color, target, targetWeight) {
+      const source = colorChannels(color); const destination = colorChannels(target);
+      return colorHex(source.map((channel, index) => channel * (1 - targetWeight) + destination[index] * targetWeight));
+    }
+    function colorLuminance(color) {
+      const channels = colorChannels(color).map((channel) => { const value = channel / 255; return value <= .03928 ? value / 12.92 : Math.pow((value + .055) / 1.055, 2.4); });
+      return .2126 * channels[0] + .7152 * channels[1] + .0722 * channels[2];
+    }
+    function colorContrast(first, second) {
+      const values = [colorLuminance(first), colorLuminance(second)];
+      return (Math.max(...values) + .05) / (Math.min(...values) + .05);
+    }
+    function readableMutedColor(textColor, backgroundColor) {
+      for (const weight of [.4, .34, .28, .2]) {
+        const candidate = mixColor(textColor, backgroundColor, weight);
+        if (colorContrast(candidate, backgroundColor) >= 4.5) return candidate;
+      }
+      return textColor;
+    }
+    function previewPalette(primaryColor) {
+      const rgb = colorChannels(primaryColor).map((channel) => { const value = channel / 255; return value <= .03928 ? value / 12.92 : Math.pow((value + .055) / 1.055, 2.4); });
+      const light = .2126 * rgb[0] + .7152 * rgb[1] + .0722 * rgb[2] > .48;
+      const backgroundColor = mixColor(primaryColor,'#ffffff',.96);
+      const textColor = mixColor(primaryColor,'#000000',light?.78:.72);
+      return {primaryColor,primaryDark:mixColor(primaryColor,'#000000',light?.48:.24),primaryLight:mixColor(primaryColor,'#ffffff',.86),backgroundColor,lineColor:mixColor(primaryColor,'#ffffff',.80),textColor,mutedTextColor:readableMutedColor(textColor,backgroundColor),textOnPrimary:light?'#172033':'#ffffff'};
+    }
+    function updateDesignPreview() {
+      if (!designPreview || !/^#[0-9a-f]{6}$/i.test(designPrimaryCode.value)) return;
+      const palette = previewPalette(designPrimaryCode.value.toLowerCase());
+      const preview = designPreview.style;
+      preview.setProperty('--site-primary', palette.primaryColor);
+      preview.setProperty('--site-primary-dark', palette.primaryDark);
+      preview.setProperty('--site-primary-light', palette.primaryLight);
+      preview.setProperty('--site-background', palette.backgroundColor);
+      preview.setProperty('--site-line', palette.lineColor);
+      preview.setProperty('--site-ink', palette.textColor);
+      preview.setProperty('--site-muted', palette.mutedTextColor);
+      preview.setProperty('--site-on-primary', palette.textOnPrimary);
+      const previewHeader = designPreview.querySelector('.design-preview-header');
+      const bannerUrl = pendingBannerRemoval ? '' : pendingBannerPreviewUrl || loadedSiteDesign?.bannerUrl || '';
+      previewHeader.style.backgroundImage = bannerUrl
+        ? 'linear-gradient(#0000004d,#0000004d),url("' + bannerUrl + '")'
+        : 'linear-gradient(135deg,' + palette.primaryDark + ',' + palette.primaryColor + ')';
+      removeDesignBanner.disabled = !bannerUrl;
+    }
+    async function loadSiteDesign() {
+      try {
+        const response = await fetch('/api/settings/design');
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.error || 'デザイン設定を取得できませんでした。');
+        loadedSiteDesign = body.design;
+        applySiteDesign(loadedSiteDesign);
+        if (designSettingsForm) {
+          designPrimaryColor.value = loadedSiteDesign.primaryColor;
+          designPrimaryCode.value = loadedSiteDesign.primaryColor;
+          designSettingsCustomized.textContent = loadedSiteDesign.customized ? '変更済み' : '初期設定';
+          resetDesignSettings.disabled = !loadedSiteDesign.customized;
+          pendingBannerRemoval = false;
+          pendingBannerPreviewUrl = '';
+          designBannerFile.value = '';
+          updateDesignPreview();
+        }
+      } catch (error) {
+        if (designSettingsResult) {
+          designSettingsResult.className = 'status-message error';
+          designSettingsResult.textContent = error instanceof Error ? error.message : 'デザイン設定を取得できませんでした。';
+        }
+      }
+    }
+    designPrimaryColor?.addEventListener('input', () => { designPrimaryCode.value = designPrimaryColor.value; updateDesignPreview(); });
+    designPrimaryCode?.addEventListener('input', () => { if (/^#[0-9a-f]{6}$/i.test(designPrimaryCode.value)) designPrimaryColor.value = designPrimaryCode.value; updateDesignPreview(); });
+    designBannerFile?.addEventListener('change', () => {
+      if (pendingBannerPreviewUrl.startsWith('blob:')) URL.revokeObjectURL(pendingBannerPreviewUrl);
+      pendingBannerPreviewUrl = designBannerFile.files[0] ? URL.createObjectURL(designBannerFile.files[0]) : '';
+      pendingBannerRemoval = false;
+      updateDesignPreview();
+    });
+    removeDesignBanner?.addEventListener('click', () => {
+      if (pendingBannerPreviewUrl.startsWith('blob:')) URL.revokeObjectURL(pendingBannerPreviewUrl);
+      pendingBannerPreviewUrl = '';
+      designBannerFile.value = '';
+      pendingBannerRemoval = true;
+      updateDesignPreview();
+    });
+    designSettingsForm?.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      saveDesignSettings.disabled = true; resetDesignSettings.disabled = true;
+      designSettingsResult.className = 'status-message'; designSettingsResult.textContent = '保存中…';
+      try {
+        const payload = new FormData();
+        payload.set('primaryColor', designPrimaryCode.value);
+        payload.set('removeBanner', String(pendingBannerRemoval));
+        if (designBannerFile.files[0]) payload.set('banner', designBannerFile.files[0]);
+        const response = await fetch('/api/settings/design', {method:'PATCH',body:payload});
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.error || 'デザイン設定を保存できませんでした。');
+        loadedSiteDesign = body.design; applySiteDesign(loadedSiteDesign);
+        designSettingsResult.textContent = '保存しました。両方のポータルへ反映されます。';
+        designSettingsCustomized.textContent = loadedSiteDesign.customized ? '変更済み' : '初期設定';
+        pendingBannerRemoval = false; pendingBannerPreviewUrl = ''; designBannerFile.value = '';
+        updateDesignPreview();
+      } catch (error) {
+        designSettingsResult.className = 'status-message error';
+        designSettingsResult.textContent = error instanceof Error ? error.message : 'デザイン設定を保存できませんでした。';
+      } finally { saveDesignSettings.disabled = false; resetDesignSettings.disabled = !loadedSiteDesign?.customized; }
+    });
+    resetDesignSettings?.addEventListener('click', async () => {
+      if (!confirm('メインカラーとバナー画像を初期設定に戻しますか？')) return;
+      saveDesignSettings.disabled = true; resetDesignSettings.disabled = true;
+      designSettingsResult.className = 'status-message'; designSettingsResult.textContent = '初期設定へ戻しています…';
+      try {
+        const response = await fetch('/api/settings/design', {method:'DELETE'}); const body = await response.json();
+        if (!response.ok) throw new Error(body.error || '初期設定へ戻せませんでした。');
+        loadedSiteDesign = body.design; applySiteDesign(loadedSiteDesign);
+        designPrimaryColor.value = loadedSiteDesign.primaryColor; designPrimaryCode.value = loadedSiteDesign.primaryColor;
+        pendingBannerRemoval = false; pendingBannerPreviewUrl = ''; designBannerFile.value = '';
+        designSettingsCustomized.textContent = '初期設定'; designSettingsResult.textContent = '初期設定へ戻しました。'; updateDesignPreview();
+      } catch (error) {
+        designSettingsResult.className = 'status-message error'; designSettingsResult.textContent = error instanceof Error ? error.message : '初期設定へ戻せませんでした。';
+      } finally { saveDesignSettings.disabled = false; resetDesignSettings.disabled = !loadedSiteDesign?.customized; }
+    });
     const workflowStatusLabels = {
       draft: '下書き',
       registration_open: '回答受付中',
@@ -3720,6 +4609,17 @@ function adminHtml(page: AdminPage): string {
       responseReminderTime: '00:00',
       customized: false,
     };
+    let practiceScheduleSettings = {
+      morningStartTime: '09:00', morningEndTime: '12:00',
+      afternoonStartTime: '13:00', afternoonEndTime: '17:00',
+      eveningStartTime: '18:00', eveningEndTime: '21:30',
+      defaultTimeBand: 'evening', defaultVenue: '大久保東公民館',
+      venues: [
+        { name: '大久保東公民館', shortName: '大久保東' },
+        { name: '栄和公民館', shortName: '栄和' },
+      ],
+      customized: false,
+    };
     const memberStatusLabels = {
       active: '有効',
       inactive: '無効',
@@ -3732,6 +4632,249 @@ function adminHtml(page: AdminPage): string {
       if (className) node.className = className;
       if (text !== undefined) node.textContent = text;
       return node;
+    }
+
+    function practiceScheduleField(labelText, type, field, options = {}) {
+      const label = element('label', '', labelText);
+      const input = document.createElement('input');
+      input.type = type;
+      input.dataset.field = field;
+      if (options.required) input.required = true;
+      if (options.maxLength) input.maxLength = options.maxLength;
+      if (options.value) input.value = options.value;
+      label.append(input);
+      return label;
+    }
+
+    function practiceScheduleVenueField() {
+      const label = element('label', '', '会場');
+      const combobox = element('div', 'practice-venue-combobox');
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.dataset.field = 'location';
+      input.maxLength = 100;
+      input.value = practiceScheduleSettings.defaultVenue;
+      input.setAttribute('autocomplete', 'off');
+      input.setAttribute('aria-label', '会場名');
+      const menu = element('div', 'practice-venue-preset-menu');
+      menu.hidden = true;
+      const toggle = element('button', 'practice-venue-preset-toggle', '▼');
+      toggle.type = 'button';
+      toggle.setAttribute('aria-label', '登録済み会場から選択');
+      toggle.setAttribute('aria-expanded', 'false');
+      practiceScheduleSettings.venues.forEach((venue) => {
+        const option = element('button', 'practice-venue-preset-option', venue.name);
+        option.type = 'button';
+        option.addEventListener('click', () => {
+          input.value = venue.name;
+          menu.hidden = true;
+          toggle.setAttribute('aria-expanded', 'false');
+          input.focus();
+        });
+        menu.append(option);
+      });
+      toggle.addEventListener('click', (event) => {
+        event.stopPropagation();
+        const willOpen = menu.hidden;
+        document.querySelectorAll('.practice-venue-preset-menu').forEach((other) => { other.hidden = true; });
+        document.querySelectorAll('.practice-venue-preset-toggle').forEach((other) => { other.setAttribute('aria-expanded', 'false'); });
+        menu.hidden = !willOpen;
+        toggle.setAttribute('aria-expanded', String(willOpen));
+      });
+      combobox.append(input, toggle, menu);
+      label.append(combobox);
+      return label;
+    }
+
+    document.addEventListener('click', (event) => {
+      if (event.target.closest('.practice-venue-combobox')) return;
+      document.querySelectorAll('.practice-venue-preset-menu').forEach((menu) => { menu.hidden = true; });
+      document.querySelectorAll('.practice-venue-preset-toggle').forEach((toggle) => { toggle.setAttribute('aria-expanded', 'false'); });
+    });
+
+    function updatePracticeScheduleRemoveButtons() {
+      const rows = Array.from(practiceScheduleRows.querySelectorAll('.practice-schedule-row'));
+      rows.forEach((row) => {
+        row.querySelector('.practice-schedule-remove').disabled = rows.length === 1;
+      });
+    }
+
+    function addPracticeScheduleRow(defaultDate = '') {
+      const timeBand = practiceScheduleSettings.defaultTimeBand;
+      const defaultStart = practiceScheduleSettings[timeBand + 'StartTime'];
+      const defaultEnd = practiceScheduleSettings[timeBand + 'EndTime'];
+      const row = element('div', 'practice-schedule-row');
+      row.append(
+        practiceScheduleField('練習日', 'date', 'practiceDate', { required: true, value: defaultDate }),
+        practiceScheduleField('開始', 'time', 'startTime', { value: defaultStart }),
+        practiceScheduleField('終了', 'time', 'endTime', { value: defaultEnd }),
+        practiceScheduleField('練習名', 'text', 'title', { required: true, maxLength: 100, value: '通常練習' }),
+        practiceScheduleVenueField(),
+        practiceScheduleField('連絡事項', 'text', 'note', { maxLength: 500 }),
+      );
+      const remove = element('button', 'practice-schedule-remove', '削除');
+      remove.type = 'button';
+      remove.addEventListener('click', () => {
+        row.remove();
+        updatePracticeScheduleRemoveButtons();
+      });
+      row.append(remove);
+      practiceScheduleRows.append(row);
+      updatePracticeScheduleRemoveButtons();
+    }
+
+    function renderPracticeSchedules(schedules) {
+      loadedPracticeSchedules = schedules;
+      practiceScheduleList.replaceChildren();
+      const visible = schedules.filter((schedule) => schedule.status !== 'canceled');
+      if (!visible.length) {
+        practiceScheduleList.append(element('div', 'practice-schedule-empty', '登録済みの練習日程はありません。'));
+        return;
+      }
+      visible.forEach((schedule) => {
+        const card = element('article', 'practice-schedule-card');
+        const details = document.createElement('div');
+        const title = element('div', 'practice-schedule-card-title', schedule.practice_date.replaceAll('-', '/') + ' ' + schedule.title);
+        title.append(element('span', 'practice-schedule-card-status ' + schedule.status, schedule.status === 'completed' ? '終了' : '予定'));
+        details.append(title);
+        const time = schedule.start_time
+          ? schedule.start_time + (schedule.end_time ? '〜' + schedule.end_time : '〜')
+          : '時刻未定';
+        details.append(element('div', 'practice-schedule-card-meta', time + (schedule.location ? '・' + schedule.location : '')));
+        if (schedule.note) details.append(element('div', 'practice-schedule-card-note', '連絡事項：' + schedule.note));
+        const counts = { yes: 0, maybe: 0, no: 0 };
+        schedule.responses.forEach((response) => { counts[response.response] += 1; });
+        const countBox = element('div', 'practice-schedule-counts');
+        countBox.append(
+          element('span', '', '参加 ' + counts.yes),
+          element('span', '', '未定 ' + counts.maybe),
+          element('span', '', '不参加 ' + counts.no),
+        );
+        const actions = element('div', 'practice-schedule-card-actions');
+        actions.append(countBox);
+        if (schedule.status === 'scheduled') {
+          const edit = element('button', 'secondary', '編集');
+          edit.type = 'button';
+          edit.dataset.schedule = schedule.schedule_id;
+          edit.addEventListener('click', openPracticeScheduleEdit);
+          const remove = element('button', 'danger', '削除');
+          remove.type = 'button';
+          remove.addEventListener('click', () => deleteRegisteredPracticeSchedule(schedule, remove));
+          actions.append(edit, remove);
+        }
+        card.append(details, actions);
+        practiceScheduleList.append(card);
+      });
+    }
+
+    function openPracticeScheduleEdit(event) {
+      const schedule = loadedPracticeSchedules.find((item) => item.schedule_id === event.currentTarget.dataset.schedule);
+      if (!schedule || schedule.status !== 'scheduled') return;
+      practiceScheduleEditForm.elements.scheduleId.value = schedule.schedule_id;
+      practiceScheduleEditForm.elements.practiceDate.value = schedule.practice_date;
+      practiceScheduleEditForm.elements.title.value = schedule.title;
+      practiceScheduleEditForm.elements.startTime.value = schedule.start_time || '';
+      practiceScheduleEditForm.elements.endTime.value = schedule.end_time || '';
+      practiceScheduleEditForm.elements.location.value = schedule.location || '';
+      practiceScheduleEditForm.elements.note.value = schedule.note || '';
+      practiceScheduleEditResult.className = 'status-message';
+      practiceScheduleEditResult.textContent = '';
+      practiceScheduleEditDialog.showModal();
+    }
+
+    async function savePracticeScheduleEdit(event) {
+      event.preventDefault();
+      const fields = new FormData(practiceScheduleEditForm);
+      const scheduleId = fields.get('scheduleId');
+      practiceScheduleEditSave.disabled = true;
+      practiceScheduleEditResult.className = 'status-message';
+      practiceScheduleEditResult.textContent = '保存しています…';
+      try {
+        const response = await fetch('/api/practice/schedules/' + encodeURIComponent(scheduleId), {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            practiceDate: fields.get('practiceDate'),
+            title: fields.get('title'),
+            startTime: fields.get('startTime'),
+            endTime: fields.get('endTime'),
+            location: fields.get('location'),
+            note: fields.get('note'),
+          }),
+        });
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.error || '練習日程を編集できませんでした。');
+        renderPracticeSchedules(body.schedules || []);
+        practiceScheduleEditDialog.close();
+        practiceScheduleListStatus.textContent = '';
+      } catch (error) {
+        practiceScheduleEditResult.className = 'status-message error';
+        practiceScheduleEditResult.textContent = error instanceof Error ? error.message : '練習日程を編集できませんでした。';
+      } finally {
+        practiceScheduleEditSave.disabled = false;
+      }
+    }
+
+    async function deleteRegisteredPracticeSchedule(schedule, button) {
+      if (!confirm(schedule.practice_date.replaceAll('-', '/') + ' ' + schedule.title + 'を削除しますか？\nDiscordの同月カレンダーも自動的に更新されます。')) return;
+      button.disabled = true;
+      practiceScheduleListStatus.className = 'status-message';
+      practiceScheduleListStatus.textContent = '削除しています…';
+      try {
+        const response = await fetch('/api/practice/schedules/' + encodeURIComponent(schedule.schedule_id), { method: 'DELETE' });
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.error || '練習日程を削除できませんでした。');
+        renderPracticeSchedules(body.schedules || []);
+        practiceScheduleListStatus.textContent = '練習日程を削除しました。Discordカレンダーを更新します。';
+      } catch (error) {
+        button.disabled = false;
+        practiceScheduleListStatus.className = 'status-message error';
+        practiceScheduleListStatus.textContent = error instanceof Error ? error.message : '練習日程を削除できませんでした。';
+      }
+    }
+
+    async function loadPracticeSchedules() {
+      practiceScheduleListStatus.className = 'status-message';
+      practiceScheduleListStatus.textContent = '読み込み中…';
+      try {
+        const response = await fetch('/api/practice/schedules');
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.error || '練習日程を取得できませんでした。');
+        renderPracticeSchedules(body.schedules || []);
+        practiceScheduleListStatus.textContent = '';
+      } catch (error) {
+        practiceScheduleListStatus.className = 'status-message error';
+        practiceScheduleListStatus.textContent = error instanceof Error ? error.message : '練習日程を取得できませんでした。';
+      }
+    }
+
+    async function savePracticeSchedules(event) {
+      event.preventDefault();
+      const schedules = Array.from(practiceScheduleRows.querySelectorAll('.practice-schedule-row')).map((row) =>
+        Object.fromEntries(Array.from(row.querySelectorAll('[data-field]')).map((input) => [input.dataset.field, input.value]))
+      );
+      practiceScheduleSubmit.disabled = true;
+      practiceScheduleResult.className = 'status-message';
+      practiceScheduleResult.textContent = '登録しています…';
+      try {
+        const response = await fetch('/api/practice/schedules', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ schedules }),
+        });
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.error || '練習日程を登録できませんでした。');
+        renderPracticeSchedules(body.schedules || []);
+        practiceScheduleRows.replaceChildren();
+        addPracticeScheduleRow();
+        practiceScheduleResult.className = 'status-message';
+        practiceScheduleResult.textContent = '練習日程を登録しました。';
+      } catch (error) {
+        practiceScheduleResult.className = 'status-message error';
+        practiceScheduleResult.textContent = error instanceof Error ? error.message : '練習日程を登録できませんでした。';
+      } finally {
+        practiceScheduleSubmit.disabled = false;
+      }
     }
 
     function selectedMessageTemplate() {
@@ -3876,8 +5019,15 @@ function adminHtml(page: AdminPage): string {
         deadlineSettingsForm.elements.responseReminderTime.value = deadlineAutomationSettings.responseReminderTime;
         refreshDeadlineTimeInputs();
       }
-      if (deadlineSettingsCustomized) deadlineSettingsCustomized.textContent = deadlineAutomationSettings.customized ? '変更済み' : '初期設定';
+      refreshAutomationSettingsStatus();
       if (resetDeadlineSettings) resetDeadlineSettings.disabled = !deadlineAutomationSettings.customized;
+    }
+
+    function refreshAutomationSettingsStatus() {
+      if (!deadlineSettingsCustomized) return;
+      const customized = (adminPermissions.includes('tournament') && deadlineAutomationSettings.customized)
+        || (adminPermissions.includes('practice') && practiceScheduleSettings.customized);
+      deadlineSettingsCustomized.textContent = customized ? '変更済み' : '初期設定';
     }
 
     function refreshDeadlineTimeInputs() {
@@ -3970,6 +5120,104 @@ function adminHtml(page: AdminPage): string {
         saveDeadlineSettings.disabled = false;
         resetDeadlineSettings.disabled = !deadlineAutomationSettings.customized;
       }
+    });
+
+    function practiceVenueValues() {
+      return [...practiceVenueSettingRows.querySelectorAll('.practice-venue-row')].map((row) => ({
+        name: row.querySelector('[data-venue-name]').value.trim(),
+        shortName: row.querySelector('[data-venue-short]').value.trim(),
+      }));
+    }
+
+    function refreshPracticeVenueDefaults(preferred) {
+      const select = practiceScheduleSettingsForm.elements.defaultVenue;
+      const current = preferred || select.value;
+      const names = practiceVenueValues().map((venue) => venue.name).filter(Boolean);
+      select.replaceChildren(...names.map((name) => {
+        const option = document.createElement('option'); option.value = name; option.textContent = name; return option;
+      }));
+      select.value = names.includes(current) ? current : names[0] || '';
+    }
+
+    function refreshPracticeVenueRemoveButtons() {
+      const rows = [...practiceVenueSettingRows.querySelectorAll('.practice-venue-row')];
+      rows.forEach((row) => { row.querySelector('button').disabled = rows.length === 1; });
+    }
+
+    function addPracticeVenueSettingRow(venue = { name: '', shortName: '' }) {
+      const row = element('div', 'practice-venue-row');
+      const nameLabel = element('label', '', '正式な会場名');
+      const nameInput = document.createElement('input'); nameInput.dataset.venueName = ''; nameInput.maxLength = 100; nameInput.required = true; nameInput.value = venue.name;
+      const shortLabel = element('label', '', 'カレンダー用略称（7文字以内）');
+      const shortInput = document.createElement('input'); shortInput.dataset.venueShort = ''; shortInput.maxLength = 7; shortInput.required = true; shortInput.value = venue.shortName;
+      nameLabel.append(nameInput); shortLabel.append(shortInput);
+      const remove = element('button', 'secondary', '削除'); remove.type = 'button';
+      remove.addEventListener('click', () => { row.remove(); refreshPracticeVenueDefaults(); refreshPracticeVenueRemoveButtons(); });
+      nameInput.addEventListener('input', () => refreshPracticeVenueDefaults());
+      row.append(nameLabel, shortLabel, remove);
+      practiceVenueSettingRows.append(row);
+      refreshPracticeVenueRemoveButtons();
+    }
+
+    function renderPracticeScheduleSettings(settings) {
+      practiceScheduleSettings = { ...practiceScheduleSettings, ...settings };
+      if (practiceScheduleSettingsForm) {
+        ['morningStartTime','morningEndTime','afternoonStartTime','afternoonEndTime','eveningStartTime','eveningEndTime'].forEach((name) => {
+          practiceScheduleSettingsForm.elements[name].value = practiceScheduleSettings[name];
+        });
+        practiceScheduleSettingsForm.elements.defaultTimeBand.value = practiceScheduleSettings.defaultTimeBand;
+        practiceVenueSettingRows.replaceChildren();
+        practiceScheduleSettings.venues.forEach(addPracticeVenueSettingRow);
+        refreshPracticeVenueDefaults(practiceScheduleSettings.defaultVenue);
+      }
+      refreshAutomationSettingsStatus();
+      if (resetPracticeScheduleSettings) resetPracticeScheduleSettings.disabled = !practiceScheduleSettings.customized;
+    }
+
+    async function loadPracticeScheduleSettings() {
+      if (practiceScheduleSettingStatus) { practiceScheduleSettingStatus.className = 'status-message'; practiceScheduleSettingStatus.textContent = '読み込み中…'; }
+      try {
+        const response = await fetch('/api/settings/practice-schedules'); const body = await response.json();
+        if (!response.ok) throw new Error(body.error || '練習日程設定を取得できませんでした。');
+        renderPracticeScheduleSettings(body.settings || {});
+        if (practiceScheduleSettingStatus) practiceScheduleSettingStatus.textContent = '';
+        return practiceScheduleSettings;
+      } catch (error) {
+        if (practiceScheduleSettingStatus) { practiceScheduleSettingStatus.className = 'status-message error'; practiceScheduleSettingStatus.textContent = error instanceof Error ? error.message : '練習日程設定を取得できませんでした。'; }
+        return practiceScheduleSettings;
+      }
+    }
+
+    addPracticeVenueSetting?.addEventListener('click', () => { addPracticeVenueSettingRow(); refreshPracticeVenueDefaults(); });
+    practiceScheduleSettingsForm?.addEventListener('submit', async (event) => {
+      event.preventDefault(); savePracticeScheduleSettings.disabled = true; resetPracticeScheduleSettings.disabled = true;
+      practiceScheduleSettingsResult.className = 'status-message'; practiceScheduleSettingsResult.textContent = '保存中…';
+      try {
+        const fields = practiceScheduleSettingsForm.elements;
+        const response = await fetch('/api/settings/practice-schedules', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+          morningStartTime: fields.morningStartTime.value, morningEndTime: fields.morningEndTime.value,
+          afternoonStartTime: fields.afternoonStartTime.value, afternoonEndTime: fields.afternoonEndTime.value,
+          eveningStartTime: fields.eveningStartTime.value, eveningEndTime: fields.eveningEndTime.value,
+          defaultTimeBand: fields.defaultTimeBand.value, defaultVenue: fields.defaultVenue.value,
+          venues: practiceVenueValues(),
+        }) });
+        const body = await response.json(); if (!response.ok) throw new Error(body.error || '練習日程設定を保存できませんでした。');
+        renderPracticeScheduleSettings(body.settings); practiceScheduleSettingsResult.textContent = '保存しました。新規日程の初期値とDiscordカレンダーへ反映されます。';
+      } catch (error) {
+        practiceScheduleSettingsResult.className = 'status-message error'; practiceScheduleSettingsResult.textContent = error instanceof Error ? error.message : '練習日程設定を保存できませんでした。';
+      } finally { savePracticeScheduleSettings.disabled = false; resetPracticeScheduleSettings.disabled = !practiceScheduleSettings.customized; }
+    });
+    resetPracticeScheduleSettings?.addEventListener('click', async () => {
+      if (!confirm('練習時間帯と会場設定を初期値に戻しますか？')) return;
+      savePracticeScheduleSettings.disabled = true; resetPracticeScheduleSettings.disabled = true;
+      practiceScheduleSettingsResult.className = 'status-message'; practiceScheduleSettingsResult.textContent = '初期設定へ戻しています…';
+      try {
+        const response = await fetch('/api/settings/practice-schedules', { method: 'DELETE' }); const body = await response.json();
+        if (!response.ok) throw new Error(body.error || '初期設定へ戻せませんでした。');
+        renderPracticeScheduleSettings(body.settings); practiceScheduleSettingsResult.textContent = '初期設定へ戻しました。';
+      } catch (error) {
+        practiceScheduleSettingsResult.className = 'status-message error'; practiceScheduleSettingsResult.textContent = error instanceof Error ? error.message : '初期設定へ戻せませんでした。';
+      } finally { savePracticeScheduleSettings.disabled = false; resetPracticeScheduleSettings.disabled = !practiceScheduleSettings.customized; }
     });
 
     function acceptsDroppedFile(input, file) {
@@ -4335,6 +5583,26 @@ function adminHtml(page: AdminPage): string {
       }
     }
 
+    async function generateTodoRoster(item, button) {
+      button.disabled = true;
+      todoActionStatus.textContent = item.title + 'の申込名簿を自動入力中…';
+      try {
+        const response = await fetch('/api/application-roster/generate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ tournamentId: item.tournamentIds[0] }),
+        });
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.error || '申込名簿を生成できませんでした。');
+        const warning = body.warnings?.length ? '手動確認: ' + body.warnings.join(' / ') : '';
+        todoActionStatus.textContent = item.title + 'の申込名簿を' + body.participantCount + '名分生成しました。' + warning;
+        await loadTodos();
+      } catch (error) {
+        todoActionStatus.textContent = error instanceof Error ? error.message : '申込名簿を生成できませんでした。';
+        button.disabled = false;
+      }
+    }
+
     function renderTodo(item) {
       const card = element('article', 'todo-card' + (item.urgency === 'urgent' ? ' urgent' : ''));
       const main = element('div', 'todo-main');
@@ -4371,6 +5639,12 @@ function adminHtml(page: AdminPage): string {
           details.append(link);
         };
         addResourceLink(item.applicationRosterUrl, item.applicationRosterFileName || '申込名簿を開く');
+        if (item.applicationRosterUrl) {
+          const generateButton = element('button', 'todo-roster-generate', '名簿を自動入力／再生成');
+          generateButton.type = 'button';
+          generateButton.addEventListener('click', () => generateTodoRoster(item, generateButton));
+          details.append(generateButton);
+        }
         if (item.applicationEmailUrl) addResourceLink(item.applicationEmailUrl, '申込メールを作成');
         else addResourceLink(item.applicationFormUrl, '申込フォームを開く');
       } else if (item.kind === 'payment') {
@@ -4548,7 +5822,7 @@ function adminHtml(page: AdminPage): string {
       confirmationBox.append(element('h5', '', '申込確認名簿'));
       const confirmationFile = document.createElement('input');
       confirmationFile.type = 'file';
-      confirmationFile.accept = 'application/pdf,.pdf,application/msword,.doc,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.docx,application/vnd.ms-excel,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,.xlsx';
+      confirmationFile.accept = 'application/pdf,.pdf,application/msword,.doc,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.docx,application/vnd.ms-excel,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,.xlsx,application/vnd.ms-excel.sheet.macroEnabled.12,.xlsm';
       const confirmationCurrent = element('div', 'guidance-current');
       if (confirmation?.document_url) {
         const link = element('a', '', confirmation.file_name || '登録済み確認名簿を開く');
@@ -4566,6 +5840,56 @@ function adminHtml(page: AdminPage): string {
       sendConfirmation.type = 'button';
       sendConfirmation.disabled = !confirmation;
       const confirmationMessage = element('span', 'entry-result', '');
+      const confirmationCheckSummary = element('div', 'roster-check-summary', 'Excel名簿を選択すると、申込者の氏名と級を保存前に照合します。');
+      const confirmationCheckList = element('ul', 'roster-check-list');
+      let confirmationAnalysisSequence = 0;
+      confirmationFile.addEventListener('change', async () => {
+        const sequence = ++confirmationAnalysisSequence;
+        confirmationCheckList.replaceChildren();
+        const selected = confirmationFile.files?.[0];
+        if (!selected) {
+          confirmationCheckSummary.className = 'roster-check-summary';
+          confirmationCheckSummary.textContent = 'Excel名簿を選択すると、申込者の氏名と級を保存前に照合します。';
+          return;
+        }
+        if (!/\.(?:xls|xlsx|xlsm)$/i.test(selected.name)) {
+          confirmationCheckSummary.className = 'roster-check-summary needs-review';
+          confirmationCheckSummary.textContent = 'PDF・Wordは自動照合の対象外です。保存前に目視で確認してください。';
+          return;
+        }
+        saveConfirmation.disabled = true;
+        confirmationCheckSummary.className = 'roster-check-summary';
+        confirmationCheckSummary.textContent = '申込者の記載を確認中…';
+        try {
+          const form = new FormData();
+          form.append('file', selected);
+          form.append('tournamentIds', JSON.stringify(tournaments.map((item) => item.tournament_id)));
+          const response = await fetch('/api/rosters/application-check', { method: 'POST', body: form });
+          const result = await response.json();
+          if (!response.ok) throw new Error(result.error || '申込者を照合できませんでした。');
+          if (sequence !== confirmationAnalysisSequence) return;
+          (result.predictions || []).forEach((prediction) => {
+            const matched = prediction.status === 'matched';
+            const item = element('li', matched ? 'matched' : 'needs-review');
+            item.textContent = (matched ? '✓ ' : '⚠ ') + prediction.grade + '級 ' + prediction.displayName + ' — ' + prediction.evidence;
+            if (prediction.sheetName && prediction.cellReference) {
+              item.title = prediction.sheetName + ' ' + prediction.cellReference;
+            }
+            confirmationCheckList.append(item);
+          });
+          const remaining = Number(result.reviewCount || 0) + Number(result.notFoundCount || 0);
+          confirmationCheckSummary.className = 'roster-check-summary ' + (remaining ? 'needs-review' : 'matched');
+          confirmationCheckSummary.textContent = remaining
+            ? result.matchedCount + '名を確認、' + remaining + '名は要確認です。内容を目視確認してから保存してください。'
+            : '全' + result.matchedCount + '名の氏名と級を確認しました。内容を目視確認してから保存してください。';
+        } catch (error) {
+          if (sequence !== confirmationAnalysisSequence) return;
+          confirmationCheckSummary.className = 'roster-check-summary needs-review';
+          confirmationCheckSummary.textContent = error instanceof Error ? error.message : '申込者を照合できませんでした。';
+        } finally {
+          if (sequence === confirmationAnalysisSequence) saveConfirmation.disabled = false;
+        }
+      });
       saveConfirmation.addEventListener('click', async () => {
         const selected = confirmationFile.files?.[0];
         if (!selected) { confirmationMessage.textContent = '名簿ファイルを選択してください。'; return; }
@@ -4606,7 +5930,13 @@ function adminHtml(page: AdminPage): string {
         }
       });
       confirmationActions.append(saveConfirmation, sendConfirmation, confirmationMessage);
-      confirmationBox.append(confirmationFile, confirmationCurrent, confirmationActions);
+      confirmationBox.append(
+        confirmationFile,
+        confirmationCheckSummary,
+        confirmationCheckList,
+        confirmationCurrent,
+        confirmationActions,
+      );
       body.append(confirmationBox);
 
       return section;
@@ -4680,6 +6010,7 @@ function adminHtml(page: AdminPage): string {
           row.classList.toggle('has-waitlist', waitlisted);
           row.classList.toggle('has-payment', showsPayment);
         };
+        const autoFillStatus = element('span', 'result-auto-fill-status');
         select.addEventListener('change', refreshEntryState);
         refreshEntryState();
         entryControls.push({
@@ -4687,11 +6018,16 @@ function adminHtml(page: AdminPage): string {
           memberId: person.member_id,
           displayName: person.display_name,
           initialStatus: person.entry_status || 'submitted',
+          initialWaitlistNumber: person.waitlist_number ? Number(person.waitlist_number) : null,
           select,
           waitlistInput,
           paymentSelect,
+          refreshEntryState,
+          autoFillStatus,
+          lastAutoFilledStatus: null,
+          lastAutoFilledWaitlistNumber: null,
         });
-        row.append(name, statusField, waitlistField, paymentField);
+        row.append(name, statusField, waitlistField, paymentField, autoFillStatus);
         body.append(row);
       });
 
@@ -4722,15 +6058,127 @@ function adminHtml(page: AdminPage): string {
       }
       const rosterFile = document.createElement('input');
       rosterFile.type = 'file';
-      rosterFile.accept = 'application/pdf,.pdf,application/vnd.ms-excel,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,.xlsx';
+      rosterFile.accept = 'application/pdf,.pdf,application/vnd.ms-excel,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,.xlsx,application/vnd.ms-excel.sheet.macroEnabled.12,.xlsm';
+      const rosterSelectionNote = element('span', 'entry-result', '選択したファイルは一括保存または送信時にアップロードします。');
+      const rosterAnalysisSummary = element('div', 'roster-check-summary', 'Excel名簿を選択すると、当落とキャンセル待ち番号を仮入力します。');
       rosterBox.append(
         rosterFile,
-        element('span', 'entry-result', '選択したファイルは送信時にまとめてアップロードします。'),
+        rosterSelectionNote,
+        rosterAnalysisSummary,
       );
       body.append(rosterBox);
       const lotteryManagement = renderLotteryManagement(tournaments);
       if (lotteryManagement) body.append(lotteryManagement);
       const lotteryControls = lotteryManagement?.entryControls || [];
+      let rosterAnalysisSequence = 0;
+      const resetAutoFilledLotteryResults = () => {
+        lotteryControls.forEach((control) => {
+          let restoredStatus = false;
+          if (control.lastAutoFilledStatus && control.select.value === control.lastAutoFilledStatus) {
+            control.select.value = control.initialStatus;
+            control.waitlistInput.value = control.initialWaitlistNumber
+              ? String(control.initialWaitlistNumber)
+              : '';
+            restoredStatus = true;
+          }
+          if (
+            !restoredStatus &&
+            control.lastAutoFilledWaitlistNumber !== null &&
+            control.waitlistInput.value === String(control.lastAutoFilledWaitlistNumber)
+          ) {
+            control.waitlistInput.value = control.initialWaitlistNumber
+              ? String(control.initialWaitlistNumber)
+              : '';
+          }
+          control.lastAutoFilledStatus = null;
+          control.lastAutoFilledWaitlistNumber = null;
+          control.autoFillStatus.className = 'result-auto-fill-status';
+          control.autoFillStatus.textContent = '';
+          control.autoFillStatus.removeAttribute('title');
+          control.refreshEntryState();
+        });
+      };
+      rosterFile.addEventListener('change', async () => {
+        const sequence = ++rosterAnalysisSequence;
+        resetAutoFilledLotteryResults();
+        const selected = rosterFile.files?.[0];
+        if (!selected) {
+          rosterAnalysisSummary.className = 'roster-check-summary';
+          rosterAnalysisSummary.textContent = 'Excel名簿を選択すると、当落とキャンセル待ち番号を仮入力します。';
+          return;
+        }
+        if (!/\.(?:xls|xlsx|xlsm)$/i.test(selected.name)) {
+          rosterAnalysisSummary.className = 'roster-check-summary needs-review';
+          rosterAnalysisSummary.textContent = 'PDFは自動判定の対象外です。選手ごとの当落を手動で入力してください。';
+          return;
+        }
+        if (!lotteryControls.length) {
+          rosterAnalysisSummary.className = 'roster-check-summary needs-review';
+          rosterAnalysisSummary.textContent = '自動判定の対象となる申込者がいません。';
+          return;
+        }
+        rosterFile.disabled = true;
+        rosterAnalysisSummary.className = 'roster-check-summary';
+        rosterAnalysisSummary.textContent = '名簿から当落を読み取り中…';
+        try {
+          const form = new FormData();
+          form.append('file', selected);
+          form.append('tournamentIds', JSON.stringify(tournaments.map((item) => item.tournament_id)));
+          const response = await fetch('/api/rosters/lottery-predict', { method: 'POST', body: form });
+          const result = await response.json();
+          if (!response.ok) throw new Error(result.error || '名簿から当落を読み取れませんでした。');
+          if (sequence !== rosterAnalysisSequence) return;
+          const predictions = new Map((result.predictions || []).map((prediction) => [
+            prediction.tournamentId + ':' + prediction.memberId,
+            prediction,
+          ]));
+          lotteryControls.forEach((control) => {
+            const prediction = predictions.get(control.tournamentId + ':' + control.memberId);
+            if (
+              prediction?.status === 'matched' &&
+              (prediction.entryStatus === 'selected' || prediction.entryStatus === 'not_selected')
+            ) {
+              control.select.value = prediction.entryStatus;
+              control.lastAutoFilledStatus = prediction.entryStatus;
+              if (prediction.entryStatus === 'not_selected' && prediction.waitlistNumber) {
+                control.waitlistInput.value = String(prediction.waitlistNumber);
+                control.lastAutoFilledWaitlistNumber = Number(prediction.waitlistNumber);
+              } else {
+                control.waitlistInput.value = '';
+              }
+              control.refreshEntryState();
+              control.autoFillStatus.className = 'result-auto-fill-status matched';
+              control.autoFillStatus.textContent = '仮入力：' + (
+                prediction.entryStatus === 'selected'
+                  ? '出場確定'
+                  : 'キャンセル待ち ' + prediction.waitlistNumber + '番'
+              );
+            } else {
+              control.autoFillStatus.className = 'result-auto-fill-status needs-review';
+              control.autoFillStatus.textContent = prediction?.status === 'not_found'
+                ? '名簿上で確認できません。手動で選択してください。'
+                : '当落を自動判定できません。手動で選択してください。';
+            }
+            if (prediction?.evidence) {
+              const source = prediction.sheetName && prediction.cellReference
+                ? prediction.sheetName + ' ' + prediction.cellReference
+                : '';
+              control.autoFillStatus.title = [prediction.evidence, source].filter(Boolean).join(' / ');
+            }
+          });
+          const remaining = Number(result.reviewCount || 0) + Number(result.notFoundCount || 0);
+          rosterAnalysisSummary.className = 'roster-check-summary ' + (remaining ? 'needs-review' : 'matched');
+          rosterAnalysisSummary.textContent = remaining
+            ? result.matchedCount + '名を仮入力しました。残り' + remaining + '名を目視確認してください。まだ保存はされていません。'
+            : '全' + result.matchedCount + '名を仮入力しました。内容を目視確認し、一括保存または送信を押してください。';
+        } catch (error) {
+          if (sequence !== rosterAnalysisSequence) return;
+          rosterAnalysisSummary.className = 'roster-check-summary needs-review';
+          rosterAnalysisSummary.textContent = error instanceof Error ? error.message : '名簿から当落を読み取れませんでした。';
+        } finally {
+          if (sequence === rosterAnalysisSequence) rosterFile.disabled = false;
+        }
+      });
       let guidance = tournaments[0].participant_guidance;
       const guidanceBox = element('section', 'guidance-management');
       guidanceBox.append(element('h5', '', '参加費・当日案内'));
@@ -4918,6 +6366,7 @@ function adminHtml(page: AdminPage): string {
           if (guidance) guidance.organizer_payment_status = result.status;
           refreshOrganizerStatus();
           organizerStatusMessage.textContent = result.status === 'paid' ? '振込済みとして保存しました。' : '未振込へ戻しました。';
+          await loadTodoCount();
         } catch (error) {
           organizerStatusMessage.textContent = error instanceof Error ? error.message : '振込状態を保存できませんでした。';
         } finally {
@@ -4955,8 +6404,8 @@ function adminHtml(page: AdminPage): string {
         currentGuidance.textContent = '案内ファイルは未登録です。';
       }
       const guidanceActions = element('div', 'guidance-actions');
-      const saveGuidance = element('button', 'secondary', guidance ? '参加費・案内を更新' : '参加費・案内を保存');
-      saveGuidance.type = 'button';
+      const saveAll = element('button', 'secondary', '確定名簿・抽選結果・参加費・当日案内を一括保存');
+      saveAll.type = 'button';
       const sendGuidance = element('button', 'success', '抽選結果・確定名簿・参加費・当日案内を保存して送信');
       sendGuidance.type = 'button';
       sendGuidance.disabled = false;
@@ -5024,35 +6473,20 @@ function adminHtml(page: AdminPage): string {
         return result;
       };
 
-      saveGuidance.addEventListener('click', async () => {
-        saveGuidance.disabled = true;
-        guidanceMessage.textContent = '保存中…';
-        try {
-          await persistGuidance();
-          guidanceMessage.textContent = '参加費・当日案内を保存しました。入力中の確定名簿と当落結果はそのままです。';
-        } catch (error) {
-          guidanceMessage.textContent = error instanceof Error ? error.message : '案内を保存できませんでした。';
-        } finally {
-          saveGuidance.disabled = false;
-        }
-      });
-      sendGuidance.addEventListener('click', async () => {
+      const collectLotteryChanges = () => {
         const selectedRosterFile = rosterFile.files?.[0];
         if (!selectedRosterFile && !currentRosterDocument) {
-          guidanceMessage.textContent = 'PDFまたはExcelの確定名簿を選択してください。';
           rosterFile.focus();
-          return;
+          throw new Error('PDFまたはExcelの確定名簿を選択してください。');
         }
         if (!lotteryControls.length) {
-          guidanceMessage.textContent = '抽選結果を登録できる参加希望者がいません。';
-          return;
+          throw new Error('抽選結果を登録できる参加希望者がいません。');
         }
         const changes = [];
         for (const control of lotteryControls) {
           if (control.select.value === 'submitted') {
-            guidanceMessage.textContent = control.displayName + 'の抽選結果を選択してください。';
             control.select.focus();
-            return;
+            throw new Error(control.displayName + 'の抽選結果を選択してください。');
           }
           const waitlistNumber = control.select.value === 'not_selected'
             ? Number(control.waitlistInput.value)
@@ -5061,9 +6495,8 @@ function adminHtml(page: AdminPage): string {
             control.select.value === 'not_selected' &&
             (!Number.isInteger(waitlistNumber) || waitlistNumber < 1 || waitlistNumber > 9999)
           ) {
-            guidanceMessage.textContent = control.displayName + 'のキャンセル待ち番号を1〜9999の整数で入力してください。';
             control.waitlistInput.focus();
-            return;
+            throw new Error(control.displayName + 'のキャンセル待ち番号を1〜9999の整数で入力してください。');
           }
           changes.push({
             tournamentId: control.tournamentId,
@@ -5075,46 +6508,104 @@ function adminHtml(page: AdminPage): string {
         }
         const selectedCount = new Set(changes.filter((entry) => entry.status === 'selected').map((entry) => entry.memberId)).size;
         if (!selectedCount) {
-          guidanceMessage.textContent = '出場確定者を1人以上登録してください。';
-          return;
+          throw new Error('出場確定者を1人以上登録してください。');
         }
         const promotedControls = lotteryControls.filter((control) =>
           control.initialStatus === 'not_selected' && control.select.value === 'selected');
         const promotionOnly = promotedControls.length > 0 &&
           lotteryControls.every((control) => control.initialStatus !== 'submitted');
+        return { selectedRosterFile, changes, selectedCount, promotionOnly };
+      };
+
+      const setPostLotteryControlsDisabled = (disabled) => {
+        saveAll.disabled = disabled;
+        sendGuidance.disabled = disabled;
+        rosterFile.disabled = disabled;
+        lotteryControls.forEach((control) => {
+          control.select.disabled = disabled;
+          const waitlisted = control.select.value === 'not_selected';
+          control.waitlistInput.disabled = disabled || !waitlisted;
+          control.paymentSelect.disabled = disabled || control.select.value !== 'selected';
+        });
+      };
+
+      const persistRoster = async (selectedRosterFile) => {
+        if (!selectedRosterFile) return null;
+        const rosterForm = new FormData();
+        rosterForm.append('file', selectedRosterFile);
+        rosterForm.append('documentType', 'roster');
+        rosterForm.append('tournamentIds', JSON.stringify(tournaments.map((item) => item.tournament_id)));
+        const rosterResponse = await fetch('/api/archive-documents', { method: 'POST', body: rosterForm });
+        const rosterBody = await rosterResponse.json();
+        if (!rosterResponse.ok) throw new Error(rosterBody.error || '確定名簿をアップロードできませんでした。');
+        if (rosterBody.document?.conversion_status === 'failed') {
+          window.alert('確定名簿の原本は保存しましたが、閲覧用PDFを生成できませんでした。現在は原本のダウンロードリンクを使用します。');
+        }
+        return rosterBody.document;
+      };
+
+      const persistLotteryChanges = async (changes) => {
+        const response = await fetch('/api/tournament-entries/batch', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ entries: changes }),
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || '全員分の抽選結果を保存できませんでした。');
+        return result;
+      };
+
+      saveAll.addEventListener('click', async () => {
+        let values;
+        try {
+          values = collectLotteryChanges();
+          prepareGuidanceForm();
+        } catch (error) {
+          guidanceMessage.textContent = error instanceof Error ? error.message : '入力内容を確認してください。';
+          return;
+        }
+        if (!confirm('確定名簿、全選手の抽選結果、参加費、当日案内をまとめて保存します。大会お知らせと通常の結果DMは送信しません。キャンセル待ちから繰り上げる選手がいる場合のみ、その選手へDMを送信します。')) return;
+        setPostLotteryControlsDisabled(true);
+        try {
+          guidanceMessage.textContent = '1/3 参加費・当日案内を保存中…';
+          await persistGuidance();
+          guidanceMessage.textContent = '2/3 確定名簿を保存中…';
+          await persistRoster(values.selectedRosterFile);
+          guidanceMessage.textContent = '3/3 抽選結果を保存中…';
+          const entriesBody = await persistLotteryChanges(values.changes);
+          await loadTournaments();
+          const promotedCount = Number(entriesBody.promotionDmQueued || 0);
+          window.alert(promotedCount > 0
+            ? '2番の入力内容を一括保存しました。大会お知らせと通常の結果DMは送信していません。繰り上げ対象者' + promotedCount + '人へのDMだけ予約しました。'
+            : '2番の入力内容を一括保存しました。通知は送信していません。');
+        } catch (error) {
+          guidanceMessage.textContent = error instanceof Error ? error.message : '2番の入力内容を保存できませんでした。';
+          setPostLotteryControlsDisabled(false);
+        }
+      });
+
+      sendGuidance.addEventListener('click', async () => {
+        let values;
+        try {
+          values = collectLotteryChanges();
+          prepareGuidanceForm();
+        } catch (error) {
+          guidanceMessage.textContent = error instanceof Error ? error.message : '入力内容を確認してください。';
+          return;
+        }
+        const { selectedRosterFile, changes, selectedCount, promotionOnly } = values;
         const paymentDescription = paymentMethod.value === 'onsite_cash' ? '当日現金の案内' : '級別参加費と事前支払い案内';
         if (!confirm('参加費・当日案内の保存、確定名簿のアップロード、全選手の抽選結果保存、チャンネル告知、出場確定者' + selectedCount + '人への当日案内・' + paymentDescription + 'のDM送信をまとめて実行しますか？')) return;
-        sendGuidance.disabled = true;
-        rosterFile.disabled = true;
-        lotteryControls.forEach((control) => {
-          control.select.disabled = true;
-          control.waitlistInput.disabled = true;
-          control.paymentSelect.disabled = true;
-        });
+        setPostLotteryControlsDisabled(true);
         try {
           guidanceMessage.textContent = selectedRosterFile ? '1/4 参加費・当日案内を保存中…' : '1/3 参加費・当日案内を保存中…';
           await persistGuidance();
           if (selectedRosterFile) {
             guidanceMessage.textContent = '2/4 確定名簿をアップロード中…';
-            const rosterForm = new FormData();
-            rosterForm.append('file', selectedRosterFile);
-            rosterForm.append('documentType', 'roster');
-            rosterForm.append('tournamentIds', JSON.stringify(tournaments.map((item) => item.tournament_id)));
-            const rosterResponse = await fetch('/api/archive-documents', { method: 'POST', body: rosterForm });
-            const rosterBody = await rosterResponse.json();
-            if (!rosterResponse.ok) throw new Error(rosterBody.error || '確定名簿をアップロードできませんでした。');
-            if (rosterBody.document?.conversion_status === 'failed') {
-              window.alert('確定名簿の原本は保存しましたが、閲覧用PDFを生成できませんでした。現在は原本のダウンロードリンクを使用します。');
-            }
+            await persistRoster(selectedRosterFile);
           }
           guidanceMessage.textContent = selectedRosterFile ? '3/4 抽選結果を保存中…' : '2/3 抽選結果を保存中…';
-          const entriesResponse = await fetch('/api/tournament-entries/batch', {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ entries: changes }),
-          });
-          const entriesBody = await entriesResponse.json();
-          if (!entriesResponse.ok) throw new Error(entriesBody.error || '全員分の抽選結果を保存できませんでした。');
+          const entriesBody = await persistLotteryChanges(changes);
           if (promotionOnly) {
             guidanceMessage.textContent = '繰り上げ対象者 ' + Number(entriesBody.promotionDmQueued || 0) + '人にだけDMを予約しました。' + (entriesBody.promotionDmUnavailable ? ' DM対象外 ' + entriesBody.promotionDmUnavailable + '件。' : '');
             await loadTournaments();
@@ -5133,17 +6624,10 @@ function adminHtml(page: AdminPage): string {
           guidanceMessage.textContent = '大会お知らせ ' + result.channelQueued + '件、担当者向け参加費情報 ' + result.managerPaymentQueued + '件、確定者DM ' + dmQueued + '件、キャンセル待ちDM ' + Number(result.waitlistDmQueued || 0) + '件を予約しました。' + (dmUnavailable || result.waitlistDmUnavailable ? ' DM対象外 ' + (dmUnavailable + Number(result.waitlistDmUnavailable || 0)) + '件。' : '');
         } catch (error) {
           guidanceMessage.textContent = error instanceof Error ? error.message : '抽選結果と確定者案内を予約できませんでした。';
-          sendGuidance.disabled = false;
-          rosterFile.disabled = false;
-          lotteryControls.forEach((control) => {
-            control.select.disabled = false;
-            const waitlisted = control.select.value === 'not_selected';
-            control.waitlistInput.disabled = !waitlisted;
-            control.paymentSelect.disabled = control.select.value !== 'selected';
-          });
+          setPostLotteryControlsDisabled(false);
         }
       });
-      guidanceActions.append(saveGuidance, sendGuidance, guidanceMessage);
+      guidanceActions.append(saveAll, sendGuidance, guidanceMessage);
 
       const guidanceSection = element('section', 'guidance-subsection');
       const guidanceTextLabel = element('label', '', '当日案内本文');
@@ -5199,7 +6683,7 @@ function adminHtml(page: AdminPage): string {
       resultFile.accept = 'application/pdf,.pdf,application/vnd.ms-excel,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,.xlsx';
       resultDocumentUpload.append(
         resultFile,
-        element('span', 'entry-result', '選択したファイルは公開時にまとめてアップロードします。'),
+        element('span', 'entry-result', 'Excelは選択すると個人成績を自動入力します。保存時のファイル名は大会名・級・開催月から自動設定します。ファイルの保存は公開時に行います。PDFは個人成績を手入力してください。'),
       );
       body.append(resultDocumentUpload);
 
@@ -5210,6 +6694,75 @@ function adminHtml(page: AdminPage): string {
         .map((person) => ({ ...person, tournament })));
       const resultList = element('div', 'result-list');
       const resultControls = [];
+      function renderMatchEditor(control, matches, open = false) {
+        control.matchList.replaceChildren();
+        control.matchEditor.open = open;
+        control.matchEditorSummary.textContent = '対戦詳細（' + matches.length + '試合）';
+        if (!matches.length) {
+          control.matchList.append(element('span', 'match-editor-empty', '対戦詳細は未登録です。'));
+        }
+        matches.forEach((match, index) => {
+          const matchRow = element('div', 'match-edit-row');
+          matchRow.dataset.sourceSheetName = match.sourceSheetName || match.sheetName || '';
+          matchRow.dataset.sourceCellReference = match.sourceCellReference || match.cellReference || '';
+          const round = element('span', 'match-round', (index + 1) + '回戦');
+          const outcome = document.createElement('select');
+          outcome.className = 'match-outcome';
+          outcome.innerHTML = '<option value="win">○ 勝ち</option><option value="loss">× 負け</option>';
+          outcome.value = match.outcome === 'loss' ? 'loss' : 'win';
+          const score = document.createElement('input');
+          score.className = 'match-score';
+          score.type = 'number';
+          score.min = '0';
+          score.max = '50';
+          score.inputMode = 'numeric';
+          score.placeholder = '枚数差';
+          score.value = match.scoreDifference == null ? '' : String(match.scoreDifference);
+          const note = document.createElement('input');
+          note.className = 'match-note';
+          note.maxLength = 50;
+          note.placeholder = '不戦勝・譲り';
+          note.value = match.resultNote || '';
+          const opponent = document.createElement('input');
+          opponent.className = 'match-opponent';
+          opponent.maxLength = 100;
+          opponent.placeholder = '対戦相手';
+          opponent.value = match.opponentName || '';
+          const affiliation = document.createElement('input');
+          affiliation.className = 'match-affiliation';
+          affiliation.maxLength = 200;
+          affiliation.placeholder = '対戦相手の所属';
+          affiliation.value = match.opponentAffiliation || '';
+          const remove = element('button', 'match-remove', '削除');
+          remove.type = 'button';
+          remove.addEventListener('click', () => {
+            matchRow.remove();
+            [...control.matchList.querySelectorAll('.match-edit-row')].forEach((item, rowIndex) => {
+              item.querySelector('.match-round').textContent = (rowIndex + 1) + '回戦';
+            });
+            control.matchEditorSummary.textContent = '対戦詳細（' + control.matchList.querySelectorAll('.match-edit-row').length + '試合）';
+            if (!control.matchList.querySelector('.match-edit-row')) {
+              control.matchList.append(element('span', 'match-editor-empty', '対戦詳細は未登録です。'));
+            }
+          });
+          matchRow.append(round, outcome, score, note, opponent, affiliation, remove);
+          control.matchList.append(matchRow);
+        });
+      }
+      function collectMatchEditor(control) {
+        return [...control.matchList.querySelectorAll('.match-edit-row')].map((row, index) => ({
+          roundNumber: index + 1,
+          outcome: row.querySelector('.match-outcome').value,
+          scoreDifference: row.querySelector('.match-score').value === ''
+            ? null
+            : Number(row.querySelector('.match-score').value),
+          resultNote: row.querySelector('.match-note').value.trim() || null,
+          opponentName: row.querySelector('.match-opponent').value.trim() || null,
+          opponentAffiliation: row.querySelector('.match-affiliation').value.trim() || null,
+          sourceSheetName: row.dataset.sourceSheetName || null,
+          sourceCellReference: row.dataset.sourceCellReference || null,
+        }));
+      }
       if (!resultEntries.length) {
         resultList.append(element('div', 'response-empty', '成績を登録できる出場者はいません。'));
       }
@@ -5237,14 +6790,74 @@ function adminHtml(page: AdminPage): string {
           option.selected = value === person.result_text;
           input.append(option);
         });
-        resultControls.push({
+        const autoFillStatus = element('span', 'result-auto-fill-status');
+        const matchEditor = document.createElement('details');
+        matchEditor.className = 'match-editor';
+        const matchEditorSummary = document.createElement('summary');
+        const matchList = element('div', 'match-editor-list');
+        const addMatch = element('button', 'secondary match-add', '対戦を追加');
+        addMatch.type = 'button';
+        const saveMatches = element('button', 'secondary match-save', '対戦詳細だけを保存');
+        saveMatches.type = 'button';
+        saveMatches.disabled = !person.result_text;
+        const matchSaveStatus = element('span', 'match-save-status', person.result_text ? '' : '最終結果の保存後に利用できます。');
+        const matchActions = element('div', 'match-editor-actions');
+        matchActions.append(addMatch, saveMatches, matchSaveStatus);
+        matchEditor.append(matchEditorSummary, matchList, matchActions);
+        const control = {
           tournamentId: tournament.tournament_id,
           memberId: person.member_id,
           displayName: person.display_name,
           input,
           resultOptions,
+          autoFillStatus,
+          originalValue: input.value,
+          lastAutoFilledValue: null,
+          originalMatches: structuredClone(person.matches || []),
+          autoFilledMatches: false,
+          matchEditor,
+          matchEditorSummary,
+          matchList,
+          saveMatches,
+          matchSaveStatus,
+        };
+        addMatch.addEventListener('click', () => {
+          const current = collectMatchEditor(control);
+          current.push({ outcome: 'win' });
+          renderMatchEditor(control, current, true);
         });
-        row.append(name, input);
+        saveMatches.addEventListener('click', async () => {
+          if (!control.originalValue || !control.resultOptions.includes(control.originalValue)) {
+            control.matchSaveStatus.textContent = '先に最終結果を保存・公開してください。';
+            return;
+          }
+          saveMatches.disabled = true;
+          control.matchSaveStatus.textContent = '保存中…';
+          try {
+            const response = await fetch('/api/tournament-results/batch', {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ entries: [{
+                tournamentId: control.tournamentId,
+                memberId: control.memberId,
+                resultText: control.originalValue,
+                matches: collectMatchEditor(control),
+              }] }),
+            });
+            const responseBody = await response.json();
+            if (!response.ok) throw new Error(responseBody.error || '対戦詳細を保存できませんでした。');
+            control.originalMatches = structuredClone(collectMatchEditor(control));
+            control.autoFilledMatches = false;
+            control.matchSaveStatus.textContent = '対戦詳細を保存しました。';
+          } catch (error) {
+            control.matchSaveStatus.textContent = error instanceof Error ? error.message : '対戦詳細を保存できませんでした。';
+          } finally {
+            saveMatches.disabled = false;
+          }
+        });
+        renderMatchEditor(control, control.originalMatches);
+        resultControls.push(control);
+        row.append(name, input, autoFillStatus, matchEditor);
         resultList.append(row);
       });
       resultBox.append(resultList);
@@ -5255,6 +6868,87 @@ function adminHtml(page: AdminPage): string {
       const publish = element('button', 'success', published ? '変更を保存して公開を更新' : '結果を保存して公開');
       publish.type = 'button';
       const message = element('span', 'status-message', published ? '公開中' : '未公開');
+      function resetAutoFilledResults() {
+        resultControls.forEach((control) => {
+          if (control.lastAutoFilledValue && control.input.value === control.lastAutoFilledValue) {
+            control.input.value = control.originalValue;
+          }
+          if (control.autoFilledMatches) {
+            renderMatchEditor(control, structuredClone(control.originalMatches));
+            control.autoFilledMatches = false;
+          }
+          control.lastAutoFilledValue = null;
+          control.autoFillStatus.className = 'result-auto-fill-status';
+          control.autoFillStatus.textContent = '';
+          control.autoFillStatus.removeAttribute('title');
+        });
+      }
+      resultFile.addEventListener('change', async () => {
+        resetAutoFilledResults();
+        const selectedFile = resultFile.files?.[0];
+        if (!selectedFile) {
+          message.textContent = published ? '公開中' : '未公開';
+          return;
+        }
+        if (!/\.xlsx?$/i.test(selectedFile.name)) {
+          message.textContent = 'PDFの個人成績は手動で選択してください。';
+          return;
+        }
+        if (!resultControls.length) {
+          message.textContent = '個人成績を自動入力できる出場者がいません。';
+          return;
+        }
+        publish.disabled = true;
+        resultFile.disabled = true;
+        message.textContent = 'Excelから個人成績を読み取り中…';
+        try {
+          const form = new FormData();
+          form.append('file', selectedFile);
+          form.append('tournamentIds', JSON.stringify(tournaments.map((item) => item.tournament_id)));
+          const response = await fetch('/api/tournament-results/extract', { method: 'POST', body: form });
+          const responseBody = await response.json();
+          if (!response.ok) throw new Error(responseBody.error || '個人成績を自動読取できませんでした。');
+          const predictions = new Map((responseBody.predictions || []).map((prediction) => [
+            prediction.tournamentId + ':' + prediction.memberId,
+            prediction,
+          ]));
+          resultControls.forEach((control) => {
+            const prediction = predictions.get(control.tournamentId + ':' + control.memberId);
+            if (prediction && Array.isArray(prediction.matches)) {
+              renderMatchEditor(control, prediction.matches, false);
+              control.autoFilledMatches = true;
+            }
+            if (prediction?.status === 'matched' && control.resultOptions.includes(prediction.resultText)) {
+              control.input.value = prediction.resultText;
+              control.lastAutoFilledValue = prediction.resultText;
+              control.autoFillStatus.className = 'result-auto-fill-status matched';
+              const detailNote = prediction.matches?.length
+                ? '・対戦詳細' + prediction.matches.length + '試合'
+                : '・対戦詳細は要確認';
+              control.autoFillStatus.textContent = '自動入力：' + prediction.resultText + detailNote;
+              const source = prediction.sheetName && prediction.cellReference
+                ? prediction.sheetName + ' ' + prediction.cellReference
+                : '';
+              control.autoFillStatus.title = [prediction.evidence, source].filter(Boolean).join(' / ');
+              return;
+            }
+            control.autoFillStatus.className = 'result-auto-fill-status needs-review';
+            control.autoFillStatus.textContent = prediction?.status === 'needs_review'
+              ? '要確認：複数の候補があるため手動で選択してください。'
+              : '自動判定できませんでした。手動で選択してください。';
+            if (prediction?.evidence) control.autoFillStatus.title = prediction.evidence;
+          });
+          const remaining = Number(responseBody.reviewCount || 0) + Number(responseBody.notFoundCount || 0);
+          message.textContent = remaining > 0
+            ? responseBody.matchedCount + '名を自動入力しました。残り' + remaining + '名を確認してください。'
+            : responseBody.matchedCount + '名を自動入力しました。内容を確認して保存・公開してください。';
+        } catch (error) {
+          message.textContent = error instanceof Error ? error.message : '個人成績を自動読取できませんでした。';
+        } finally {
+          publish.disabled = false;
+          resultFile.disabled = false;
+        }
+      });
       publish.addEventListener('click', async () => {
         const selectedFile = resultFile.files?.[0];
         if (!selectedFile && !currentResultDocument) {
@@ -5277,9 +6971,10 @@ function adminHtml(page: AdminPage): string {
             tournamentId: control.tournamentId,
             memberId: control.memberId,
             resultText: control.input.value,
+            matches: collectMatchEditor(control),
           });
         }
-        if (!confirm('結果ファイルのアップロード、全選手の個人成績保存、メンバーポータルへの公開をまとめて実行しますか？')) return;
+        if (!confirm('個人成績の内容を確認しましたか？OKを押すと、結果ファイルの保存、全選手の個人成績保存、メンバーポータルへの公開をまとめて実行します。')) return;
         publish.disabled = true;
         resultFile.disabled = true;
         resultControls.forEach((control) => { control.input.disabled = true; });
@@ -5546,9 +7241,41 @@ function adminHtml(page: AdminPage): string {
       return header;
     }
 
-    function eventMonthLabel(value) {
-      const [year, month] = value.split('-').map(Number);
-      return year + '年' + month + '月';
+    function eventDateLabel(value) {
+      const [year, month, day] = value.split('-').map(Number);
+      return year + '年' + month + '月' + day + '日';
+    }
+
+    let loadedMemberHistory = null;
+    function memberMatchMark(match) {
+      const mark = match.outcome === 'win' ? '○' : '×';
+      const score = match.scoreDifference != null
+        ? String(match.scoreDifference)
+        : match.resultNote || '';
+      return mark + score;
+    }
+
+    function openMemberMatch(index) {
+      const appearance = loadedMemberHistory?.appearances?.[index];
+      if (!appearance) return;
+      memberMatchTitle.textContent = appearance.title + ' 対戦詳細';
+      const list = element('ul', 'member-match-list');
+      (appearance.matches || []).forEach((match) => {
+        const row = document.createElement('li');
+        const mark = element('span', 'member-match-mark ' + (match.outcome === 'win' ? 'win' : 'loss'), memberMatchMark(match));
+        row.append(
+          element('strong', '', match.roundNumber + '回戦'),
+          mark,
+          element('span', '', match.opponentName || '対戦相手記録なし'),
+          element('span', 'member-match-affiliation', match.opponentAffiliation || '所属記録なし'),
+        );
+        list.append(row);
+      });
+      memberMatchContent.replaceChildren(
+        list,
+        element('p', 'member-match-final', '結果：' + (appearance.resultText || '未登録')),
+      );
+      memberMatchDialog.showModal();
     }
 
     async function openMemberHistory(member) {
@@ -5561,43 +7288,228 @@ function adminHtml(page: AdminPage): string {
         const body = await response.json();
         if (!response.ok) throw new Error(body.error || '出場歴を取得できませんでした。');
         const history = body.history;
-        const countItems = ['A', 'B', 'C', 'D', 'E', 'F', 'beginner']
-          .filter((grade) => Number(history.gradeCounts[grade] || 0) > 0)
-          .map((grade) => gradeLabel(grade) + Number(history.gradeCounts[grade]) + '回');
-        const summary = element('p', 'member-history-summary', history.fiscalYear + '年度：' + (countItems.length ? countItems.join('、') : '出場なし'));
+        loadedMemberHistory = history;
+        const today = dateValue(new Date());
+        const todayYear = Number(today.slice(0, 4));
+        const appearanceYears = history.appearances.map((appearance) => Number(appearance.eventDate.slice(0, 4)));
+        const earliestYear = Math.min(history.fiscalYear, ...appearanceYears);
+        const padHistoryDatePart = (value) => String(value).padStart(2, '0');
+        const createHistoryDateSelector = (labelText, initialValue) => {
+          const fieldset = element('fieldset', 'member-history-date-group');
+          fieldset.append(element('legend', '', labelText));
+          const selects = element('div', 'member-history-date-selects');
+          const yearSelect = document.createElement('select');
+          const monthSelect = document.createElement('select');
+          const daySelect = document.createElement('select');
+          yearSelect.setAttribute('aria-label', labelText + 'の年');
+          monthSelect.setAttribute('aria-label', labelText + 'の月');
+          daySelect.setAttribute('aria-label', labelText + 'の日');
+          for (let year = earliestYear; year <= todayYear; year += 1) {
+            const option = document.createElement('option');
+            option.value = String(year);
+            option.textContent = year + '年';
+            yearSelect.append(option);
+          }
+          for (let month = 1; month <= 12; month += 1) {
+            const option = document.createElement('option');
+            option.value = String(month);
+            option.textContent = month + '月';
+            monthSelect.append(option);
+          }
+          const initialParts = initialValue.split('-').map(Number);
+          yearSelect.value = String(initialParts[0]);
+          monthSelect.value = String(initialParts[1]);
+          const updateDays = (preferredDay) => {
+            const requestedDay = Number(preferredDay || daySelect.value || initialParts[2] || 1);
+            const lastDay = new Date(Number(yearSelect.value), Number(monthSelect.value), 0).getDate();
+            daySelect.replaceChildren();
+            for (let day = 1; day <= lastDay; day += 1) {
+              const option = document.createElement('option');
+              option.value = String(day);
+              option.textContent = day + '日';
+              daySelect.append(option);
+            }
+            daySelect.value = String(Math.min(requestedDay, lastDay));
+          };
+          updateDays(initialParts[2]);
+          selects.append(yearSelect, monthSelect, daySelect);
+          fieldset.append(selects);
+          return {
+            element: fieldset,
+            value: () => yearSelect.value + '-' + padHistoryDatePart(monthSelect.value) + '-' + padHistoryDatePart(daySelect.value),
+            setValue: (value) => {
+              const parts = value.split('-').map(Number);
+              yearSelect.value = String(parts[0]);
+              monthSelect.value = String(parts[1]);
+              updateDays(parts[2]);
+            },
+            onChange: (callback) => {
+              yearSelect.addEventListener('change', () => { updateDays(); callback(); });
+              monthSelect.addEventListener('change', () => { updateDays(); callback(); });
+              daySelect.addEventListener('change', callback);
+            },
+          };
+        };
+        const period = element('div', 'member-history-period');
+        const fiscalStart = history.fiscalYear + '-04-01';
+        const fullPeriodStart = history.appearances.reduce(
+          (earliest, appearance) => appearance.eventDate < earliest ? appearance.eventDate : earliest,
+          history.appearances[0]?.eventDate || fiscalStart,
+        );
+        const startSelector = createHistoryDateSelector('集計開始日', fiscalStart);
+        const endSelector = createHistoryDateSelector('集計終了日（大会案内発表日）', today);
+        const periodActions = element('div', 'member-history-period-actions');
+        const resetPeriod = element('button', 'secondary member-history-period-action', '当年度に戻す');
+        resetPeriod.type = 'button';
+        const showAllPeriod = element('button', 'secondary member-history-period-action', '全期間表示');
+        showAllPeriod.type = 'button';
+        periodActions.append(resetPeriod, showAllPeriod);
+        period.append(
+          startSelector.element,
+          element('span', 'member-history-period-separator', '〜'),
+          endSelector.element,
+          periodActions,
+        );
+        const summary = element('p', 'member-history-summary');
+        summary.setAttribute('role', 'status');
+        summary.setAttribute('aria-live', 'polite');
         const wrap = element('div', 'member-history-table-wrap');
         const table = element('table', 'member-history-table');
         const head = document.createElement('thead');
         const headRow = document.createElement('tr');
-        ['開催月', '大会名', '出場級', '戦績'].forEach((label) => headRow.append(element('th', '', label)));
+        ['開催日', '大会名', '出場級', '戦績', '対戦詳細'].forEach((label) => headRow.append(element('th', '', label)));
         head.append(headRow);
         const tbody = document.createElement('tbody');
-        if (!history.appearances.length) {
-          const row = document.createElement('tr');
-          const cell = element('td', 'empty', '出場履歴はありません。');
-          cell.colSpan = 4;
-          row.append(cell);
-          tbody.append(row);
-        } else {
-          history.appearances.forEach((appearance) => {
+        const renderPeriod = () => {
+          tbody.replaceChildren();
+          const startDate = startSelector.value();
+          const endDate = endSelector.value();
+          if (!startDate || !endDate || startDate > endDate || endDate > today) {
+            summary.textContent = endDate > today
+              ? '終了日は本日以前の日付にしてください。'
+              : '開始日は終了日以前の日付にしてください。';
             const row = document.createElement('tr');
-            [eventMonthLabel(appearance.eventDate), appearance.title, gradeLabel(appearance.grade), appearance.resultText || '未登録']
+            const cell = element('td', 'empty', '集計期間を確認してください。');
+            cell.colSpan = 5;
+            row.append(cell);
+            tbody.append(row);
+            return;
+          }
+          const filtered = history.appearances
+            .map((appearance, index) => ({ appearance, index }))
+            .filter(({ appearance }) => appearance.eventDate >= startDate && appearance.eventDate <= endDate);
+          const gradeCounts = {};
+          filtered.forEach(({ appearance }) => {
+            gradeCounts[appearance.grade] = Number(gradeCounts[appearance.grade] || 0) + 1;
+          });
+          const countItems = ['A', 'B', 'C', 'D', 'E', 'F', 'beginner']
+            .filter((grade) => Number(gradeCounts[grade] || 0) > 0)
+            .map((grade) => gradeLabel(grade) + Number(gradeCounts[grade]) + '回');
+          summary.textContent = eventDateLabel(startDate) + '〜' + eventDateLabel(endDate) + '：' + (countItems.length ? countItems.join('、') : '出場なし');
+          if (!filtered.length) {
+            const row = document.createElement('tr');
+            const cell = element('td', 'empty', '指定期間の出場履歴はありません。');
+            cell.colSpan = 5;
+            row.append(cell);
+            tbody.append(row);
+            return;
+          }
+          filtered.forEach(({ appearance, index }) => {
+            const row = document.createElement('tr');
+            [eventDateLabel(appearance.eventDate), appearance.title, gradeLabel(appearance.grade), appearance.resultText || '未登録']
               .forEach((value) => row.append(element('td', '', value)));
+            const detailCell = document.createElement('td');
+            if ((appearance.matches || []).length) {
+              const detail = element('button', 'member-history-detail', '詳細');
+              detail.type = 'button';
+              detail.addEventListener('click', () => openMemberMatch(index));
+              detailCell.append(detail);
+            } else {
+              detailCell.textContent = '—';
+            }
+            row.append(detailCell);
             tbody.append(row);
           });
-        }
+        };
         table.append(head, tbody);
         wrap.append(table);
         memberHistoryContent.className = '';
-        memberHistoryContent.replaceChildren(summary, wrap);
+        memberHistoryContent.replaceChildren(period, summary, wrap);
+        startSelector.onChange(renderPeriod);
+        endSelector.onChange(renderPeriod);
+        resetPeriod.addEventListener('click', () => {
+          startSelector.setValue(fiscalStart);
+          endSelector.setValue(today);
+          renderPeriod();
+        });
+        showAllPeriod.addEventListener('click', () => {
+          startSelector.setValue(fullPeriodStart);
+          endSelector.setValue(today);
+          renderPeriod();
+        });
+        renderPeriod();
       } catch (error) {
         memberHistoryContent.className = 'member-history-loading';
         memberHistoryContent.textContent = error instanceof Error ? error.message : '出場歴を取得できませんでした。';
       }
     }
 
+    function updateMemberBulkBar() {
+      const count = pendingMemberChanges.size;
+      memberBulkBar.hidden = count === 0;
+      memberBulkCount.textContent = count ? count + '人分の変更があります' : '変更はありません';
+      saveMemberChanges.textContent = count ? count + '人分の変更を一括保存' : '変更を一括保存';
+      saveMemberChanges.disabled = count === 0;
+      memberStatusFilter.disabled = count > 0;
+      if (!count) memberBulkMessage.textContent = '';
+    }
+
+    async function discardAllMemberChanges() {
+      if (pendingMemberChanges.size && !confirm('未保存の変更をすべて破棄しますか？')) return;
+      pendingMemberChanges.clear();
+      updateMemberBulkBar();
+      await loadMembers();
+    }
+
+    async function saveAllMemberChanges() {
+      if (!pendingMemberChanges.size) return;
+      saveMemberChanges.disabled = true;
+      discardMemberChanges.disabled = true;
+      memberBulkMessage.className = 'status-message';
+      memberBulkMessage.textContent = '一括保存中…';
+      try {
+        const response = await fetch('/api/members', {
+          method: 'PATCH',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({updates:[...pendingMemberChanges.entries()].map(([memberId,input])=>({memberId,...input}))}),
+        });
+        const body = await response.json();
+        if (!response.ok) {
+          if (body.memberId) {
+            const card = memberList.querySelector('[data-member-id="' + CSS.escape(body.memberId) + '"]');
+            card?.scrollIntoView({behavior:'smooth',block:'center'});
+            card?.classList.add('has-unsaved-changes');
+          }
+          throw new Error(body.error || '変更を一括保存できませんでした。');
+        }
+        pendingMemberChanges.clear();
+        memberBulkMessage.textContent = body.members.length + '人分を保存しました。';
+        await loadMembers();
+      } catch (error) {
+        memberBulkMessage.className = 'status-message error';
+        memberBulkMessage.textContent = error instanceof Error ? error.message : '変更を一括保存できませんでした。';
+      } finally {
+        discardMemberChanges.disabled = false;
+        updateMemberBulkBar();
+      }
+    }
+
+    discardMemberChanges?.addEventListener('click', discardAllMemberChanges);
+    saveMemberChanges?.addEventListener('click', saveAllMemberChanges);
+
     function renderMember(member) {
       const card = element('article', 'member-card');
+      card.dataset.memberId = member.memberId;
       const summary = element('div', 'member-summary-grid');
       const summaryItem = (label, value) => {
         const item = element('div', 'member-summary-item', value);
@@ -5698,9 +7610,26 @@ function adminHtml(page: AdminPage): string {
       const actions = element('div', 'member-actions');
       const cancel = element('button', 'secondary', 'キャンセル');
       cancel.type = 'button';
-      const save = element('button', '', '変更を保存');
-      save.type = 'button';
       const message = element('span', 'status-message', '');
+      const currentInput = () => ({
+        lastName: lastNameInput.value,
+        firstName: firstNameInput.value,
+        lastNameKana: lastNameKanaInput.value,
+        firstNameKana: firstNameKanaInput.value,
+        grade: gradeSelect.value,
+        rank: Number(rankSelect.value),
+        status: statusSelect.value,
+        dmEnabled: dmCheckbox.checked,
+      });
+      const hasChanged = (input) => input.lastName !== member.lastName || input.firstName !== member.firstName || input.lastNameKana !== member.lastNameKana || input.firstNameKana !== member.firstNameKana || input.grade !== member.grade || input.rank !== Number(member.rank) || input.status !== member.status || input.dmEnabled !== member.dmEnabled;
+      const trackChanges = () => {
+        const input = currentInput();
+        if (hasChanged(input)) pendingMemberChanges.set(member.memberId, input);
+        else pendingMemberChanges.delete(member.memberId);
+        card.classList.toggle('has-unsaved-changes', pendingMemberChanges.has(member.memberId));
+        message.textContent = pendingMemberChanges.has(member.memberId) ? '未保存の変更があります。' : '';
+        updateMemberBulkBar();
+      };
       const resetEditor = () => {
         lastNameInput.value = member.lastName || '';
         firstNameInput.value = member.firstName || '';
@@ -5710,8 +7639,11 @@ function adminHtml(page: AdminPage): string {
         rankSelect.value = String(member.rank);
         statusSelect.value = member.status;
         dmCheckbox.checked = member.dmEnabled;
+        pendingMemberChanges.delete(member.memberId);
+        card.classList.remove('has-unsaved-changes');
         message.className = 'status-message';
         message.textContent = '';
+        updateMemberBulkBar();
       };
       edit.addEventListener('click', () => {
         resetEditor();
@@ -5724,41 +7656,34 @@ function adminHtml(page: AdminPage): string {
         editor.hidden = true;
         summary.hidden = false;
       });
-      save.addEventListener('click', async () => {
-        save.disabled = true;
-        message.className = 'status-message';
-        message.textContent = '変更中…';
-        try {
-          const response = await fetch('/api/members/' + encodeURIComponent(member.memberId), {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              lastName: lastNameInput.value,
-              firstName: firstNameInput.value,
-              lastNameKana: lastNameKanaInput.value,
-              firstNameKana: firstNameKanaInput.value,
-              grade: gradeSelect.value,
-              rank: Number(rankSelect.value),
-              status: statusSelect.value,
-              dmEnabled: dmCheckbox.checked,
-            }),
-          });
-          const body = await response.json();
-          if (!response.ok) throw new Error(body.error || '変更に失敗しました。');
-          message.textContent = '変更しました。';
-          await loadMembers();
-        } catch (error) {
-          message.className = 'status-message error';
-          message.textContent = error instanceof Error ? error.message : '変更に失敗しました。';
-        } finally {
-          save.disabled = false;
-        }
-      });
-      actions.append(cancel, save, message);
+      [lastNameInput, firstNameInput, lastNameKanaInput, firstNameKanaInput, gradeSelect, rankSelect, statusSelect, dmCheckbox]
+        .forEach((control) => control.addEventListener('input', trackChanges));
+      actions.append(cancel, message);
       editor.append(actions);
       card.append(editor);
       return card;
     }
+
+    function renderMemberList() {
+      const selectedStatus = memberStatusFilter.value;
+      const visibleMembers = selectedStatus === 'all'
+        ? loadedMembers
+        : loadedMembers.filter((member) => member.status === selectedStatus);
+      memberList.replaceChildren();
+      memberList.classList.toggle('has-members', visibleMembers.length > 0);
+      if (!visibleMembers.length) {
+        memberList.append(element('div', 'empty', selectedStatus === 'all' ? '登録されたメンバーはいません。' : '該当するステータスのメンバーはいません。'));
+      } else {
+        memberList.append(renderMemberTableHeader());
+        visibleMembers.forEach((member) => memberList.append(renderMember(member)));
+      }
+      const active = loadedMembers.filter((member) => member.status === 'active').length;
+      const dmEnabled = loadedMembers.filter((member) => member.status === 'active' && member.dmEnabled).length;
+      const shown = selectedStatus === 'all' ? '' : '・表示 ' + visibleMembers.length + '人';
+      memberStatus.textContent = loadedMembers.length + '人（有効 ' + active + '人・DM対象 ' + dmEnabled + '人' + shown + '）';
+    }
+
+    memberStatusFilter?.addEventListener('change', renderMemberList);
 
     function renderRegistrationRequest(request) {
       const card = element('article', 'request-card ' + request.requestType);
@@ -5952,17 +7877,8 @@ function adminHtml(page: AdminPage): string {
         }
         requestStatus.textContent = '未処理 ' + requestBody.requests.length + '件';
         setPendingRequestBadge(requestBody.requests.length);
-        memberList.replaceChildren();
-        memberList.classList.toggle('has-members', body.members.length > 0);
-        if (!body.members.length) {
-          memberList.append(element('div', 'empty', '登録されたメンバーはいません。'));
-        } else {
-          memberList.append(renderMemberTableHeader());
-          body.members.forEach((member) => memberList.append(renderMember(member)));
-        }
-        const active = body.members.filter((member) => member.status === 'active').length;
-        const dmEnabled = body.members.filter((member) => member.status === 'active' && member.dmEnabled).length;
-        memberStatus.textContent = body.members.length + '人（有効 ' + active + '人・DM対象 ' + dmEnabled + '人）';
+        loadedMembers = body.members;
+        renderMemberList();
       } catch (error) {
         const message = error instanceof Error ? error.message : 'メンバー情報を取得できませんでした。';
         memberStatus.textContent = message;
@@ -6050,24 +7966,25 @@ function adminHtml(page: AdminPage): string {
       refreshApplicationMethodFields();
     }
 
+    const adminPermissions = ${JSON.stringify(permissions)};
     fetch('/api/session').then((response) => response.json()).then((data) => {
       identity.textContent = data.displayName || data.email || '認証済み';
       document.querySelector('#logout').hidden = data.provider !== 'discord';
     }).catch(() => { identity.textContent = '認証済み'; });
     loadPendingRequestCount();
-    if (currentPage !== 'todo') loadTodoCount();
+    if (adminPermissions.includes('tournament') && currentPage !== 'todo') loadTodoCount();
     setInterval(() => {
       if (!document.hidden) {
         loadPendingRequestCount();
         if (currentPage === 'todo') loadTodos();
-        else loadTodoCount();
+        else if (adminPermissions.includes('tournament')) loadTodoCount();
       }
     }, 30000);
     document.addEventListener('visibilitychange', () => {
       if (!document.hidden) {
         loadPendingRequestCount();
         if (currentPage === 'todo') loadTodos();
-        else loadTodoCount();
+        else if (adminPermissions.includes('tournament')) loadTodoCount();
       }
     });
 
@@ -6154,6 +8071,10 @@ function adminHtml(page: AdminPage): string {
     memberHistoryDialog.addEventListener('click', (event) => {
       if (event.target === memberHistoryDialog) memberHistoryDialog.close();
     });
+    closeMemberMatch.addEventListener('click', () => memberMatchDialog.close());
+    memberMatchDialog.addEventListener('click', (event) => {
+      if (event.target === memberMatchDialog) memberMatchDialog.close();
+    });
     editTournamentForm.addEventListener('submit', async (event) => {
       event.preventDefault();
       if (!editingTournaments.length) return;
@@ -6220,16 +8141,31 @@ function adminHtml(page: AdminPage): string {
       loadDeadlineAutomationSettings().then(loadTournaments);
     }
     if (currentPage === 'members') {
-      refreshMembers.addEventListener('click', loadMembers);
+      refreshMembers.addEventListener('click', discardAllMemberChanges);
       loadMembers();
     }
+    if (currentPage === 'practice') {
+      const today = new Date(Date.now() + 9 * 60 * 60 * 1000).toISOString().slice(0, 10);
+      loadPracticeScheduleSettings().then(() => addPracticeScheduleRow(today));
+      practiceScheduleAdd.addEventListener('click', () => addPracticeScheduleRow());
+      practiceScheduleForm.addEventListener('submit', savePracticeSchedules);
+      refreshPracticeSchedules.addEventListener('click', loadPracticeSchedules);
+      practiceScheduleEditForm.addEventListener('submit', savePracticeScheduleEdit);
+      practiceScheduleEditCancel.addEventListener('click', () => practiceScheduleEditDialog.close());
+      practiceScheduleEditDialog.addEventListener('click', (event) => { if (event.target === practiceScheduleEditDialog) practiceScheduleEditDialog.close(); });
+      loadPracticeSchedules();
+    }
     if (currentPage === 'settings') {
-      loadMessageTemplates();
-      loadDeadlineAutomationSettings();
+      if (adminPermissions.includes('tournament')) {
+        loadMessageTemplates();
+        loadDeadlineAutomationSettings();
+      }
+      if (adminPermissions.includes('practice')) loadPracticeScheduleSettings();
     }
     if (currentPage === 'register') {
       loadDeadlineAutomationSettings().then(initializeTournamentFormDefaults);
     }
+    loadSiteDesign();
   </script>
 </body>
 </html>`;
@@ -6270,6 +8206,7 @@ export async function handleAdminRequest(
       displayName: string;
       auditIdentity: string;
       discordUserId?: string;
+      permissions: AdminPermission[];
     }
     | null = null;
   if (ctx.access) {
@@ -6280,6 +8217,7 @@ export async function handleAdminRequest(
         provider: "cloudflare",
         displayName: email,
         auditIdentity: email,
+        permissions: ["tournament", "practice"],
       };
     }
   }
@@ -6288,7 +8226,7 @@ export async function handleAdminRequest(
   }
   if (!principal) {
     if (url.pathname.startsWith("/api/")) {
-      return json({ error: "Discordでの大会担当者ログインが必要です。" }, 401);
+      return json({ error: "Discordでの担当者ログインが必要です。" }, 401);
     }
     const returnTo = `${url.pathname}${url.search}`;
     return new Response(null, {
@@ -6300,16 +8238,25 @@ export async function handleAdminRequest(
     });
   }
   const actor = principal.auditIdentity;
+  const permissions = principal.permissions;
 
   const page = {
     "/todo": "todo",
     "/register": "register",
     "/tournaments": "tournaments",
+    "/practice": "practice",
     "/members": "members",
     "/settings": "settings",
   }[url.pathname] as AdminPage | undefined;
   if (request.method === "GET" && page) {
-    return new Response(adminHtml(page), {
+    const required = pagePermission(page);
+    if (required && !permissions.includes(required)) {
+      return new Response(null, {
+        status: 302,
+        headers: { ...securityHeaders, Location: defaultAdminPath(permissions) },
+      });
+    }
+    return new Response(adminHtml(page, permissions, env.ENVIRONMENT), {
       headers: { ...securityHeaders, "Content-Type": "text/html; charset=utf-8" },
     });
   }
@@ -6319,7 +8266,119 @@ export async function handleAdminRequest(
       email: principal.displayName,
       displayName: principal.displayName,
       provider: principal.provider,
+      permissions,
     });
+  }
+
+  const requiredApiPermission = apiPermission(url.pathname);
+  if (requiredApiPermission && !permissions.includes(requiredApiPermission)) {
+    return json({ error: "この操作を行う担当者権限がありません。" }, 403);
+  }
+
+  if (request.method === "GET" && url.pathname === "/site-banner") {
+    return serveSiteBanner(env.DB, env.DOCUMENTS);
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/settings/design") {
+    return json({ design: await getSiteDesignSetting(env.DB) });
+  }
+
+  if (request.method === "PATCH" && url.pathname === "/api/settings/design") {
+    if (!isSameOrigin(request)) return json({ error: "不正な送信元です。" }, 403);
+    if (!request.headers.get("Content-Type")?.toLowerCase().startsWith("multipart/form-data")) {
+      return json({ error: "デザイン設定をフォーム形式で送信してください。" }, 415);
+    }
+    try {
+      const form = await request.formData();
+      const bannerValue = form.get("banner");
+      const banner = bannerValue instanceof File && bannerValue.size > 0 ? bannerValue : null;
+      const design = await saveSiteDesignSetting(env.DB, {
+        primaryColor: form.get("primaryColor"),
+        banner,
+        removeBanner: form.get("removeBanner") === "true",
+      }, env.DOCUMENTS, actor);
+      return json({ design });
+    } catch (error: unknown) {
+      if (error instanceof SiteDesignError) return json({ error: error.message }, error.statusCode);
+      console.error("デザイン設定の保存エラー", error);
+      return json({ error: "デザイン設定を保存できませんでした。" }, 500);
+    }
+  }
+
+  if (request.method === "DELETE" && url.pathname === "/api/settings/design") {
+    if (!isSameOrigin(request)) return json({ error: "不正な送信元です。" }, 403);
+    try {
+      return json({ design: await resetSiteDesignSetting(env.DB, env.DOCUMENTS) });
+    } catch (error: unknown) {
+      console.error("デザイン設定の初期化エラー", error);
+      return json({ error: "デザイン設定を初期設定へ戻せませんでした。" }, 500);
+    }
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/practice/schedules") {
+    try {
+      return json({ schedules: await listPracticeSchedules(env) });
+    } catch (error: unknown) {
+      console.error("練習日程の取得エラー", error);
+      return json({ error: "練習日程を取得できませんでした。" }, 500);
+    }
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/practice/schedules") {
+    if (!isSameOrigin(request)) {
+      return json({ error: "不正な送信元です。" }, 403);
+    }
+    if (!request.headers.get("Content-Type")?.toLowerCase().startsWith("application/json")) {
+      return json({ error: "JSON形式で送信してください。" }, 415);
+    }
+    try {
+      const body = await request.json<Record<string, unknown>>();
+      const created = await createPracticeSchedules(
+        env,
+        { adminIdentity: actor },
+        body,
+      );
+      return json({ ...created, schedules: await listPracticeSchedules(env) }, 201);
+    } catch (error: unknown) {
+      if (error instanceof PracticeError) return json({ error: error.message }, error.status);
+      console.error("練習日程の登録エラー", error);
+      return json({ error: "練習日程を登録できませんでした。" }, 500);
+    }
+  }
+
+  const practiceSchedulePath = url.pathname.match(
+    /^\/api\/practice\/schedules\/(PS-[0-9a-f-]{36})$/,
+  );
+  if (request.method === "PATCH" && practiceSchedulePath) {
+    if (!isSameOrigin(request)) {
+      return json({ error: "不正な送信元です。" }, 403);
+    }
+    if (!request.headers.get("Content-Type")?.toLowerCase().startsWith("application/json")) {
+      return json({ error: "JSON形式で送信してください。" }, 415);
+    }
+    try {
+      const body = await request.json<Record<string, unknown>>();
+      await updatePracticeSchedule(env, practiceSchedulePath[1], body);
+      return json({ schedules: await listPracticeSchedules(env) });
+    } catch (error: unknown) {
+      if (error instanceof PracticeError) return json({ error: error.message }, error.status);
+      console.error("練習日程の編集エラー", error);
+      return json({ error: "練習日程を編集できませんでした。" }, 500);
+    }
+  }
+
+  if (request.method === "DELETE" && practiceSchedulePath) {
+    if (!isSameOrigin(request)) {
+      return json({ error: "不正な送信元です。" }, 403);
+    }
+    try {
+      await cancelPracticeSchedule(env, practiceSchedulePath[1]);
+      return json({ schedules: await listPracticeSchedules(env) });
+    } catch (error: unknown) {
+      if (error instanceof PracticeError) return json({ error: error.message }, error.status);
+      console.error("練習日程の削除エラー", error);
+      return json({ error: "練習日程を削除できませんでした。" }, 500);
+    }
   }
 
   if (request.method === "GET" && url.pathname === "/api/settings/messages") {
@@ -6369,6 +8428,38 @@ export async function handleAdminRequest(
     } catch (error: unknown) {
       console.error("期限自動入力設定の取得エラー", error);
       return json({ error: "期限設定を取得できませんでした。" }, 500);
+    }
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/settings/practice-schedules") {
+    try {
+      return json({ settings: await getPracticeScheduleSettings(env.DB) });
+    } catch (error: unknown) {
+      console.error("練習日程設定の取得エラー", error);
+      return json({ error: "練習日程設定を取得できませんでした。" }, 500);
+    }
+  }
+
+  if (
+    (request.method === "PATCH" || request.method === "DELETE")
+    && url.pathname === "/api/settings/practice-schedules"
+  ) {
+    if (!isSameOrigin(request)) return json({ error: "不正な送信元です。" }, 403);
+    try {
+      if (request.method === "DELETE") {
+        return json({ settings: await resetPracticeScheduleSettings(env.DB) });
+      }
+      if (!request.headers.get("Content-Type")?.toLowerCase().startsWith("application/json")) {
+        return json({ error: "JSON形式で送信してください。" }, 415);
+      }
+      const body = (await request.json()) as Record<string, unknown>;
+      return json({ settings: await savePracticeScheduleSettings(env.DB, body, actor) });
+    } catch (error: unknown) {
+      if (error instanceof PracticeScheduleSettingError) {
+        return json({ error: error.message }, error.statusCode);
+      }
+      console.error("練習日程設定の保存エラー", error);
+      return json({ error: "練習日程設定を保存できませんでした。" }, 500);
     }
   }
 
@@ -6452,6 +8543,73 @@ export async function handleAdminRequest(
       }
       console.error("申込名簿Excelの保存エラー", error);
       return json({ error: "申込名簿を保存できませんでした。" }, 500);
+    }
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/application-roster/generate") {
+    if (!isSameOrigin(request)) {
+      return json({ error: "不正な送信元です。" }, 403);
+    }
+    if (!request.headers.get("Content-Type")?.toLowerCase().startsWith("application/json")) {
+      return json({ error: "JSON形式で送信してください。" }, 415);
+    }
+    try {
+      const body = (await request.json()) as { tournamentId?: unknown };
+      if (typeof body.tournamentId !== "string") {
+        throw new ApplicationRosterGenerationError("大会IDを指定してください。");
+      }
+      return json(await createFilledApplicationRoster(
+        env,
+        body.tournamentId,
+        actor,
+      ), 201);
+    } catch (error: unknown) {
+      if (error instanceof ApplicationRosterGenerationError) {
+        return json({ error: error.message }, error.statusCode);
+      }
+      console.error("Excel申込名簿の自動生成エラー", error);
+      return json({ error: "Excel申込名簿を生成できませんでした。" }, 500);
+    }
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/tournament-results/extract") {
+    if (!isSameOrigin(request)) {
+      return json({ error: "不正な送信元です。" }, 403);
+    }
+    if (!request.headers.get("Content-Type")?.toLowerCase().startsWith("multipart/form-data")) {
+      return json({ error: "大会結果をフォーム形式で送信してください。" }, 415);
+    }
+    try {
+      return json(await extractTournamentResultsFromUpload(env, request));
+    } catch (error: unknown) {
+      if (error instanceof DocumentUploadError) {
+        return json({ error: error.message }, 400);
+      }
+      console.error("大会結果の自動読取エラー", error);
+      return json({ error: "大会結果を自動読取できませんでした。" }, 500);
+    }
+  }
+
+  if (
+    request.method === "POST" &&
+    (url.pathname === "/api/rosters/application-check" ||
+      url.pathname === "/api/rosters/lottery-predict")
+  ) {
+    if (!isSameOrigin(request)) {
+      return json({ error: "不正な送信元です。" }, 403);
+    }
+    if (!request.headers.get("Content-Type")?.toLowerCase().startsWith("multipart/form-data")) {
+      return json({ error: "名簿をフォーム形式で送信してください。" }, 415);
+    }
+    try {
+      const mode = url.pathname.endsWith("application-check") ? "application" : "lottery";
+      return json(await extractRosterFromUpload(env, request, mode));
+    } catch (error: unknown) {
+      if (error instanceof DocumentUploadError) {
+        return json({ error: error.message }, 400);
+      }
+      console.error("名簿の自動確認エラー", error);
+      return json({ error: "名簿を自動確認できませんでした。" }, 500);
     }
   }
 
@@ -6541,6 +8699,33 @@ export async function handleAdminRequest(
     } catch (error: unknown) {
       console.error("メンバー一覧の取得エラー", error);
       return json({ error: "メンバー一覧を取得できませんでした。" }, 500);
+    }
+  }
+
+  if (request.method === "PATCH" && url.pathname === "/api/members") {
+    if (!isSameOrigin(request)) return json({ error: "不正な送信元です。" }, 403);
+    if (!request.headers.get("Content-Type")?.toLowerCase().startsWith("application/json")) {
+      return json({ error: "JSON形式で送信してください。" }, 415);
+    }
+    try {
+      const body = await request.json<{ updates?: unknown }>();
+      if (!Array.isArray(body.updates)) {
+        throw new MemberAdminError("変更するメンバーを指定してください。", 400);
+      }
+      const updates = body.updates.map((update) => ({
+        ...(typeof update === "object" && update !== null ? update : {}),
+      })).map((update) => ({
+        memberId: typeof update.memberId === "string" ? update.memberId : "",
+        input: update as unknown as MemberUpdateInput,
+      }));
+      const members = await updateAdminMembers(env, updates, actor);
+      return json({ members });
+    } catch (error: unknown) {
+      if (error instanceof MemberAdminError) {
+        return json({ error: error.message, memberId: error.memberId }, error.statusCode);
+      }
+      console.error("メンバー情報の一括変更エラー", error);
+      return json({ error: "メンバー情報を一括変更できませんでした。" }, 500);
     }
   }
 
@@ -6962,10 +9147,36 @@ export async function handleAdminRequest(
         const entry = value && typeof value === "object"
           ? value as Record<string, unknown>
           : {};
+        const matches = Array.isArray(entry.matches)
+          ? entry.matches.map((value) => {
+            const match = value && typeof value === "object"
+              ? value as Record<string, unknown>
+              : {};
+            return {
+              roundNumber: Number(match.roundNumber),
+              outcome: String(match.outcome ?? "") as "win" | "loss",
+              scoreDifference: match.scoreDifference === null || match.scoreDifference === ""
+                ? null
+                : Number(match.scoreDifference),
+              resultNote: typeof match.resultNote === "string" ? match.resultNote : null,
+              opponentName: typeof match.opponentName === "string" ? match.opponentName : null,
+              opponentAffiliation: typeof match.opponentAffiliation === "string"
+                ? match.opponentAffiliation
+                : null,
+              sourceSheetName: typeof match.sourceSheetName === "string"
+                ? match.sourceSheetName
+                : null,
+              sourceCellReference: typeof match.sourceCellReference === "string"
+                ? match.sourceCellReference
+                : null,
+            };
+          })
+          : undefined;
         return {
           tournamentId: typeof entry.tournamentId === "string" ? entry.tournamentId : "",
           memberId: typeof entry.memberId === "string" ? entry.memberId : "",
           resultText: typeof entry.resultText === "string" ? entry.resultText : "",
+          matches,
         };
       });
       return json(await updateTournamentEntryResultsBatch(env, entries, actor));

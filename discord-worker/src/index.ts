@@ -38,6 +38,16 @@ import {
   upsertReminderChannel,
 } from "./tournaments";
 import { serveUrgentAdminAlertAsset } from "./urgent-admin-alerts";
+import {
+  generateDueApplicationRosters,
+  type ApplicationRosterGenerationEnv,
+} from "./application-roster-generation";
+import {
+  ApplicationEmailError,
+  applicationEmailDraftFileName,
+  buildApplicationEmailEml,
+  loadApplicationEmailAttachment,
+} from "./application-email";
 
 function escapeHtml(value: string): string {
   return value
@@ -54,7 +64,8 @@ async function applicationEmailPage(
   try {
     const template = await loadApplicationEmailTemplate(env.DB, tournamentId);
     const mailto = escapeHtml(template.mailto);
-    const html = `<!doctype html><html lang="ja"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="0;url=${mailto}"><title>申込メールを作成</title><style>body{font-family:system-ui,sans-serif;margin:0;background:#f4f6fa;color:#172033}.card{max-width:560px;margin:12vh auto;padding:28px;background:#fff;border:1px solid #dce1eb;border-radius:14px}a{display:inline-block;padding:12px 18px;border-radius:9px;background:#425ba8;color:#fff;text-decoration:none;font-weight:700}</style><main class="card"><h1>申込メールを開きます</h1><p>自動で開かない場合は、下のボタンを押してください。メール作成後、申込名簿を添付してください。</p><a href="${mailto}">既定のメーラーを開く</a></main></html>`;
+    const draftUrl = `/application-email/${encodeURIComponent(tournamentId)}/draft.eml`;
+    const html = `<!doctype html><html lang="ja"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="0;url=${draftUrl}"><title>申込メールを作成</title><style>body{font-family:system-ui,sans-serif;margin:0;background:#f4f6fa;color:#172033}.card{max-width:560px;margin:12vh auto;padding:28px;background:#fff;border:1px solid #dce1eb;border-radius:14px}a{display:inline-block;padding:12px 18px;border-radius:9px;background:#425ba8;color:#fff;text-decoration:none;font-weight:700}.secondary{display:block;margin-top:18px;padding:0;background:transparent;color:#425ba8;font-weight:600}.note{color:#59657a;line-height:1.7}</style><main class="card"><h1>名簿添付済みメールを作成</h1><p class="note">宛先・件名・本文と申込名簿を含む未送信メールをダウンロードします。ダウンロードした .eml ファイルを開き、内容を確認して送信してください。</p><a href="${draftUrl}">名簿添付済みメールをダウンロード</a><a class="secondary" href="${mailto}">添付なしで既定のメーラーを開く</a></main></html>`;
     return new Response(html, {
       headers: {
         "Content-Type": "text/html; charset=utf-8",
@@ -72,9 +83,35 @@ async function applicationEmailPage(
   }
 }
 
-export interface Env {
-  DB: D1Database;
-  DOCUMENTS?: R2Bucket;
+async function applicationEmailDraft(
+  env: Env,
+  tournamentId: string,
+): Promise<Response> {
+  try {
+    const template = await loadApplicationEmailTemplate(env.DB, tournamentId);
+    const attachment = await loadApplicationEmailAttachment(env.DOCUMENTS, template);
+    const eml = buildApplicationEmailEml(template, attachment);
+    const fileName = applicationEmailDraftFileName(template.subject);
+    return new Response(eml, {
+      headers: {
+        "Content-Type": "message/rfc822; charset=utf-8",
+        "Content-Disposition": `attachment; filename="application-email.eml"; filename*=UTF-8''${encodeURIComponent(fileName)}`,
+        "Cache-Control": "no-store",
+        "X-Robots-Tag": "noindex, nofollow",
+        "X-Content-Type-Options": "nosniff",
+      },
+    });
+  } catch (error: unknown) {
+    const status = error instanceof ApplicationEmailError ? error.statusCode : 404;
+    const message = error instanceof Error ? error.message : "申込メールを作成できません。";
+    return new Response(message, {
+      status,
+      headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" },
+    });
+  }
+}
+
+export interface Env extends ApplicationRosterGenerationEnv {
   DISCORD_PUBLIC_KEY: string;
   DISCORD_APPLICATION_ID?: string;
   DISCORD_GUILD_ID?: string;
@@ -287,6 +324,13 @@ export async function handleRequest(
 
   const documentResponse = await serveTournamentDocument(request, env.DOCUMENTS, env.DB);
   if (documentResponse) return documentResponse;
+
+  const emailDraftMatch = request.method === "GET"
+    ? url.pathname.match(/^\/application-email\/(T-[0-9a-f-]{36})\/draft\.eml$/)
+    : null;
+  if (emailDraftMatch) {
+    return applicationEmailDraft(env, emailDraftMatch[1]);
+  }
 
   const emailMatch = request.method === "GET"
     ? url.pathname.match(/^\/application-email\/(T-[0-9a-f-]{36})$/)
@@ -627,6 +671,10 @@ export default {
     env: Env,
     ctx: ExecutionContext,
   ): void {
+    const processTournamentNotifications = async (): Promise<void> => {
+      await generateDueApplicationRosters(env);
+      await notifyPendingTournaments(env);
+    };
     const processPostDeadlineWorkflow = async (): Promise<void> => {
       await enqueueDuePaymentReminders(env);
       await enqueueDueOrganizerPaymentReminders(env);
@@ -634,7 +682,7 @@ export default {
     };
     ctx.waitUntil(
       Promise.all([
-        notifyPendingTournaments(env),
+        processTournamentNotifications(),
         processMemberApprovalNotificationQueue(env),
         processParticipantGuidanceQueue(env),
         processPostDeadlineWorkflow(),

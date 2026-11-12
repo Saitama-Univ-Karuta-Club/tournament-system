@@ -1,9 +1,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { handlePortalRequest, type PortalEnv } from "../src/portal";
+import { handlePracticePortalRequest } from "../src/portal/practice";
 
 const member = {
   member_id: "M-11111111-1111-4111-8111-111111111111",
   discord_user_id: "123456789012345678",
+  last_name: "石田",
+  first_name: "洋音",
+  last_name_kana: "いしだ",
+  first_name_kana: "ひろね",
   display_name: "石田洋音",
   display_name_kana: "いしだひろね",
   grade: "C",
@@ -57,6 +62,24 @@ afterEach(() => {
 });
 
 describe("member portal", () => {
+  it("does not expose practice schedule registration from the member portal", async () => {
+    const request = new Request("https://portal.example.com/api/practice/schedules", {
+      method: "POST",
+      headers: {
+        Origin: "https://portal.example.com",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ schedules: [{ practiceDate: "2026-11-01" }] }),
+    });
+
+    await expect(handlePracticePortalRequest(
+      request,
+      new URL(request.url),
+      baseEnv,
+      member,
+    )).resolves.toBeNull();
+  });
+
   it("serves public Google backup information and privacy pages without login", async () => {
     const homeResponse = await handlePortalRequest(
       new Request("https://portal.example.com/google-backup"),
@@ -90,9 +113,14 @@ describe("member portal", () => {
 
     expect(response.status).toBe(200);
     expect(html).toContain("大会参加確認");
+    expect(html).toContain("埼玉大学かるた会 メンバーポータル</p>");
     expect(html).toContain("Discordでログイン");
-    expect(html).toContain('id="answer-tab"');
     expect(html).toContain('id="info-tab"');
+    expect(html).not.toContain('id="answer-tab"');
+    expect(html).toContain('data-tab="info">大会関連<span');
+    expect(html).toContain('id="answer-view-tab"');
+    expect(html).toContain('data-view="answer">参加回答</button>');
+    expect(html).toContain('aria-label="大会関連の表示切替"');
     expect(html).toContain('id="tournaments-view-tab"');
     expect(html).toContain('id="documents-view-tab"');
     expect(html).toContain('data-view="documents">大会案内一覧</button>');
@@ -100,6 +128,80 @@ describe("member portal", () => {
     expect(html).not.toContain("登録済みの大会案内をまとめて閲覧できます");
     expect(html).not.toContain("大会要項・選手名簿・大会結果と、サークルから出場したメンバーの成績を大会ごとにまとめています");
     expect(html).toContain('id="profile-tab"');
+    expect(html).toContain('id="practice-tab"');
+    expect(html).toContain('data-tab="practice">練習関連</button>');
+    expect(html).toContain('id="practice-panel"');
+    expect(html).toContain('data-practice-view="create">練習を作成</button>');
+    expect(html).toContain('data-practice-view="results">練習結果入力</button>');
+    expect(html).toContain('data-practice-view="schedules">練習日程</button>');
+    expect(html).toMatch(/data-practice-view="schedules">練習日程<\/button>[\s\S]*data-practice-view="create">練習を作成<\/button>[\s\S]*data-practice-view="results">練習結果入力<\/button>/);
+    expect(html).toContain("practice-schedule-note");
+    expect(html).toContain("let selectedPracticeView='schedules'");
+    expect(html).toContain('id="practice-schedule-response-list"');
+    expect(html).toContain('class="practice-schedule-attendees"');
+    expect(html).toContain("response.response==='yes'");
+    expect(html).toContain('.practice-schedule-response-card{display:grid;grid-template-columns:minmax(20rem,1fr) minmax(15rem,.85fr)');
+    expect(html).not.toContain('id="practice-schedule-form"');
+    expect(html).toContain("api('/api/practice/schedules/'");
+    expect(html).toContain("method:'PUT'");
+    expect(html).toContain("name==='practice-schedules'?'schedules'");
+    expect(html).toContain('function applyScheduledParticipants(force=false)');
+    expect(html).toContain('id="practice-session-form"');
+    expect(html).toContain('id="practice-reader"');
+    expect(html).toContain('type="hidden" name="readerMemberId" id="practice-reader"');
+    expect(html).toContain('class="practice-reader-toggle"');
+    expect(html).toContain('function renderPracticeReaderToggles()');
+    expect(html).toContain('function togglePracticeReader(event)');
+    expect(html).toContain('.practice-reader-toggle[aria-pressed="true"]');
+    expect(html).toContain('.member-picker-list{grid-template-columns:repeat(auto-fit,minmax(15rem,1fr))}');
+    expect(html).toContain('.member-choice{justify-content:space-between;min-width:0;padding:6px 7px;white-space:nowrap}');
+    expect(html).toContain("readerMemberId:fields.get('readerMemberId')");
+    expect(html).toContain('id="internal-match-form"');
+    expect(html).toContain('id="internal-match-form" class="practice-form practice-result-form"');
+    expect(html).toContain('id="internal-match-form" class="practice-form practice-result-form">\n          <div class="practice-fields practice-result-fields internal-result-fields"');
+    expect(html).toContain('class="internal-result-session"');
+    expect(html).toContain('class="internal-result-date"');
+    expect(html).toContain('class="internal-result-opponent"');
+    expect(html).toContain('class="internal-result-outcome"');
+    expect(html).toContain('class="internal-result-score"');
+    expect(html).toContain('grid-template-areas:"session date opponent outcome score"');
+    expect(html).toContain('grid-template-areas:"session opponent outcome score"');
+    expect(html).toContain("classList.toggle('without-date',hasSession)");
+    expect(html).toContain('.member-choice .member-name{display:flex;align-items:baseline;gap:8px');
+    expect(html).toContain('id="external-match-form" class="practice-form practice-result-form">\n          <div class="practice-fields practice-result-fields external-result-fields"');
+    expect(html).toContain('class="practice-actions practice-result-actions"');
+    expect(html).not.toContain('<label>備考<input name="note"');
+    expect(html).toContain('.practice-result-fields input,.practice-result-fields select{height:42px');
+    expect(html.match(/<summary>詳細を入力<\/summary>/g)).toHaveLength(2);
+    expect(html).toContain('name="faultCount"');
+    expect(html).toContain('name="cardsTaken"');
+    expect(html).toContain('name="opponentRightTaken"');
+    expect(html).toContain('name="opponentLeftTaken"');
+    expect(html).toContain('name="ownRightTaken"');
+    expect(html).toContain('name="ownLeftTaken"');
+    expect(html).toContain('name="comment"');
+    expect(html).toContain('class="practice-detail-cards">取得枚数<input');
+    expect(html).toContain('class="practice-detail-opponent-right">相手陣右<input');
+    expect(html).toContain('class="practice-detail-opponent-left">相手陣左<input');
+    expect(html).toContain('class="practice-detail-faults">お手つき数<input');
+    expect(html).toContain('class="practice-detail-own-left">自陣左<input');
+    expect(html).toContain('class="practice-detail-own-right">自陣右<input');
+    expect(html).toContain('.practice-details summary{width:max-content;border:0;background:transparent');
+    expect(html).toMatch(/取得枚数[\s\S]*相手陣右[\s\S]*相手陣左[\s\S]*お手つき数[\s\S]*自陣左[\s\S]*自陣右[\s\S]*コメント/);
+    expect(html).toContain('grid-template-areas:"cards faults" "opponent-right opponent-left" "own-left own-right" "comment comment"');
+    expect(html).toContain("<h2>対戦結果を入力</h2>");
+    expect(html).not.toContain("練習登録がなくても記録できます");
+    expect(html).not.toContain("組み合わせは対戦相手を決めるための参考です");
+    expect(html).not.toContain("外部の相手との対戦を自分の記録へ追加します");
+    expect(html).not.toContain("参考組み合わせ");
+    expect(html).toContain("練習一覧・組み合わせ");
+    expect(html).toContain('<option value="">登録なし（自主練習）</option>');
+    expect(html).toContain("function renderPractice()");
+    expect(html).toContain("function saveInternalMatch(event)");
+    expect(html).toContain("/api/practice/internal-matches");
+    expect(html).toContain("function generatePracticeRound(event)");
+    expect(html).toContain("級別の成績");
+    expect(html).toContain("相手ごとの成績");
     expect(html).toContain('id="answer-list"');
     expect(html).toContain('id="tournament-list"');
     expect(html).toContain('id="archive-list"');
@@ -151,20 +253,53 @@ describe("member portal", () => {
     expect(script).toContain("eligibleAnswerGroups().filter(({target})=>canAnswer(target))");
     expect(script).toContain("function renderPaymentAlert()");
     expect(script).toContain("function renderProfile()");
+    expect(script).toContain("function resultMatchMark(match)");
+    expect(script).toContain("mark+score");
+    expect(script).toContain("function openProfileResultDetail(index)");
     expect(script).toContain("function saveProfile(event)");
     expect(script).toContain("function selectProfileView(name)");
     expect(script).toContain("function enhanceProfileTabs()");
     expect(script).toContain('data-profile-view="registration"');
     expect(script).toContain('data-profile-view="history"');
-    expect(html).toContain("#info-panel,#profile-content{display:grid;grid-template-columns:180px minmax(0,1fr)");
-    expect(html).toContain(".subtabs,.profile-tabs{position:sticky;top:16px;display:grid");
+    expect(script).toContain('data-profile-view="matches">対戦記録</button>');
+    expect(script).toContain('data-profile-view="history">大会出場履歴</button>');
+    expect(script!.indexOf('data-profile-view="matches">対戦記録</button>')).toBeLessThan(
+      script!.indexOf('data-profile-view="history">大会出場履歴</button>'),
+    );
+    expect(script).not.toContain("大会・サークル内練習・外部練習会の成績をまとめて表示します。");
+    expect(script).toContain('class="practice-overall-statistics"');
+    expect(script).toContain('class="practice-table practice-statistics-table"');
+    expect(script).toContain("<th>対戦数</th><th>勝ち数</th><th>負け数</th><th>勝率</th>");
+    expect(script).toContain('class="practice-opponent-statistics"');
+    expect(script).toContain("個人別の対戦成績を表示");
+    expect(script).not.toContain('<details class="practice-opponent-statistics" open>');
+    expect(script).toContain("const practiceRecordsPerPage=10");
+    expect(script).toContain("function practiceRecordPageItems(totalPages,currentPage)");
+    expect(script).toContain("practice.records.slice(offset,offset+practiceRecordsPerPage)");
+    expect(script).toContain('class="practice-pagination"');
+    expect(script).toContain('aria-current="page"');
+    expect(html).toContain('id="practice-record-detail-dialog"');
+    expect(script).toContain('class="practice-record-detail-button"');
+    expect(script).toContain("function openPracticeRecordDetail(event)");
+    expect(script).toContain("row.opponentRightTaken");
+    expect(script).toContain("row.ownLeftTaken");
+    expect(html).toContain(".practice-overall-statistics,.practice-grade-statistics{margin-top:18px}");
+    expect(html).toContain(".practice-pagination{display:flex");
+    expect(html).toContain(".practice-record-detail-grid{display:grid");
+    expect(html).toContain("#info-panel,#profile-content,#practice-panel{display:grid;grid-template-columns:180px minmax(0,1fr)");
+    expect(html).toContain(".subtabs,.profile-tabs,.practice-tabs{position:sticky;top:16px;display:grid");
     expect(script).toContain("現在の登録情報");
     expect(script).toContain('id="profile-dialog"');
     expect(script).toContain(">編集</button>");
     expect(script).toContain(">更新</button>");
     expect(script).toContain("大会出場履歴");
-    expect(script).toContain("function eventMonth(value)");
+    expect(script).toContain("function eventDate(value)");
+    expect(script).toContain("year+'年'+month+'月'+day+'日'");
+    expect(script).toContain("<th>開催日</th>");
+    expect(script).not.toContain("<th>開催月</th>");
     expect(script).toContain('class="history-table"');
+    expect(script).toContain('id="profile-result-dialog"');
+    expect(script).toContain("結果：'+esc(item.result_text||'未登録')");
     expect(script).toContain("未登録");
     expect(script).toContain("参加費のサークル内支払期限を過ぎています");
     expect(script).toContain("function savePayment(event)");
@@ -177,6 +312,8 @@ describe("member portal", () => {
     expect(html).toContain('id="documents-view-tab"');
     expect(html).toContain('id="document-search"');
     expect(script).toContain("function selectInfoView(name,updateHash=true)");
+    expect(script).toContain("let selectedInfoView='answer'");
+    expect(script).toContain("['answer','tournaments','documents','archive']");
     expect(script).toContain("▣ 要項PDFを開く");
     expect(script).toContain("▣ 申込確認名簿");
     expect(script).toContain("▣ 確定選手名簿");
@@ -186,6 +323,27 @@ describe("member portal", () => {
     expect(script).not.toContain("payment_status");
     expect(script).not.toContain("支払済み");
     expect(script).not.toContain("未納");
+  });
+
+  it("labels only the development member portal", async () => {
+    const developmentResponse = await handlePortalRequest(
+      new Request("https://portal.example.com/"),
+      { ...baseEnv, ENVIRONMENT: "development" },
+      context,
+    );
+    const developmentHtml = await developmentResponse.text();
+    expect(developmentHtml).toContain("大会参加確認（開発版）｜埼玉大学かるた会");
+    expect(developmentHtml).toContain("<h1>大会参加確認（開発版）</h1>");
+    expect(developmentHtml).toContain("埼玉大学かるた会 メンバーポータル</p>");
+
+    const productionResponse = await handlePortalRequest(
+      new Request("https://portal.example.com/"),
+      baseEnv,
+      context,
+    );
+    const productionHtml = await productionResponse.text();
+    expect(productionHtml).toContain("<h1>大会参加確認</h1>");
+    expect(productionHtml).not.toContain("大会参加確認（開発版）");
   });
 
   it("rejects tournament API access without a member session", async () => {

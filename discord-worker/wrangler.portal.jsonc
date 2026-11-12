@@ -22,5 +22,28 @@
       "binding": "DOCUMENTS",
       "bucket_name": "sukc-tournament-documents"
     }
-  ]
+  ],
+  "env": {
+    "development": {
+      "vars": {
+        "ENVIRONMENT": "development",
+        "DISCORD_APPLICATION_ID": "1563106568722063410",
+        "DISCORD_REDIRECT_URI": "https://sukc-tournament-portal-development.saitama-univ-karuta-club.workers.dev/auth/discord/callback"
+      },
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "sukc-tournament-discord-db-development",
+          "database_id": "86c04659-78f6-4bdb-909f-c7de05ad4246",
+          "migrations_dir": "migrations"
+        }
+      ],
+      "r2_buckets": [
+        {
+          "binding": "DOCUMENTS",
+          "bucket_name": "sukc-tournament-documents-development"
+        }
+      ]
+    }
+  }
 }

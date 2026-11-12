@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import { convertStoredOfficeDocumentToPdf } from "../src/office-conversion";
+import {
+  convertStoredLegacyExcelToXlsx,
+  convertStoredOfficeDocumentToPdf,
+} from "../src/office-conversion";
 
 describe("Office document PDF conversion", () => {
   it("imports a Word document, exports PDF, stores it, and removes the temporary Drive file", async () => {
@@ -114,5 +117,53 @@ describe("Office document PDF conversion", () => {
       expect.any(ArrayBuffer),
       expect.objectContaining({ httpMetadata: expect.objectContaining({ contentType: "application/pdf" }) }),
     );
+  });
+
+  it("converts a legacy .xls roster to .xlsx for auto-fill", async () => {
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(Response.json({ access_token: "access-token" }))
+      .mockResolvedValueOnce(Response.json({ id: "temporary-sheet" }))
+      .mockResolvedValueOnce(new Response(new Uint8Array([0x50, 0x4b, 0x03, 0x04])))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+    const put = vi.fn().mockResolvedValue(undefined);
+
+    const result = await convertStoredLegacyExcelToXlsx(
+      {
+        DOCUMENTS: {
+          get: vi.fn().mockResolvedValue({
+            arrayBuffer: () => Promise.resolve(
+              new Uint8Array([0xd0, 0xcf, 0x11, 0xe0]).buffer,
+            ),
+          }),
+          put,
+        } as unknown as R2Bucket,
+        GOOGLE_CLIENT_ID: "client-id",
+        GOOGLE_CLIENT_SECRET: "client-secret",
+        GOOGLE_REFRESH_TOKEN: "refresh-token",
+      },
+      {
+        sourceKey: "roster.xls",
+        targetKey: "temporary/roster.xlsx",
+        sourceContentType: "application/vnd.ms-excel",
+        sourceFileName: "roster.xls",
+        targetFileName: "roster.xlsx",
+      },
+      fetcher as unknown as typeof fetch,
+    );
+
+    expect(result).toEqual({ targetKey: "temporary/roster.xlsx", size: 4 });
+    expect(String(fetcher.mock.calls[2][0])).toContain(encodeURIComponent(
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ));
+    expect(put).toHaveBeenCalledWith(
+      "temporary/roster.xlsx",
+      expect.any(ArrayBuffer),
+      expect.objectContaining({
+        httpMetadata: expect.objectContaining({
+          contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        }),
+      }),
+    );
+    expect(fetcher.mock.calls[3][1]).toMatchObject({ method: "DELETE" });
   });
 });

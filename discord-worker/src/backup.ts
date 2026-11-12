@@ -5,6 +5,7 @@ import {
   type WorkflowStep,
 } from "cloudflare:workers";
 import {
+  convertStoredLegacyExcelToXlsx,
   convertStoredOfficeDocumentToPdf,
   type OfficeConversionRequest,
   type OfficeConversionResult,
@@ -130,6 +131,12 @@ export class DocumentConverter extends WorkerEntrypoint<BackupEnv> {
     request: OfficeConversionRequest,
   ): Promise<OfficeConversionResult> {
     return convertStoredOfficeDocumentToPdf(this.env, request);
+  }
+
+  convertR2LegacyExcelToXlsx(
+    request: OfficeConversionRequest,
+  ): Promise<OfficeConversionResult> {
+    return convertStoredLegacyExcelToXlsx(this.env, request);
   }
 }
 
