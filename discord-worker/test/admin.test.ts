@@ -1352,6 +1352,7 @@ describe("Admin Worker", () => {
     expect(formHtml).toContain('name="venue" maxlength="200" autocomplete="off" placeholder="任意"');
     expect(formHtml).toContain('name="comment" maxlength="1000" rows="1" placeholder="任意"');
     expect(html).toContain('#tournament-form .tournament-optional-field input, #tournament-form .tournament-optional-field textarea { height: 42px; min-height: 42px;');
+    expect(html).toContain('#tournament-form .tournament-optional-field textarea { padding-block: 10px; line-height: 20px;');
     expect(formHtml).not.toContain('name="documentUrl"');
   });
 

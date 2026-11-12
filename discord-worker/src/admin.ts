@@ -3441,7 +3441,7 @@ function adminHtml(
     input:focus, select:focus, textarea:focus { outline: 3px solid #7c9cff3b; border-color: #526fc4; }
     #tournament-form .tournament-optional-field { gap: 4px; }
     #tournament-form .tournament-optional-field input, #tournament-form .tournament-optional-field textarea { height: 42px; min-height: 42px; padding-block: 7px; line-height: 1.35; }
-    #tournament-form .tournament-optional-field textarea { resize: vertical; }
+    #tournament-form .tournament-optional-field textarea { padding-block: 10px; line-height: 20px; resize: vertical; }
     .grade-picker { min-width: 0; margin: 0; padding: 0; border: 0; }
     .grade-picker legend { margin-bottom: 7px; padding: 0; font-size: var(--font-size-body); font-weight: 650; }
     .grade-options { display: flex; flex-wrap: wrap; gap: 8px; padding: 7px; border: 1px solid #b9c1d0; border-radius: var(--control-radius); background: #fff; }
