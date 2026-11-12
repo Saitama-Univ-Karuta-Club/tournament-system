@@ -14,6 +14,7 @@ import {
 } from "./portal/documents";
 import { htmlResponse, json, sameOrigin, securityHeaders } from "./portal/http";
 import { loadPortalProfile, submitPortalProfileRequest } from "./portal/profile";
+import { handlePracticePortalRequest } from "./portal/practice";
 import {
   listPortalTournaments,
   PortalError,
@@ -23,6 +24,7 @@ import {
 } from "./portal/tournaments";
 import type { PortalEnv } from "./portal/types";
 import { googleBackupInformationHtml, portalHtml } from "./portal/ui/shell";
+import { getSiteDesignSetting, serveSiteBanner } from "./site-design";
 
 export type { PortalEnv } from "./portal/types";
 
@@ -43,6 +45,12 @@ export async function handlePortalRequest(
   if (request.method === "GET" && url.pathname === "/") {
     return htmlResponse(portalHtml(env.ENVIRONMENT));
   }
+  if (request.method === "GET" && url.pathname === "/api/design") {
+    return json({ design: await getSiteDesignSetting(env.DB) });
+  }
+  if (request.method === "GET" && url.pathname === "/site-banner") {
+    return serveSiteBanner(env.DB, env.DOCUMENTS);
+  }
   if (request.method === "GET" && url.pathname === "/auth/discord") {
     return beginDiscordLogin(request, env);
   }
@@ -56,6 +64,9 @@ export async function handlePortalRequest(
   const authenticated = await loadSessionMember(request, env);
   if (!authenticated) return json({ error: "ログインが必要です。" }, 401);
   const { member, session } = authenticated;
+
+  const practiceResponse = await handlePracticePortalRequest(request, url, env, member);
+  if (practiceResponse) return practiceResponse;
 
   if (request.method === "GET" && url.pathname === "/api/session") {
     const refreshedCookie = await refreshedSessionCookie(session, env.SESSION_SECRET);

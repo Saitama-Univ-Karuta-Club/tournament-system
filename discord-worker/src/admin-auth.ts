@@ -12,11 +12,15 @@ export interface AdminPrincipal {
   displayName: string;
   auditIdentity: string;
   discordUserId: string;
+  permissions: AdminPermission[];
 }
+
+export type AdminPermission = "tournament" | "practice";
 
 interface AdminSessionPayload {
   discordUserId: string;
   displayName: string;
+  permissions?: AdminPermission[];
   issuedAt: number;
   expiresAt: number;
 }
@@ -43,6 +47,7 @@ const OAUTH_RETURN_COOKIE = "__Host-sukc_admin_oauth_return";
 const SESSION_SECONDS = 8 * 60 * 60;
 const OAUTH_COOKIE_SECONDS = 10 * 60;
 const DISCORD_ID = /^\d{15,22}$/;
+const ADMIN_PERMISSIONS = new Set<AdminPermission>(["tournament", "practice"]);
 
 const securityHeaders: Record<string, string> = {
   "Cache-Control": "no-store",
@@ -163,11 +168,18 @@ export async function readAdminDiscordPrincipal(
   if (!env.SESSION_SECRET) return null;
   const session = await readSession(request, env.SESSION_SECRET);
   if (!session) return null;
+  const permissions = Array.isArray(session.permissions)
+    ? session.permissions.filter((permission): permission is AdminPermission =>
+      ADMIN_PERMISSIONS.has(permission)
+    )
+    : ["tournament" as const];
+  if (!permissions.length) return null;
   return {
     provider: "discord",
     displayName: session.displayName,
     auditIdentity: `discord:${session.discordUserId}`,
     discordUserId: session.discordUserId,
+    permissions,
   };
 }
 
@@ -259,20 +271,33 @@ async function finishDiscordLogin(request: Request, env: AdminAuthEnv): Promise<
   }
 
   const settings = await env.DB.prepare(
-    `SELECT admin_role_id FROM discord_settings WHERE guild_id = ? LIMIT 1`,
-  ).bind(env.DISCORD_GUILD_ID).first<{ admin_role_id: string | null }>();
+    `SELECT admin_role_id, practice_role_id
+     FROM discord_settings WHERE guild_id = ? LIMIT 1`,
+  ).bind(env.DISCORD_GUILD_ID).first<{
+    admin_role_id: string | null;
+    practice_role_id: string | null;
+  }>();
   const adminRoleId = settings?.admin_role_id?.trim();
-  if (!adminRoleId || !DISCORD_ID.test(adminRoleId)) {
+  const practiceRoleId = settings?.practice_role_id?.trim();
+  const validAdminRoleId = adminRoleId && DISCORD_ID.test(adminRoleId) ? adminRoleId : null;
+  const validPracticeRoleId = practiceRoleId && DISCORD_ID.test(practiceRoleId)
+    ? practiceRoleId
+    : null;
+  if (!validAdminRoleId && !validPracticeRoleId) {
     return htmlPage(
-      "大会担当者ロールが未設定です",
-      "Discordの大会担当者ロールIDをシステムへ登録してから、もう一度お試しください。",
+      "担当者ロールが未設定です",
+      "Discordの大会担当または練習担当ロールをシステムへ登録してから、もう一度お試しください。",
       503,
     );
   }
-  if (!Array.isArray(member.roles) || !member.roles.includes(adminRoleId)) {
+  const roles = Array.isArray(member.roles) ? member.roles : [];
+  const permissions: AdminPermission[] = [];
+  if (validAdminRoleId && roles.includes(validAdminRoleId)) permissions.push("tournament");
+  if (validPracticeRoleId && roles.includes(validPracticeRoleId)) permissions.push("practice");
+  if (!permissions.length) {
     return htmlPage(
-      "大会担当者権限がありません",
-      "この管理画面は、Discordで大会担当者ロールを付与されたメンバーだけが利用できます。",
+      "担当者権限がありません",
+      "この管理画面は、Discordで大会担当または練習担当ロールを付与されたメンバーだけが利用できます。",
       403,
     );
   }
@@ -282,6 +307,7 @@ async function finishDiscordLogin(request: Request, env: AdminAuthEnv): Promise<
   const session = await createSession({
     discordUserId: user.id,
     displayName,
+    permissions,
     issuedAt: now,
     expiresAt: now + SESSION_SECONDS,
   }, env.SESSION_SECRET);

@@ -103,7 +103,7 @@ describe("Admin Worker", () => {
 
     expect(response.status).toBe(401);
     await expect(response.json()).resolves.toEqual({
-      error: "Discordでの大会担当者ログインが必要です。",
+      error: "Discordでの担当者ログインが必要です。",
     });
   });
 
@@ -122,6 +122,7 @@ describe("Admin Worker", () => {
     ["todo", "TODO"],
     ["register", "大会新規登録"],
     ["tournaments", "一覧"],
+    ["practice", "練習管理"],
     ["members", "メンバー管理"],
     ["settings", "設定"],
   ])("serves the %s page with tab navigation", async (path, label) => {
@@ -169,6 +170,23 @@ describe("Admin Worker", () => {
     const productionHtml = await productionResponse.text();
     expect(productionHtml).toContain("<h1>運営管理ポータル</h1>");
     expect(productionHtml).not.toContain("運営管理ポータル（開発版）");
+  });
+
+  it("filters the member list by membership status", async () => {
+    const response = await handleAdminRequest(
+      new Request("https://admin.example.com/members"),
+      env,
+      authenticatedContext(),
+    );
+    const html = await response.text();
+    expect(html).toContain('id="member-status-filter"');
+    expect(html).toContain('<option value="all">すべて</option>');
+    expect(html).toContain('<option value="active">有効</option>');
+    expect(html).toContain('<option value="inactive">無効</option>');
+    expect(html).toContain('<option value="pending">確認待ち</option>');
+    expect(html).toContain('<option value="rejected">却下</option>');
+    expect(html).toContain("memberStatusFilter?.addEventListener('change', renderMemberList)");
+    expect(html).toContain("memberStatusFilter.disabled = count > 0");
   });
 
   it("groups tournament pages under a secondary navigation and renders the settings categories", async () => {
@@ -248,6 +266,151 @@ describe("Admin Worker", () => {
     expect(settingsHtml).toContain('>基準と同じ</option><option value="custom">自由設定</option>');
     expect(settingsHtml).toContain("timeInput.hidden = modeSelect.value !== 'custom'");
     expect(settingsHtml).toContain("fetch('/api/settings/deadlines')");
+    expect(settingsHtml).toContain('id="practice-schedule-settings-form"');
+    expect(settingsHtml).toContain('name="morningStartTime"');
+    expect(settingsHtml).toContain('name="defaultTimeBand"');
+    expect(settingsHtml).toContain('id="practice-venue-setting-rows"');
+    expect(settingsHtml).toContain("fetch('/api/settings/practice-schedules')");
+  });
+
+  it("renders practice schedule management only in the admin portal", async () => {
+    const response = await handleAdminRequest(
+      new Request("https://admin.example.com/practice"),
+      env,
+      authenticatedContext(),
+    );
+    const html = await response.text();
+
+    expect(html).toContain('href="/practice" aria-current="page">練習管理</a>');
+    expect(html).toContain('id="practice-schedule-form"');
+    expect(html).toContain('id="practice-schedule-rows"');
+    expect(html).toContain('id="practice-schedule-list"');
+    expect(html).toContain('id="practice-schedule-edit-dialog"');
+    expect(html).toContain("fetch('/api/practice/schedules'");
+    expect(html).toContain("method: 'POST'");
+    expect(html).toContain("method: 'PATCH'");
+    expect(html).toContain("method: 'DELETE'");
+    expect(html).toContain("Discordの同月カレンダーも自動的に更新されます。");
+    expect(html).toContain("practice-schedule-card-note");
+    expect(html).toContain("const defaultStart = practiceScheduleSettings[timeBand + 'StartTime']");
+    expect(html).toContain("function practiceScheduleVenueField()");
+    expect(html).toContain("practiceScheduleSettings.venues.forEach((venue)");
+    expect(html).toContain("input.value = practiceScheduleSettings.defaultVenue");
+    expect(html).toContain("'practice-venue-preset-toggle', '▼'");
+    expect(html).toContain("input.value = venue.name");
+    expect(html).toContain("fetch('/api/settings/practice-schedules')");
+    expect(html).toContain('data-page="practice"');
+  });
+
+  it("registers practice schedules through the authenticated admin API", async () => {
+    type Statement = { sql: string; values: unknown[] };
+    const batched: Statement[] = [];
+    const adminDb = {
+      prepare(sql: string) {
+        return {
+          bind: (...values: unknown[]) => ({ sql, values }),
+          all: vi.fn().mockResolvedValue({ results: [] }),
+        };
+      },
+      async batch(statements: Statement[]) {
+        batched.push(...statements);
+        return statements.map(() => ({ success: true }));
+      },
+    };
+    const response = await handleAdminRequest(
+      new Request("https://admin.example.com/api/practice/schedules", {
+        method: "POST",
+        headers: {
+          Origin: "https://admin.example.com",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          schedules: [{ practiceDate: "2026-11-01", title: "通常練習" }],
+        }),
+      }),
+      { ...env, DB: adminDb as unknown as D1Database },
+      authenticatedContext(),
+    );
+
+    expect(response.status).toBe(201);
+    expect(batched).toHaveLength(2);
+    expect(batched[0].sql).toContain("created_by_admin_identity");
+    expect(batched[0].values).toContain("admin@example.com");
+    await expect(response.json()).resolves.toMatchObject({ schedules: [] });
+  });
+
+  it("edits practice schedules through the practice administrator API", async () => {
+    const prepared: string[] = [];
+    const run = vi.fn().mockResolvedValue({ meta: { changes: 1 } });
+    const all = vi.fn().mockResolvedValue({ results: [] });
+    const adminDb = {
+      prepare(sql: string) {
+        prepared.push(sql);
+        return {
+          bind: (..._values: unknown[]) => sql.includes("SELECT practice_date")
+            ? { first: vi.fn().mockResolvedValue({ practice_date: "2026-11-01" }) }
+            : { run, all, sql },
+          all,
+        };
+      },
+      async batch(statements: Array<{ sql?: string }>) {
+        return statements.map((_, index) => ({ meta: { changes: index === 0 ? 1 : 0 } }));
+      },
+    };
+    const response = await handleAdminRequest(
+      new Request("https://admin.example.com/api/practice/schedules/PS-11111111-1111-4111-8111-111111111111", {
+        method: "PATCH",
+        headers: {
+          Origin: "https://admin.example.com",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          practiceDate: "2026-11-03",
+          startTime: "18:00",
+          endTime: "21:30",
+          title: "変更後の練習",
+          location: "大久保東公民館",
+          note: "変更あり",
+        }),
+      }),
+      { ...env, DB: adminDb as unknown as D1Database },
+      authenticatedContext(),
+    );
+
+    expect(response.status).toBe(200);
+    expect(prepared.some((sql) => sql.includes("SET practice_date = ?"))).toBe(true);
+    await expect(response.json()).resolves.toMatchObject({ schedules: [] });
+  });
+
+  it("cancels a practice schedule through the practice administrator API", async () => {
+    const prepared: string[] = [];
+    const all = vi.fn().mockResolvedValue({ results: [] });
+    const adminDb = {
+      prepare(sql: string) {
+        prepared.push(sql);
+        return {
+          bind: (..._values: unknown[]) => sql.includes("SELECT practice_date")
+            ? { first: vi.fn().mockResolvedValue({ practice_date: "2026-11-03" }) }
+            : { sql },
+          all,
+        };
+      },
+      async batch(statements: Array<{ sql?: string }>) {
+        return statements.map(() => ({ meta: { changes: 1 } }));
+      },
+    };
+    const response = await handleAdminRequest(
+      new Request("https://admin.example.com/api/practice/schedules/PS-11111111-1111-4111-8111-111111111111", {
+        method: "DELETE",
+        headers: { Origin: "https://admin.example.com" },
+      }),
+      { ...env, DB: adminDb as unknown as D1Database },
+      authenticatedContext(),
+    );
+
+    expect(response.status).toBe(200);
+    expect(prepared.some((sql) => sql.includes("status = 'canceled'"))).toBe(true);
+    await expect(response.json()).resolves.toMatchObject({ schedules: [] });
   });
 
   it("renders a simple TODO page with one-tap completion actions", async () => {
@@ -519,7 +682,7 @@ describe("Admin Worker", () => {
     expect(html).toContain("--control-padding-block: 8px;");
     expect(html).toContain("--control-padding-inline: 10px;");
     expect(html).toContain("padding: var(--control-padding-block) var(--control-padding-inline)");
-    expect(html).toContain("body { margin: 0; font-size: var(--font-size-body);");
+    expect(html).toContain("body { margin: 0; color: var(--site-ink); background: var(--site-background); font-size: var(--font-size-body);");
     expect(html).toContain("button, .todo-link { min-height: 44px;");
     expect(html).toContain(".card-title-actions h3 { min-width: 0; font-size: var(--font-size-page);");
     expect(html).toContain(".entry-management { min-width: 0; max-width: 100%; margin: 5px 0 0;");

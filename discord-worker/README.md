@@ -40,12 +40,14 @@
 
 ## Worker構成
 
-役割と認証境界を分けるため、同じソースから4つのWorkerを配備します。
+役割と認証境界を分けるため、同じソースから複数のWorkerを配備します。
 
 - `sukc-tournament-discord-bot`: Discord Interaction受信用。Discord署名を検証し、BotのSecretを保持する
 - `sukc-tournament-admin`: 大会登録画面。移行中はCloudflare Accessを併用し、最終的にDiscord大会管理者ロールで保護する。BotのSecretは保持しない
 - `sukc-tournament-portal`: 承認済みメンバー用。Discord OAuthで本人確認し、大会閲覧・PDF閲覧・Web回答を提供する
 - `sukc-tournament-backup`: 毎日3:00（日本時間）にD1と未退避のR2 PDFをGoogle Driveへ保存する
+- `sukc-practice-recorder-bot`: 「かるた練習帖」。練習の札組・対戦組み合わせをDiscordへ投稿する
+- `sukc-general-man-bot`: 「いろいろBOT」。投票・日程調整・あみだくじなどの汎用機能を担当する
 
 管理画面で保存した大会はD1へ入り、Discord WorkerのCronが1分以内を目安に取得して告知とDMを送ります。管理画面WorkerへBotトークンを複製しない構成です。
 
@@ -90,6 +92,25 @@ Google OAuthはサークル用Googleアカウントで、最小権限の
 npx wrangler secret put DISCORD_APPLICATION_ID --config wrangler.portal.jsonc
 npx wrangler secret put DISCORD_CLIENT_SECRET --config wrangler.portal.jsonc
 npx wrangler secret put SESSION_SECRET --config wrangler.portal.jsonc
+```
+
+かるた練習帖には、新しく作成したDiscord ApplicationのSecretを登録します。
+大会Botとはトークン・公開鍵を共有しません。
+
+```sh
+npx wrangler secret put DISCORD_PUBLIC_KEY --config wrangler.practice.jsonc
+npx wrangler secret put DISCORD_BOT_TOKEN --config wrangler.practice.jsonc
+npx wrangler secret put DISCORD_APPLICATION_ID --config wrangler.practice.jsonc
+npx wrangler secret put DISCORD_GUILD_ID --config wrangler.practice.jsonc
+```
+
+いろいろBOTにも専用Discord ApplicationのSecretを登録します。ほかのBotとは共有しません。
+
+```sh
+npx wrangler secret put DISCORD_PUBLIC_KEY --config wrangler.general.jsonc
+npx wrangler secret put DISCORD_BOT_TOKEN --config wrangler.general.jsonc
+npx wrangler secret put DISCORD_APPLICATION_ID --config wrangler.general.jsonc
+npx wrangler secret put DISCORD_GUILD_ID --config wrangler.general.jsonc
 ```
 
 大会管理画面のDiscord認証にも同じ3種類のSecretを登録します。Botトークンは登録しません。
@@ -166,6 +187,8 @@ npm run deploy:backup:development
 npm run deploy:development
 npm run deploy:admin:development
 npm run deploy:portal:development
+npm run deploy:practice:development
+npm run deploy:general:development
 ```
 
 ## 開発コマンド
@@ -178,6 +201,8 @@ npm run dev
 npm run dev:admin
 npm run dev:portal
 npm run dev:backup
+npm run dev:practice
+npm run dev:general
 ```
 
 ## D1マイグレーション
@@ -199,6 +224,62 @@ npm run deploy
 npm run deploy:admin
 npm run deploy:portal
 npm run deploy:backup
+npm run deploy:practice
+npm run deploy:general
+```
+
+## かるた練習帖
+
+メンバーポータルの「練習」では、練習日、参加メンバー、組み合わせ方式、
+使用札を登録できます。組み合わせを生成するとD1の通知キューへ入り、
+かるた練習帖が設定済みDiscordチャンネルへ1分以内を目安に投稿します。
+
+Discord Developer Portalでは新しいApplicationを作成し、Interactions Endpointを
+次のWorkerへ設定します。
+
+```text
+https://sukc-practice-recorder-bot.saitama-univ-karuta-club.workers.dev/interactions
+```
+
+Botの導入時は `bot` と `applications.commands` スコープを使用し、
+チャンネル閲覧、メッセージ送信、埋め込みリンク、履歴閲覧だけを許可します。
+Administrator権限は不要です。導入後、投稿先チャンネルで `/practice-setup` を実行します。
+練習日程チャンネルでは `/practice-schedule-setup`、運営管理ポータルの練習担当ロールは
+`/practice-role-setup role:@練習担当` で設定します。設定後は管理画面へ再ログインしてください。
+
+開発サーバーへコマンドを登録する場合は、かるた練習帖の値を指定します。
+
+```sh
+DISCORD_APPLICATION_ID=... \
+DISCORD_GUILD_ID=... \
+DISCORD_BOT_TOKEN=... \
+npm run register:practice-commands
+```
+
+## いろいろBOT
+
+大会お知らせくん、かるた練習帖から独立した汎用Botです。最初の機能として、
+Discord内で完結するあみだくじを提供します。
+
+- `/amida`: タイトル、参加者、行き先をモーダルへ入力し、あみだ画像と対応結果をチャンネルへ公開
+- 参加者と行き先は1行に1件、同数で2〜12件
+- 抽選結果はランダムな並べ替えから実際にたどれる横線列を生成
+- メンション文字列が含まれていても、結果投稿では通知を発生させない
+
+Discord Developer PortalのInteractions Endpointには次を設定します。
+
+```text
+https://sukc-general-man-bot.saitama-univ-karuta-club.workers.dev/interactions
+```
+
+開発環境は `--env development` で別Workerへ配備します。開発サーバーへコマンドを
+手動登録する場合は、いろいろBOTの値を指定します。
+
+```sh
+DISCORD_APPLICATION_ID=... \
+DISCORD_GUILD_ID=1561041857952223352 \
+DISCORD_BOT_TOKEN=... \
+npm run register:general-commands
 ```
 
 ## Google Driveバックアップ
@@ -217,7 +298,12 @@ Google Driveへのファイル作成には再開可能アップロードを使�
 `GET /health` ではSecretの値を公開せず、設定済みかどうかと直近の実行結果だけを返します。
 `POST /run` は `Authorization: Bearer <BACKUP_TRIGGER_SECRET>` を要求し、手動バックアップを開始します。
 
-`sukc-tournament-admin` は、D1の `discord_settings.admin_role_id` に登録したDiscordロールを持つ本番サーバーのメンバーだけを許可します。OAuth移行の検証が終わるまではCloudflare Accessも併用でき、既存管理者は従来のメール認証でも操作できます。Discord認証を本番利用する際は、Developer Portalへ管理画面用Redirect URLを追加し、上記Secretと大会管理者ロールIDを設定してからCloudflare Accessを解除します。
+`sukc-tournament-admin` は、D1の `discord_settings.admin_role_id`（大会担当）または
+`practice_role_id`（練習担当）に登録したDiscordロールを持つサーバーメンバーだけを許可します。
+大会担当には大会管理と設定、練習担当には練習管理を表示し、両方のロールを持つ場合は両方を表示します。
+メンバー管理はどちらの担当者にも表示します。OAuth移行の検証が終わるまではCloudflare Accessも併用でき、
+既存管理者は従来のメール認証でも操作できます。Discord認証を本番利用する際は、Developer Portalへ
+管理画面用Redirect URLを追加し、上記Secretと担当者ロールIDを設定してからCloudflare Accessを解除します。
 
 ## 通知キュー
 

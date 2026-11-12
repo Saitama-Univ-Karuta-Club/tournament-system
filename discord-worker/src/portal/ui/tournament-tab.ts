@@ -1,11 +1,14 @@
-export const tournamentTabHtml = `
-<section class="panel" id="info-panel" role="tabpanel" aria-labelledby="info-tab" hidden>
-  <nav class="subtabs" role="tablist" aria-label="大会情報の表示切替">
-    <button class="subtab" id="tournaments-view-tab" role="tab" aria-selected="true" aria-controls="tournaments-panel" data-view="tournaments">開催予定</button>
+export function tournamentTabHtml(answerTabHtml: string): string {
+  return `
+<section class="panel" id="info-panel" role="tabpanel" aria-labelledby="info-tab">
+  <nav class="subtabs" role="tablist" aria-label="大会関連の表示切替">
+    <button class="subtab" id="answer-view-tab" role="tab" aria-selected="true" aria-controls="answer-panel" data-view="answer">参加回答</button>
+    <button class="subtab" id="tournaments-view-tab" role="tab" aria-selected="false" aria-controls="tournaments-panel" data-view="tournaments">開催予定</button>
     <button class="subtab" id="documents-view-tab" role="tab" aria-selected="false" aria-controls="documents-panel" data-view="documents">大会案内一覧</button>
     <button class="subtab" id="archive-view-tab" role="tab" aria-selected="false" aria-controls="archive-panel" data-view="archive">過去の結果</button>
   </nav>
-  <section class="info-view" id="tournaments-panel" role="tabpanel" aria-labelledby="tournaments-view-tab">
+  ${answerTabHtml}
+  <section class="info-view" id="tournaments-panel" role="tabpanel" aria-labelledby="tournaments-view-tab" hidden>
     <div class="toolbar"><div class="filters"><label>表示<select id="status-filter"><option value="current">すべての進行中</option><option value="registration_open">回答受付中</option><option value="application_pending">申込対応中</option><option value="application_complete">申込完了</option><option value="pre_lottery">抽選前</option><option value="confirmed">参加者確定</option></select></label><label>並び順<select id="sort"><option value="deadline">締切が近い順</option><option value="event">開催日が近い順</option><option value="created">登録が新しい順</option></select></label></div></div>
     <div class="list" id="tournament-list"></div>
   </section>
@@ -15,6 +18,7 @@ export const tournamentTabHtml = `
   </section>
   <section class="info-view" id="archive-panel" role="tabpanel" aria-labelledby="archive-view-tab" hidden><div class="list" id="archive-list"></div></section>
 </section>`;
+}
 
 export const tournamentTabScript = String.raw`
 function groupRows(rows){const groups=new Map();for(const row of rows){const key=row.registration_group_id||row.tournament_id;const current=groups.get(key)||[];current.push(row);groups.set(key,current)}return [...groups.values()]}

@@ -3,6 +3,7 @@ import {
   decideMemberRegistration,
   listAdminMemberAppearances,
   MemberAdminError,
+  updateAdminMembers,
 } from "../src/admin-members";
 
 function decisionEnvironment(requestRow: Record<string, unknown>) {
@@ -253,6 +254,45 @@ describe("member registration decisions", () => {
         "admin@example.com",
       ),
     ).rejects.toBeInstanceOf(MemberAdminError);
+    expect(batch).not.toHaveBeenCalled();
+  });
+});
+
+describe("member bulk updates", () => {
+  it("validates every member before writing all changes in one batch", async () => {
+    const firstId = "M-11111111-1111-4111-8111-111111111111";
+    const secondId = "M-22222222-2222-4222-8222-222222222222";
+    const rows = new Map([
+      [firstId, { member_id:firstId,last_name:"石田",first_name:"洋音",last_name_kana:"いしだ",first_name_kana:"ひろね",display_name:"石田洋音",display_name_kana:"いしだひろね",grade:"C",rank:2,status:"active",dm_enabled:1,discord_user_id:"1",created_at:"2026-01-01",updated_at:"2026-01-01" }],
+      [secondId, { member_id:secondId,last_name:"山田",first_name:"花",last_name_kana:"やまだ",first_name_kana:"はな",display_name:"山田花",display_name_kana:"やまだはな",grade:"B",rank:3,status:"active",dm_enabled:1,discord_user_id:"2",created_at:"2026-01-01",updated_at:"2026-01-01" }],
+    ]);
+    const prepare = vi.fn((sql: string) => ({
+      bind: vi.fn((...args: unknown[]) => ({
+        first: vi.fn().mockResolvedValue(sql.includes("FROM members WHERE") ? rows.get(String(args[0])) : null),
+      })),
+    }));
+    const batch = vi.fn().mockResolvedValue([]);
+    const members = await updateAdminMembers(
+      { DB: { prepare, batch } as unknown as D1Database },
+      [
+        { memberId:firstId,input:{lastName:"石田",firstName:"洋音",lastNameKana:"いしだ",firstNameKana:"ひろね",grade:"B",rank:3,status:"active",dmEnabled:true} },
+        { memberId:secondId,input:{lastName:"山田",firstName:"花子",lastNameKana:"やまだ",firstNameKana:"はなこ",grade:"B",rank:3,status:"active",dmEnabled:false} },
+      ],
+      "admin@example.com",
+    );
+    expect(members).toHaveLength(2);
+    expect(batch).toHaveBeenCalledOnce();
+    expect(batch.mock.calls[0][0]).toHaveLength(5);
+    expect(prepare.mock.calls.filter(([sql]) => String(sql).includes("FROM members WHERE"))).toHaveLength(2);
+  });
+
+  it("does not write anything when one member is invalid", async () => {
+    const batch = vi.fn();
+    await expect(updateAdminMembers(
+      { DB: { prepare: vi.fn(), batch } as unknown as D1Database },
+      [{ memberId:"invalid",input:{lastName:"",firstName:"",lastNameKana:"",firstNameKana:"",grade:"C",rank:1,status:"active",dmEnabled:true} }],
+      "admin@example.com",
+    )).rejects.toMatchObject({ memberId: "invalid" });
     expect(batch).not.toHaveBeenCalled();
   });
 });

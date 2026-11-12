@@ -7,12 +7,19 @@ import {
 import { handleAdminRequest, type AdminEnv } from "../src/admin";
 
 const ADMIN_ROLE_ID = "1562000000000000000";
+const PRACTICE_ROLE_ID = "1562000000000000003";
 const DISCORD_USER_ID = "1562000000000000001";
 
-function adminEnv(roleId: string | null = ADMIN_ROLE_ID): AdminAuthEnv {
+function adminEnv(
+  roleId: string | null = ADMIN_ROLE_ID,
+  practiceRoleId: string | null = null,
+): AdminAuthEnv {
   const prepare = vi.fn(() => ({
     bind: vi.fn(() => ({
-      first: vi.fn().mockResolvedValue({ admin_role_id: roleId }),
+      first: vi.fn().mockResolvedValue({
+        admin_role_id: roleId,
+        practice_role_id: practiceRoleId,
+      }),
     })),
   }));
   return {
@@ -113,6 +120,7 @@ describe("Discord administrator authentication", () => {
       displayName: "大会係",
       discordUserId: DISCORD_USER_ID,
       auditIdentity: `discord:${DISCORD_USER_ID}`,
+      permissions: ["tournament"],
     });
 
     const sessionResponse = await handleAdminRequest(
@@ -127,15 +135,106 @@ describe("Discord administrator authentication", () => {
       email: "大会係",
       displayName: "大会係",
       provider: "discord",
+      permissions: ["tournament"],
     });
   });
 
-  it("rejects a server member without the tournament administrator role", async () => {
+  it("creates a practice-only session and limits pages and APIs", async () => {
+    const env = adminEnv(ADMIN_ROLE_ID, PRACTICE_ROLE_ID);
+    mockDiscord([PRACTICE_ROLE_ID]);
+    const callback = await handleAdminAuthRequest(callbackRequest("/practice"), env);
+    const sessionCookie = firstSetCookie(callback!, "__Host-sukc_admin_session");
+
+    await expect(readAdminDiscordPrincipal(
+      new Request("https://admin.example.com/", { headers: { Cookie: sessionCookie } }),
+      env,
+    )).resolves.toMatchObject({ permissions: ["practice"] });
+
+    const practicePage = await handleAdminRequest(
+      new Request("https://admin.example.com/practice", { headers: { Cookie: sessionCookie } }),
+      env as AdminEnv,
+      { waitUntil: vi.fn() },
+    );
+    expect(practicePage.status).toBe(200);
+    const html = await practicePage.text();
+    const tabs = html.match(/<nav class="tabs"[\s\S]*?<\/nav>/)?.[0] ?? "";
+    expect(tabs).toContain('href="/practice"');
+    expect(tabs).not.toContain('href="/register"');
+    expect(tabs).toContain('href="/settings"');
+
+    const settingsPage = await handleAdminRequest(
+      new Request("https://admin.example.com/settings", { headers: { Cookie: sessionCookie } }),
+      env as AdminEnv,
+      { waitUntil: vi.fn() },
+    );
+    expect(settingsPage.status).toBe(200);
+    const settingsHtml = await settingsPage.text();
+    expect(settingsHtml).toContain('data-settings-view="design"');
+    expect(settingsHtml).toContain('data-can-manage-tournaments="false"');
+
+    const tournamentPage = await handleAdminRequest(
+      new Request("https://admin.example.com/tournaments", { headers: { Cookie: sessionCookie } }),
+      env as AdminEnv,
+      { waitUntil: vi.fn() },
+    );
+    expect(tournamentPage.status).toBe(302);
+    expect(tournamentPage.headers.get("Location")).toBe("/practice");
+
+    const tournamentApi = await handleAdminRequest(
+      new Request("https://admin.example.com/api/tournaments", { headers: { Cookie: sessionCookie } }),
+      env as AdminEnv,
+      { waitUntil: vi.fn() },
+    );
+    expect(tournamentApi.status).toBe(403);
+  });
+
+  it("creates a session with both permissions for a member with both roles", async () => {
+    const env = adminEnv(ADMIN_ROLE_ID, PRACTICE_ROLE_ID);
+    mockDiscord([ADMIN_ROLE_ID, PRACTICE_ROLE_ID]);
+    const callback = await handleAdminAuthRequest(callbackRequest(), env);
+    const sessionCookie = firstSetCookie(callback!, "__Host-sukc_admin_session");
+
+    await expect(readAdminDiscordPrincipal(
+      new Request("https://admin.example.com/", { headers: { Cookie: sessionCookie } }),
+      env,
+    )).resolves.toMatchObject({ permissions: ["tournament", "practice"] });
+  });
+
+  it("hides practice management and blocks its API for tournament-only users", async () => {
+    const env = adminEnv(ADMIN_ROLE_ID, PRACTICE_ROLE_ID);
+    mockDiscord([ADMIN_ROLE_ID]);
+    const callback = await handleAdminAuthRequest(callbackRequest(), env);
+    const sessionCookie = firstSetCookie(callback!, "__Host-sukc_admin_session");
+
+    const tournamentPage = await handleAdminRequest(
+      new Request("https://admin.example.com/register", { headers: { Cookie: sessionCookie } }),
+      env as AdminEnv,
+      { waitUntil: vi.fn() },
+    );
+    const html = await tournamentPage.text();
+    const tabs = html.match(/<nav class="tabs"[\s\S]*?<\/nav>/)?.[0] ?? "";
+    expect(tabs).toContain('href="/register"');
+    expect(tabs).not.toContain('href="/practice"');
+
+    const practiceApi = await handleAdminRequest(
+      new Request("https://admin.example.com/api/practice/schedules", {
+        headers: { Cookie: sessionCookie },
+      }),
+      env as AdminEnv,
+      { waitUntil: vi.fn() },
+    );
+    expect(practiceApi.status).toBe(403);
+  });
+
+  it("rejects a server member without either administrator role", async () => {
     mockDiscord(["1562000000000000999"]);
-    const response = await handleAdminAuthRequest(callbackRequest(), adminEnv());
+    const response = await handleAdminAuthRequest(
+      callbackRequest(),
+      adminEnv(ADMIN_ROLE_ID, PRACTICE_ROLE_ID),
+    );
 
     expect(response!.status).toBe(403);
-    expect(await response!.text()).toContain("大会担当者権限がありません");
+    expect(await response!.text()).toContain("担当者権限がありません");
     expect(response!.headers.get("Set-Cookie") ?? "").not.toContain(
       "__Host-sukc_admin_session",
     );
@@ -143,9 +242,9 @@ describe("Discord administrator authentication", () => {
 
   it("refuses login until an administrator role ID is configured", async () => {
     mockDiscord([ADMIN_ROLE_ID]);
-    const response = await handleAdminAuthRequest(callbackRequest(), adminEnv(null));
+    const response = await handleAdminAuthRequest(callbackRequest(), adminEnv(null, null));
 
     expect(response!.status).toBe(503);
-    expect(await response!.text()).toContain("大会担当者ロールが未設定です");
+    expect(await response!.text()).toContain("担当者ロールが未設定です");
   });
 });
