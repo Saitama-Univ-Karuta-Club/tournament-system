@@ -52,6 +52,7 @@ interface GeneralInteraction {
   channel_id?: string;
   member?: {
     nick?: string | null;
+    roles?: string[];
     user?: {
       id?: string;
       username?: string;
@@ -696,6 +697,80 @@ export async function handleGeneralBotRequest(
     if (!interaction.guild_id || interaction.guild_id !== env.DISCORD_GUILD_ID) {
       return ephemeral("サーバー内で実行してください。");
     }
+    let roleSettings: { admin_role_id: string | null; practice_role_id: string | null } | null = null;
+    try {
+      roleSettings = await env.DB.prepare(
+        `SELECT admin_role_id, practice_role_id
+         FROM discord_settings WHERE guild_id = ? LIMIT 1`,
+      ).bind(interaction.guild_id).first<{
+        admin_role_id: string | null;
+        practice_role_id: string | null;
+      }>();
+    } catch (error) {
+      console.error("ヘルプ用の担当者ロール確認エラー", error);
+    }
+    const memberRoles = Array.isArray(interaction.member?.roles) ? interaction.member.roles : [];
+    const isTournamentManager = Boolean(
+      roleSettings?.admin_role_id && memberRoles.includes(roleSettings.admin_role_id),
+    );
+    const isPracticeManager = Boolean(
+      roleSettings?.practice_role_id && memberRoles.includes(roleSettings.practice_role_id),
+    );
+    const managerHelpEmbeds = [
+      ...(isTournamentManager
+        ? [{
+          title: "大会担当者向けコマンド",
+          description: "大会お知らせくんの初期設定と動作確認に使用します。",
+          color: 0x5865f2,
+          fields: [
+            {
+              name: "/setup-channel",
+              value: "実行したチャンネルを大会の告知先に設定します。",
+              inline: false,
+            },
+            {
+              name: "/setup-reminder-channel",
+              value: "実行したチャンネルを担当者用の締切リマインダー送信先に設定します。",
+              inline: false,
+            },
+            {
+              name: "/test-reminder",
+              value: "担当者用チャンネルへ締切リマインダーをテスト送信します。",
+              inline: false,
+            },
+            {
+              name: "/test-tournament",
+              value: "ボタン付きDMを確認するテスト大会を作成します。",
+              inline: false,
+            },
+          ],
+        }]
+        : []),
+      ...(isPracticeManager
+        ? [{
+          title: "練習担当者向けコマンド",
+          description: "かるた練習帖の投稿先と担当者権限の設定に使用します。",
+          color: 0x4262ad,
+          fields: [
+            {
+              name: "/practice-setup",
+              value: "実行したチャンネルを組み合わせ・札組の投稿先に設定します。",
+              inline: false,
+            },
+            {
+              name: "/practice-schedule-setup",
+              value: "実行したチャンネルを練習日程・前日リマインドの投稿先に設定します。",
+              inline: false,
+            },
+            {
+              name: "/practice-role-setup",
+              value: "練習担当ロールを運営管理ポータルの権限に設定します。",
+              inline: false,
+            },
+          ],
+        }]
+        : []),
+    ];
     return json({
       type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
       data: {
@@ -752,6 +827,7 @@ export async function handleGeneralBotRequest(
               },
             ],
           },
+          ...managerHelpEmbeds,
           {
             title: "回答の変更・締め切り",
             description: "投票は同じ選択肢を再度押すと解除できます。\n日程調整は「回答する」から変更でき、投票・日程調整ともに作成者だけが締め切れます。",

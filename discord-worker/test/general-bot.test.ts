@@ -318,8 +318,70 @@ describe("general man Discord bot", () => {
     expect(helpText).toContain("/amida");
     expect(helpText).toContain("/poll");
     expect(helpText).toContain("/schedule");
+    expect(helpText).not.toContain("/setup-channel");
     expect(helpText).not.toContain("/practice-setup");
     expect(helpText).not.toContain("/test-reminder");
+  });
+
+  it.each([
+    {
+      label: "大会担当だけ",
+      roles: ["tournament-role"],
+      included: ["/setup-channel", "/test-reminder"],
+      excluded: ["/practice-setup", "/practice-role-setup"],
+    },
+    {
+      label: "練習担当だけ",
+      roles: ["practice-role"],
+      included: ["/practice-setup", "/practice-role-setup"],
+      excluded: ["/setup-channel", "/test-reminder"],
+    },
+    {
+      label: "両方の担当",
+      roles: ["tournament-role", "practice-role"],
+      included: ["/setup-channel", "/test-reminder", "/practice-setup", "/practice-role-setup"],
+      excluded: [],
+    },
+  ])("adds only the $label commands to help", async ({ roles, included, excluded }) => {
+    const roleDb = {
+      prepare: vi.fn(() => ({
+        bind: vi.fn(() => ({
+          first: vi.fn().mockResolvedValue({
+            admin_role_id: "tournament-role",
+            practice_role_id: "practice-role",
+          }),
+        })),
+      })),
+    } as unknown as D1Database;
+    const response = await handleGeneralBotRequest(
+      signedRequest({
+        type: 2,
+        guild_id: "guild-1",
+        channel_id: "channel-1",
+        member: { roles, user: { id: "user-1" } },
+        data: { name: "help" },
+      }),
+      { ...env, DB: roleDb, DISCORD_GUILD_ID: "guild-1" },
+      vi.fn().mockResolvedValue(true),
+    );
+    const payload = await response.json() as {
+      data: {
+        embeds: Array<{
+          title?: string;
+          description?: string;
+          fields?: Array<{ name: string; value: string }>;
+        }>;
+      };
+    };
+    const helpText = payload.data.embeds
+      .flatMap((embed) => [
+        embed.title ?? "",
+        embed.description ?? "",
+        ...(embed.fields ?? []).map((field) => `${field.name}\n${field.value}`),
+      ])
+      .join("\n");
+    for (const command of included) expect(helpText).toContain(command);
+    for (const command of excluded) expect(helpText).not.toContain(command);
   });
 
   it("opens a poll modal with the selected modes", async () => {
