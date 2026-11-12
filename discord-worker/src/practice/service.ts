@@ -340,46 +340,67 @@ export async function generateNextPracticeRound(
     throw new PracticeError("この練習の組み合わせを変更できるのは作成者だけです。", 403);
   }
 
-  const [participantRows, historyRows, byeRows, roundRow] = await Promise.all([
-    env.DB.prepare(
-      `SELECT practice_attendance.member_id, members.display_name,
-              practice_attendance.grade_snapshot AS grade
-       FROM practice_attendance
-       INNER JOIN members ON members.member_id = practice_attendance.member_id
-       INNER JOIN practice_sessions ON practice_sessions.session_id = practice_attendance.session_id
-       WHERE practice_attendance.session_id = ?
-         AND practice_attendance.attendance_status = 'attending'
-         AND (practice_sessions.reader_member_id IS NULL
-              OR practice_attendance.member_id <> practice_sessions.reader_member_id)`,
-    ).bind(sessionId).all<PairingParticipant & { member_id: string; display_name: string }>(),
-    env.DB.prepare(
-      `SELECT player1_member_id AS member1Id, player2_member_id AS member2Id,
-              created_at AS playedAt,
-              CAST(strftime('%s', created_at) AS INTEGER) AS sequence
-       FROM internal_practice_results
-       UNION ALL
-       SELECT player1_member_id AS member1Id, player2_member_id AS member2Id,
-              created_at AS playedAt,
-              CAST(strftime('%s', created_at) AS INTEGER) AS sequence
-       FROM practice_matches
-       WHERE player2_member_id IS NOT NULL AND status = 'completed'`,
-    ).all<PairHistory>(),
-    env.DB.prepare(
-      `SELECT player1_member_id AS memberId, created_at AS restedAt,
-              CAST(strftime('%s', created_at) AS INTEGER) AS sequence
-       FROM practice_matches
-       WHERE status = 'bye'`,
-    ).all<{ memberId: string; restedAt: string; sequence: number }>(),
-    env.DB.prepare(
-      `SELECT COALESCE(MAX(round_number), 0) AS last_round
-       FROM practice_matches WHERE session_id = ?`,
-    ).bind(sessionId).first<{ last_round: number }>(),
-  ]);
+  const participantRows = await env.DB.prepare(
+    `SELECT practice_attendance.member_id, members.display_name,
+            practice_attendance.grade_snapshot AS grade
+     FROM practice_attendance
+     INNER JOIN members ON members.member_id = practice_attendance.member_id
+     INNER JOIN practice_sessions ON practice_sessions.session_id = practice_attendance.session_id
+     WHERE practice_attendance.session_id = ?
+       AND practice_attendance.attendance_status = 'attending'
+       AND (practice_sessions.reader_member_id IS NULL
+            OR practice_attendance.member_id <> practice_sessions.reader_member_id)`,
+  ).bind(sessionId).all<PairingParticipant & { member_id: string; display_name: string }>();
   const participants: PairingParticipant[] = participantRows.results.map((row) => ({
     memberId: row.member_id,
     displayName: row.display_name,
     grade: row.grade,
   }));
+  if (participants.length < 2) {
+    throw new PracticeError("組み合わせ生成には読手以外の参加者が2人以上必要です。", 409);
+  }
+
+  const selectedMembersCte = `selected_members AS (
+    SELECT practice_attendance.member_id
+    FROM practice_attendance
+    INNER JOIN practice_sessions
+      ON practice_sessions.session_id = practice_attendance.session_id
+    WHERE practice_attendance.session_id = ?
+      AND practice_attendance.attendance_status = 'attending'
+      AND (practice_sessions.reader_member_id IS NULL
+           OR practice_attendance.member_id <> practice_sessions.reader_member_id)
+  )`;
+  const [historyRows, byeRows, roundRow] = await Promise.all([
+    env.DB.prepare(
+      `WITH ${selectedMembersCte}
+       SELECT player1_member_id AS member1Id, player2_member_id AS member2Id,
+              created_at AS playedAt,
+              CAST(strftime('%s', created_at) AS INTEGER) AS sequence
+       FROM internal_practice_results
+       WHERE player1_member_id IN (SELECT member_id FROM selected_members)
+         AND player2_member_id IN (SELECT member_id FROM selected_members)
+       UNION ALL
+       SELECT player1_member_id AS member1Id, player2_member_id AS member2Id,
+              created_at AS playedAt,
+              CAST(strftime('%s', created_at) AS INTEGER) AS sequence
+       FROM practice_matches
+       WHERE player2_member_id IS NOT NULL AND status = 'completed'
+         AND player1_member_id IN (SELECT member_id FROM selected_members)
+         AND player2_member_id IN (SELECT member_id FROM selected_members)`,
+    ).bind(sessionId).all<PairHistory>(),
+    env.DB.prepare(
+      `WITH ${selectedMembersCte}
+       SELECT player1_member_id AS memberId, created_at AS restedAt,
+              CAST(strftime('%s', created_at) AS INTEGER) AS sequence
+       FROM practice_matches
+       WHERE status = 'bye'
+         AND player1_member_id IN (SELECT member_id FROM selected_members)`,
+    ).bind(sessionId).all<{ memberId: string; restedAt: string; sequence: number }>(),
+    env.DB.prepare(
+      `SELECT COALESCE(MAX(round_number), 0) AS last_round
+       FROM practice_matches WHERE session_id = ?`,
+    ).bind(sessionId).first<{ last_round: number }>(),
+  ]);
   const roundNumber = Number(roundRow?.last_round ?? 0) + 1;
   const result = generatePracticePairings({
     participants,

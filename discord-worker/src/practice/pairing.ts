@@ -54,49 +54,88 @@ function daysBetween(left: string, right: Date): number {
   return Math.max(0, (right.getTime() - timestamp) / 86_400_000);
 }
 
+interface AggregatedHistoryCost {
+  count: number;
+  recencyCost: number;
+  latestSequence: number;
+}
+
+function aggregatePairCosts(histories: PairHistory[], now: Date): Map<string, number> {
+  const aggregates = new Map<string, AggregatedHistoryCost>();
+  let globalLatestSequence = -1;
+  for (const history of histories) {
+    const key = pairKey(history.member1Id, history.member2Id);
+    const aggregate = aggregates.get(key) ?? {
+      count: 0,
+      recencyCost: 0,
+      latestSequence: -1,
+    };
+    aggregate.count += 1;
+    const age = daysBetween(history.playedAt, now);
+    if (age <= 1) aggregate.recencyCost += 10_000;
+    else if (age <= 7) aggregate.recencyCost += 2_500;
+    else if (age <= 30) aggregate.recencyCost += 600;
+    else if (age <= 90) aggregate.recencyCost += 150;
+    const sequence = history.sequence ?? -1;
+    aggregate.latestSequence = Math.max(aggregate.latestSequence, sequence);
+    globalLatestSequence = Math.max(globalLatestSequence, sequence);
+    aggregates.set(key, aggregate);
+  }
+
+  const costs = new Map<string, number>();
+  for (const [key, aggregate] of aggregates) {
+    const latestCost = aggregate.latestSequence >= 0
+        && aggregate.latestSequence === globalLatestSequence
+      ? 20_000
+      : 0;
+    costs.set(key, aggregate.count * 500 + aggregate.recencyCost + latestCost);
+  }
+  return costs;
+}
+
+function aggregateByeCosts(histories: ByeHistory[], now: Date): Map<string, number> {
+  const aggregates = new Map<string, AggregatedHistoryCost>();
+  let globalLatestSequence = -1;
+  for (const history of histories) {
+    const aggregate = aggregates.get(history.memberId) ?? {
+      count: 0,
+      recencyCost: 0,
+      latestSequence: -1,
+    };
+    aggregate.count += 1;
+    const age = daysBetween(history.restedAt, now);
+    if (age <= 1) aggregate.recencyCost += 20_000;
+    else if (age <= 7) aggregate.recencyCost += 4_000;
+    else if (age <= 30) aggregate.recencyCost += 800;
+    const sequence = history.sequence ?? -1;
+    aggregate.latestSequence = Math.max(aggregate.latestSequence, sequence);
+    globalLatestSequence = Math.max(globalLatestSequence, sequence);
+    aggregates.set(history.memberId, aggregate);
+  }
+
+  const costs = new Map<string, number>();
+  for (const [memberId, aggregate] of aggregates) {
+    const latestCost = aggregate.latestSequence >= 0
+        && aggregate.latestSequence === globalLatestSequence
+      ? 30_000
+      : 0;
+    costs.set(memberId, aggregate.count * 2_000 + aggregate.recencyCost + latestCost);
+  }
+  return costs;
+}
+
 function pairCost(
   left: PairingParticipant,
   right: PairingParticipant,
-  histories: PairHistory[],
+  historyCosts: Map<string, number>,
   mode: PracticePairingMode,
-  now: Date,
 ): number {
   let cost = 0;
   if (mode === "near_grade") {
     const gradeDistance = Math.abs(GRADE_ORDER[left.grade] - GRADE_ORDER[right.grade]);
     cost += gradeDistance * gradeDistance * 80;
   }
-
-  const previous = histories.filter((history) =>
-    pairKey(history.member1Id, history.member2Id) === pairKey(left.memberId, right.memberId)
-  );
-  cost += previous.length * 500;
-  for (const history of previous) {
-    const age = daysBetween(history.playedAt, now);
-    if (age <= 1) cost += 10_000;
-    else if (age <= 7) cost += 2_500;
-    else if (age <= 30) cost += 600;
-    else if (age <= 90) cost += 150;
-  }
-  const latestSequence = Math.max(...previous.map((history) => history.sequence ?? -1), -1);
-  const globalLatestSequence = Math.max(...histories.map((history) => history.sequence ?? -1), -1);
-  if (latestSequence >= 0 && latestSequence === globalLatestSequence) cost += 20_000;
-  return cost;
-}
-
-function byeCost(memberId: string, histories: ByeHistory[], now: Date): number {
-  const previous = histories.filter((history) => history.memberId === memberId);
-  let cost = previous.length * 2_000;
-  for (const history of previous) {
-    const age = daysBetween(history.restedAt, now);
-    if (age <= 1) cost += 20_000;
-    else if (age <= 7) cost += 4_000;
-    else if (age <= 30) cost += 800;
-  }
-  const latestSequence = Math.max(...previous.map((history) => history.sequence ?? -1), -1);
-  const globalLatestSequence = Math.max(...histories.map((history) => history.sequence ?? -1), -1);
-  if (latestSequence >= 0 && latestSequence === globalLatestSequence) cost += 30_000;
-  return cost;
+  return cost + (historyCosts.get(pairKey(left.memberId, right.memberId)) ?? 0);
 }
 
 function improvePairs(pairs: PracticePair[], costFor: (left: PairingParticipant, right: PairingParticipant) => number): PracticePair[] {
@@ -170,13 +209,16 @@ export function generatePracticePairings(input: {
   const histories = input.pairHistory ?? [];
   const byeHistories = input.byeHistory ?? [];
   const now = input.now ?? new Date();
+  const pairHistoryCosts = aggregatePairCosts(histories, now);
+  const byeHistoryCosts = aggregateByeCosts(byeHistories, now);
   const costFor = (left: PairingParticipant, right: PairingParticipant) =>
-    pairCost(left, right, histories, input.mode, now);
+    pairCost(left, right, pairHistoryCosts, input.mode);
+  const byeCostFor = (memberId: string) => byeHistoryCosts.get(memberId) ?? 0;
   const random = seededRandom(input.seed);
   const byeCandidates = input.participants.length % 2 === 0
     ? [null]
     : [...input.participants].sort((left, right) =>
-      byeCost(left.memberId, byeHistories, now) - byeCost(right.memberId, byeHistories, now)
+      byeCostFor(left.memberId) - byeCostFor(right.memberId)
       || left.memberId.localeCompare(right.memberId)
     );
   let best: PairingResult | null = null;
@@ -189,7 +231,7 @@ export function generatePracticePairings(input: {
     for (let iteration = 0; iteration < iterations; iteration += 1) {
       const pairs = candidateMatching(available, costFor, random);
       const totalCost = pairs.reduce((sum, pair) => sum + pair.cost, 0)
-        + (bye ? byeCost(bye.memberId, byeHistories, now) : 0);
+        + (bye ? byeCostFor(bye.memberId) : 0);
       if (!best || totalCost < best.totalCost) best = { pairs, bye, totalCost };
     }
   }

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   createPracticeSession,
+  generateNextPracticeRound,
   loadMemberMatchRecords,
   PracticeError,
   saveExternalPracticeMatch,
@@ -118,6 +119,83 @@ describe("practice creation with a reader", () => {
       message: "読手は参加メンバーから選択してください。",
       status: 400,
     }));
+  });
+});
+
+describe("practice pairing history selection", () => {
+  it("loads histories only for the current attending players", async () => {
+    const prepared: Array<{ sql: string; values: unknown[] }> = [];
+    type BoundStatement = {
+      sql: string;
+      values: unknown[];
+      all: () => Promise<{ results: unknown[] }>;
+      first: () => Promise<unknown>;
+    };
+    const db = {
+      prepare(sql: string) {
+        return {
+          bind(...values: unknown[]): BoundStatement {
+            const statement = {
+              sql,
+              values,
+              async all() {
+                if (sql.includes("FROM practice_attendance") && sql.includes("members.display_name")) {
+                  return {
+                    results: [
+                      { member_id: memberId, display_name: "参加者", grade: "C" },
+                      { member_id: opponentId, display_name: "対戦相手", grade: "B" },
+                    ],
+                  };
+                }
+                return { results: [] };
+              },
+              async first() {
+                if (sql.includes("SELECT session_id, pairing_mode")) {
+                  return {
+                    session_id: sessionId,
+                    pairing_mode: "near_grade",
+                    created_by_member_id: memberId,
+                  };
+                }
+                if (sql.includes("MAX(round_number)")) return { last_round: 0 };
+                return null;
+              },
+            };
+            prepared.push({ sql, values });
+            return statement;
+          },
+        };
+      },
+      async batch(statements: BoundStatement[]) {
+        return statements.map(() => ({ success: true }));
+      },
+    };
+
+    const result = await generateNextPracticeRound(
+      { DB: db as unknown as D1Database },
+      sessionId,
+      memberId,
+    );
+
+    expect(result.pairs).toHaveLength(1);
+    const historyQuery = prepared.find(({ sql }) =>
+      sql.includes("FROM internal_practice_results")
+    );
+    expect(historyQuery?.sql).toContain("WITH selected_members AS");
+    expect(historyQuery?.sql).toContain(
+      "player1_member_id IN (SELECT member_id FROM selected_members)",
+    );
+    expect(historyQuery?.sql).toContain(
+      "player2_member_id IN (SELECT member_id FROM selected_members)",
+    );
+    expect(historyQuery?.values).toEqual([sessionId]);
+    const byeQuery = prepared.find(({ sql }) =>
+      sql.includes("WHERE status = 'bye'")
+    );
+    expect(byeQuery?.sql).toContain(
+      "player1_member_id IN (SELECT member_id FROM selected_members)",
+    );
+    expect(byeQuery?.values).toEqual([sessionId]);
   });
 });
 
