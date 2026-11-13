@@ -17,6 +17,7 @@ import {
   type MatchSource,
   type MemberMatchRecord,
 } from "./statistics";
+import { normalizeGuestName } from "./guests";
 
 export interface PracticeEnv {
   DB: D1Database;
@@ -53,6 +54,7 @@ interface AttendanceRow extends MemberRow {
 
 interface GuestRow {
   guest_id: string;
+  guest_profile_id: string;
   session_id: string;
   display_name: string;
   grade_snapshot: PracticeGrade;
@@ -118,6 +120,7 @@ const PRACTICE_ID = /^P-[0-9a-f-]{36}$/;
 const MATCH_ID = /^PM-[0-9a-f-]{36}$/;
 const MEMBER_ID = /^M-[0-9a-f-]{36}$/;
 const SCHEDULE_ID = /^PS-[0-9a-f-]{36}$/;
+const GUEST_PROFILE_ID = /^GP-[0-9a-f-]{36}$/;
 const GRADES = new Set<PracticeGrade>(["A", "B", "C", "D", "E", "F", "beginner"]);
 
 export class PracticeError extends Error {
@@ -217,6 +220,7 @@ function sessionView(
     })),
     guests: guests.filter((guest) => guest.session_id === row.session_id).map((guest) => ({
       member_id: guest.guest_id,
+      guest_profile_id: guest.guest_profile_id,
       display_name: guest.display_name,
       display_name_kana: "",
       grade: guest.grade_snapshot,
@@ -267,7 +271,8 @@ export async function listPracticeSessions(env: PracticeEnv): Promise<unknown[]>
        ORDER BY members.display_name_kana, members.display_name`,
     ).all<AttendanceRow>(),
     env.DB.prepare(
-      `SELECT practice_guests.guest_id, practice_guests.session_id,
+      `SELECT practice_guests.guest_id, practice_guests.guest_profile_id,
+              practice_guests.session_id,
               practice_guests.display_name, practice_guests.grade_snapshot
        FROM practice_guests
        INNER JOIN practice_sessions ON practice_sessions.session_id = practice_guests.session_id
@@ -324,16 +329,30 @@ export async function createPracticeSession(
       throw new PracticeError(`ゲスト${index + 1}人目の情報を確認してください。`);
     }
     const guest = raw as Record<string, unknown>;
-    const displayName = validateText(guest.displayName, `ゲスト${index + 1}人目の名前`, 50)!;
+    const guestProfileId = guest.guestProfileId ? String(guest.guestProfileId) : null;
+    if (guestProfileId && !GUEST_PROFILE_ID.test(guestProfileId)) {
+      throw new PracticeError(`ゲスト${index + 1}人目の登録情報を確認できませんでした。`);
+    }
+    const displayName = guestProfileId
+      ? null
+      : validateText(guest.displayName, `ゲスト${index + 1}人目の名前`, 50)!;
     if (!isGrade(guest.grade)) {
       throw new PracticeError(`ゲスト${index + 1}人目の級を選択してください。`);
     }
     return {
       guestId: `G-${crypto.randomUUID()}`,
+      guestProfileId: guestProfileId ?? `GP-${crypto.randomUUID()}`,
       displayName,
       grade: guest.grade,
+      isNewProfile: !guestProfileId,
     };
   });
+  const selectedGuestProfileIds = guests
+    .filter((guest) => !guest.isNewProfile)
+    .map((guest) => guest.guestProfileId);
+  if (new Set(selectedGuestProfileIds).size !== selectedGuestProfileIds.length) {
+    throw new PracticeError("同じゲストが複数回選択されています。");
+  }
   if (memberIds.length + guests.length < 2) {
     throw new PracticeError("会員とゲストを合わせて2人以上選択してください。");
   }
@@ -367,6 +386,27 @@ export async function createPracticeSession(
   if (members.results.length !== memberIds.length) {
     throw new PracticeError("無効なメンバーが含まれています。", 409);
   }
+  const existingGuestProfiles = selectedGuestProfileIds.length
+    ? await env.DB.prepare(
+      `SELECT practice_guest_profiles.guest_profile_id,
+              practice_guest_profiles.display_name
+       FROM practice_guest_profiles
+       LEFT JOIN practice_guest_member_links
+         ON practice_guest_member_links.guest_profile_id = practice_guest_profiles.guest_profile_id
+       WHERE practice_guest_profiles.status = 'active'
+         AND practice_guest_member_links.guest_profile_id IS NULL
+         AND practice_guest_profiles.guest_profile_id IN (${placeholders(selectedGuestProfileIds.length)})`,
+    ).bind(...selectedGuestProfileIds).all<{ guest_profile_id: string; display_name: string }>()
+    : { results: [] as Array<{ guest_profile_id: string; display_name: string }> };
+  if (existingGuestProfiles.results.length !== selectedGuestProfileIds.length) {
+    throw new PracticeError("選択したゲストは現在利用できません。再読み込みしてください。", 409);
+  }
+  const existingGuestNames = new Map(
+    existingGuestProfiles.results.map((profile) => [profile.guest_profile_id, profile.display_name]),
+  );
+  for (const guest of guests) {
+    if (!guest.isNewProfile) guest.displayName = existingGuestNames.get(guest.guestProfileId) ?? null;
+  }
 
   const sessionId = `P-${crypto.randomUUID()}`;
   const selection = drawCardSelection(input.cardScheme, sessionId);
@@ -392,10 +432,32 @@ export async function createPracticeSession(
       `INSERT INTO practice_attendance (session_id, member_id, grade_snapshot)
        VALUES (?, ?, ?)`,
     ).bind(sessionId, member.member_id, member.grade)),
+    ...guests.filter((guest) => guest.isNewProfile).map((guest) => env.DB.prepare(
+      `INSERT INTO practice_guest_profiles (
+         guest_profile_id, display_name, normalized_name, last_used_at
+       ) VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`,
+    ).bind(
+      guest.guestProfileId,
+      guest.displayName,
+      normalizeGuestName(guest.displayName ?? ""),
+    )),
+    ...guests.filter((guest) => !guest.isNewProfile).map((guest) => env.DB.prepare(
+      `UPDATE practice_guest_profiles
+       SET last_used_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+       WHERE guest_profile_id = ?`,
+    ).bind(guest.guestProfileId)),
     ...guests.map((guest) => env.DB.prepare(
-      `INSERT INTO practice_guests (guest_id, session_id, display_name, grade_snapshot)
-       VALUES (?, ?, ?, ?)`,
-    ).bind(guest.guestId, sessionId, guest.displayName, guest.grade)),
+      `INSERT INTO practice_guests (
+         guest_id, guest_profile_id, session_id, display_name, grade_snapshot
+       ) VALUES (?, ?, ?, ?, ?)`,
+    ).bind(
+      guest.guestId,
+      guest.guestProfileId,
+      sessionId,
+      guest.displayName,
+      guest.grade,
+    )),
   ]);
   return { sessionId };
 }
@@ -805,19 +867,36 @@ export async function loadMemberMatchRecords(
           OR ? = internal_practice_results.player2_member_id`,
     ).bind(memberId, memberId, memberId, memberId, memberId, memberId).all<InternalRecordRow>(),
     env.DB.prepare(
-      `SELECT practice_matches.match_id AS record_id,
+      `WITH target_participants AS (
+         SELECT ? AS participant_id
+         UNION ALL
+         SELECT practice_guests.guest_id AS participant_id
+         FROM practice_guests
+         INNER JOIN practice_guest_member_links
+           ON practice_guest_member_links.guest_profile_id = practice_guests.guest_profile_id
+         WHERE practice_guest_member_links.member_id = ?
+       )
+       SELECT practice_matches.match_id AS record_id,
               practice_sessions.practice_date AS played_on,
               practice_sessions.title AS event_name,
-              CASE WHEN practice_matches.player1_participant_id = ?
+              CASE WHEN practice_matches.player1_participant_id IN (
+                SELECT participant_id FROM target_participants
+              )
                 THEN practice_matches.player2_participant_id
                 ELSE practice_matches.player1_participant_id END AS opponent_key,
-              CASE WHEN practice_matches.player1_participant_id = ?
+              CASE WHEN practice_matches.player1_participant_id IN (
+                SELECT participant_id FROM target_participants
+              )
                 THEN COALESCE(player2.display_name, guest2.display_name)
                 ELSE COALESCE(player1.display_name, guest1.display_name) END AS opponent_name,
-              CASE WHEN practice_matches.player1_participant_id = ?
+              CASE WHEN practice_matches.player1_participant_id IN (
+                SELECT participant_id FROM target_participants
+              )
                 THEN practice_matches.player2_grade_snapshot
                 ELSE practice_matches.player1_grade_snapshot END AS opponent_grade,
-              CASE WHEN practice_matches.winner_participant_id = ? THEN 'win' ELSE 'loss' END AS outcome,
+              CASE WHEN practice_matches.winner_participant_id IN (
+                SELECT participant_id FROM target_participants
+              ) THEN 'win' ELSE 'loss' END AS outcome,
               practice_matches.score_difference, practice_matches.result_note,
               NULL AS fault_count, NULL AS cards_taken,
               NULL AS opponent_right_taken, NULL AS opponent_left_taken,
@@ -829,8 +908,13 @@ export async function loadMemberMatchRecords(
        LEFT JOIN members AS player2 ON player2.member_id = practice_matches.player2_participant_id
        LEFT JOIN practice_guests AS guest2 ON guest2.guest_id = practice_matches.player2_participant_id
        WHERE practice_matches.status = 'completed'
-         AND (? = practice_matches.player1_participant_id OR ? = practice_matches.player2_participant_id)`,
-    ).bind(memberId, memberId, memberId, memberId, memberId, memberId).all<InternalRecordRow>(),
+         AND (practice_matches.player1_participant_id IN (
+                SELECT participant_id FROM target_participants
+              )
+              OR practice_matches.player2_participant_id IN (
+                SELECT participant_id FROM target_participants
+              ))`,
+    ).bind(memberId, memberId).all<InternalRecordRow>(),
     env.DB.prepare(
       `SELECT external_match_id AS record_id, played_on, event_name, opponent_name,
               opponent_affiliation, opponent_grade, outcome, score_difference, result_note,

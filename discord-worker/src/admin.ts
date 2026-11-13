@@ -24,6 +24,11 @@ import {
   type MemberUpdateInput,
 } from "./admin-members";
 import {
+  GuestIdentityError,
+  listGuestProfilesForMember,
+  replaceMemberGuestProfileLinks,
+} from "./practice/guests";
+import {
   buildArchivePdfFilename,
   buildConfirmationRosterFilename,
   buildGuidanceFilename,
@@ -3701,6 +3706,15 @@ function adminHtml(
     .member-list-actions { display: flex; align-items: end; gap: 9px; flex-wrap: wrap; }
     .member-list-actions label { gap: 3px; color: #596579; font-size: var(--font-size-meta); }
     .member-list-actions select { min-width: 120px; padding: 7px 9px; }
+    .guest-link-intro { margin: 0 0 10px; color: #596579; font-size: var(--font-size-note); }
+    .guest-link-list { display: grid; max-height: 52vh; overflow: auto; border-top: 1px solid #e2e6ef; }
+    .guest-link-choice { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 9px; align-items: center; padding: 10px 2px; border-bottom: 1px solid #e7eaf0; }
+    .guest-link-choice input { width: 17px; height: 17px; margin: 0; }
+    .guest-link-choice strong, .guest-link-choice small { display: block; }
+    .guest-link-choice small { margin-top: 2px; color: #697386; font-size: var(--font-size-meta); }
+    .guest-link-choice .suggested { padding: 2px 7px; border-radius: 999px; color: #2f559f; background: #edf2ff; font-size: var(--font-size-meta); font-weight: 750; }
+    .guest-link-choice.is-unavailable { opacity: .58; }
+    .guest-link-empty { padding: 20px 0; color: #697386; text-align: center; }
     #request-status { color: #697386; margin-bottom: 12px; }
     #request-list { display: grid; gap: 12px; }
     .request-card { border: 1px solid #dce1eb; border-radius: 10px; padding: 16px; }
@@ -4273,6 +4287,14 @@ function adminHtml(
       <div class="dialog-actions"><button id="close-member-match" type="button" class="secondary">閉じる</button></div>
     </div>
   </dialog>
+  <dialog id="guest-link-dialog">
+    <form id="guest-link-form" class="dialog-form">
+      <h2 id="guest-link-title">ゲスト履歴の紐付け</h2>
+      <p class="guest-link-intro">同一人物だと確認できたゲストだけを選択してください。複数のゲスト記録を1人の会員へまとめられ、解除後も操作履歴は保存されます。</p>
+      <div id="guest-link-list" class="guest-link-list"><div class="guest-link-empty">読み込み中…</div></div>
+      <div class="dialog-actions"><span id="guest-link-result" class="status-message" role="status" aria-live="polite"></span><button id="close-guest-link" type="button" class="secondary">閉じる</button><button id="save-guest-link" type="submit">紐付けを保存</button></div>
+    </form>
+  </dialog>
   <script>
     const currentPage = document.body.dataset.page;
     const settingsMenuItems = [...document.querySelectorAll('[data-settings-view]')];
@@ -4345,6 +4367,14 @@ function adminHtml(
     const memberMatchTitle = document.querySelector('#member-match-title');
     const memberMatchContent = document.querySelector('#member-match-content');
     const closeMemberMatch = document.querySelector('#close-member-match');
+    const guestLinkDialog = document.querySelector('#guest-link-dialog');
+    const guestLinkForm = document.querySelector('#guest-link-form');
+    const guestLinkTitle = document.querySelector('#guest-link-title');
+    const guestLinkList = document.querySelector('#guest-link-list');
+    const guestLinkResult = document.querySelector('#guest-link-result');
+    const closeGuestLink = document.querySelector('#close-guest-link');
+    const saveGuestLink = document.querySelector('#save-guest-link');
+    let activeGuestLinkMember = null;
     const memberBulkBar = document.querySelector('#member-bulk-bar');
     const memberBulkCount = document.querySelector('#member-bulk-count');
     const memberBulkMessage = document.querySelector('#member-bulk-message');
@@ -7526,6 +7556,77 @@ function adminHtml(
     discardMemberChanges?.addEventListener('click', discardAllMemberChanges);
     saveMemberChanges?.addEventListener('click', saveAllMemberChanges);
 
+    function renderGuestProfileChoices(member, profiles) {
+      guestLinkList.replaceChildren();
+      if (!profiles.length) {
+        guestLinkList.append(element('div', 'guest-link-empty', '登録済みのゲストはいません。'));
+        return;
+      }
+      profiles.forEach((profile) => {
+        const linkedHere = profile.linkedMemberId === member.memberId;
+        const unavailable = Boolean(profile.linkedMemberId && !linkedHere);
+        const choice = element('label', 'guest-link-choice' + (unavailable ? ' is-unavailable' : ''));
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.value = profile.guestProfileId;
+        checkbox.checked = linkedHere;
+        checkbox.disabled = unavailable;
+        const text = document.createElement('span');
+        const lastUsed = profile.lastUsedAt ? eventDateLabel(profile.lastUsedAt.slice(0, 10)) : '参加日不明';
+        text.append(
+          element('strong', '', profile.displayName),
+          element('small', '', (profile.lastGrade ? gradeLabel(profile.lastGrade) + '・' : '') + lastUsed + '・参加' + profile.participationCount + '回' + (unavailable ? '・' + profile.linkedMemberName + 'さんに紐付け済み' : '')),
+        );
+        choice.append(checkbox, text);
+        if (profile.suggested && !unavailable) choice.append(element('span', 'suggested', '氏名一致候補'));
+        guestLinkList.append(choice);
+      });
+    }
+
+    async function openGuestLink(member) {
+      activeGuestLinkMember = member;
+      guestLinkTitle.textContent = member.displayName + 'さんのゲスト履歴';
+      guestLinkList.replaceChildren(element('div', 'guest-link-empty', '読み込み中…'));
+      guestLinkResult.textContent = '';
+      saveGuestLink.disabled = true;
+      guestLinkDialog.showModal();
+      try {
+        const response = await fetch('/api/members/' + encodeURIComponent(member.memberId) + '/guest-profiles');
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.error || 'ゲスト履歴を取得できませんでした。');
+        renderGuestProfileChoices(member, body.profiles || []);
+        saveGuestLink.disabled = false;
+      } catch (error) {
+        guestLinkList.replaceChildren(element('div', 'guest-link-empty', error instanceof Error ? error.message : 'ゲスト履歴を取得できませんでした。'));
+      }
+    }
+
+    guestLinkForm?.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      if (!activeGuestLinkMember) return;
+      const guestProfileIds = [...guestLinkList.querySelectorAll('input[type="checkbox"]:checked:not(:disabled)')].map((input) => input.value);
+      saveGuestLink.disabled = true;
+      guestLinkResult.className = 'status-message';
+      guestLinkResult.textContent = '保存中…';
+      try {
+        const response = await fetch('/api/members/' + encodeURIComponent(activeGuestLinkMember.memberId) + '/guest-profiles', {
+          method: 'PUT',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({guestProfileIds}),
+        });
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.error || 'ゲスト履歴を保存できませんでした。');
+        renderGuestProfileChoices(activeGuestLinkMember, body.profiles || []);
+        guestLinkResult.textContent = '紐付けを保存しました。対戦統計へ反映されています。';
+      } catch (error) {
+        guestLinkResult.className = 'status-message error';
+        guestLinkResult.textContent = error instanceof Error ? error.message : 'ゲスト履歴を保存できませんでした。';
+      } finally {
+        saveGuestLink.disabled = false;
+      }
+    });
+    closeGuestLink?.addEventListener('click', () => guestLinkDialog.close());
+
     function renderMember(member) {
       const card = element('article', 'member-card');
       card.dataset.memberId = member.memberId;
@@ -7537,6 +7638,9 @@ function adminHtml(
       };
       const edit = element('button', 'secondary', '編集');
       edit.type = 'button';
+      const guestLink = element('button', 'secondary', 'ゲスト履歴');
+      guestLink.type = 'button';
+      guestLink.addEventListener('click', () => openGuestLink(member));
       const historyLink = element('button', 'member-history-link', '出場歴');
       historyLink.type = 'button';
       historyLink.addEventListener('click', () => openMemberHistory(member));
@@ -7545,7 +7649,7 @@ function adminHtml(
       historyItem.append(historyLink);
       const linkState = element('span', 'member-link', member.discordLinked ? 'Discord連携済み' : 'Discord未連携');
       const rowActions = element('div', 'member-row-actions');
-      rowActions.append(edit, linkState);
+      rowActions.append(edit, guestLink, linkState);
       summary.append(
         summaryItem('氏名', member.displayName),
         summaryItem('よみがな', member.displayNameKana || '未登録'),
@@ -8799,6 +8903,39 @@ export async function handleAdminRequest(
       }
       console.error("メンバー登録申請の承認エラー", error);
       return json({ error: "登録申請を処理できませんでした。" }, 500);
+    }
+  }
+
+  const memberGuestProfilesPath = url.pathname.match(
+    /^\/api\/members\/(M-[0-9a-f-]{36})\/guest-profiles$/,
+  );
+  if (request.method === "GET" && memberGuestProfilesPath) {
+    try {
+      return json({ profiles: await listGuestProfilesForMember(env, memberGuestProfilesPath[1]) });
+    } catch (error: unknown) {
+      if (error instanceof GuestIdentityError) return json({ error: error.message }, error.status);
+      console.error("ゲスト履歴の取得エラー", error);
+      return json({ error: "ゲスト履歴を取得できませんでした。" }, 500);
+    }
+  }
+  if (request.method === "PUT" && memberGuestProfilesPath) {
+    if (!isSameOrigin(request)) return json({ error: "不正な送信元です。" }, 403);
+    if (!request.headers.get("Content-Type")?.toLowerCase().startsWith("application/json")) {
+      return json({ error: "JSON形式で送信してください。" }, 415);
+    }
+    try {
+      const body = await request.json<{ guestProfileIds?: unknown }>();
+      const profiles = await replaceMemberGuestProfileLinks(
+        env,
+        memberGuestProfilesPath[1],
+        body.guestProfileIds,
+        actor,
+      );
+      return json({ profiles });
+    } catch (error: unknown) {
+      if (error instanceof GuestIdentityError) return json({ error: error.message }, error.status);
+      console.error("ゲスト履歴の紐付けエラー", error);
+      return json({ error: "ゲスト履歴を保存できませんでした。" }, 500);
     }
   }
 

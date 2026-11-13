@@ -126,10 +126,58 @@ describe("practice creation with a reader", () => {
       guests: [{ displayName: "ゲスト選手", grade: "B" }],
     });
 
-    expect(batched).toHaveLength(3);
-    expect(batched[2].sql).toContain("INSERT INTO practice_guests");
-    expect(batched[2].values[0]).toMatch(/^G-/);
-    expect(batched[2].values.slice(2)).toEqual(["ゲスト選手", "B"]);
+    expect(batched).toHaveLength(4);
+    expect(batched[2].sql).toContain("INSERT INTO practice_guest_profiles");
+    expect(batched[2].values[0]).toMatch(/^GP-/);
+    expect(batched[3].sql).toContain("INSERT INTO practice_guests");
+    expect(batched[3].values[0]).toMatch(/^G-/);
+    expect(batched[3].values[1]).toBe(batched[2].values[0]);
+    expect(batched[3].values.slice(3)).toEqual(["ゲスト選手", "B"]);
+  });
+
+  it("reuses a selected guest profile while keeping a new session snapshot", async () => {
+    const guestProfileId = "GP-55555555-5555-4555-8555-555555555555";
+    type Statement = { sql: string; values: unknown[] };
+    const batched: Statement[] = [];
+    const db = {
+      prepare(sql: string) {
+        return {
+          bind(...values: unknown[]) {
+            return {
+              sql,
+              values,
+              async all() {
+                if (sql.includes("FROM members")) {
+                  return { results: [{ member_id: memberId, grade: "C" }] };
+                }
+                if (sql.includes("FROM practice_guest_profiles")) {
+                  return { results: [{ guest_profile_id: guestProfileId, display_name: "再参加ゲスト" }] };
+                }
+                return { results: [] };
+              },
+            };
+          },
+        };
+      },
+      async batch(statements: Statement[]) {
+        batched.push(...statements);
+        return statements.map(() => ({ success: true }));
+      },
+    };
+
+    await createPracticeSession({ DB: db as unknown as D1Database }, memberId, {
+      practiceDate: "2026-10-29",
+      title: "通常練習",
+      pairingMode: "near_grade",
+      cardScheme: "hiragana",
+      memberIds: [memberId],
+      guests: [{ guestProfileId, grade: "A" }],
+    });
+
+    expect(batched.some((item) => item.sql.includes("INSERT INTO practice_guest_profiles"))).toBe(false);
+    const guestInsert = batched.find((item) => item.sql.includes("INSERT INTO practice_guests"));
+    expect(guestInsert?.values[1]).toBe(guestProfileId);
+    expect(guestInsert?.values.slice(3)).toEqual(["再参加ゲスト", "A"]);
   });
 
   it("links a created practice to the selected registered schedule", async () => {
@@ -413,6 +461,53 @@ describe("external practice results", () => {
 });
 
 describe("practice result details", () => {
+  it("includes matches recorded under every guest profile linked to the member", async () => {
+    const guestId = "G-55555555-5555-4555-8555-555555555555";
+    const prepared: Array<{ sql: string; values: unknown[] }> = [];
+    const db = {
+      prepare(sql: string) {
+        return {
+          bind: (...values: unknown[]) => ({
+            async all() {
+              prepared.push({ sql, values });
+              if (!sql.includes("WITH target_participants")) return { results: [] };
+              return { results: [{
+                record_id: "PM-1",
+                played_on: "2026-10-01",
+                event_name: "入会前の練習",
+                opponent_key: opponentId,
+                opponent_name: "対戦相手",
+                opponent_grade: "B",
+                outcome: "win",
+                score_difference: 4,
+                result_note: null,
+                fault_count: null,
+                cards_taken: null,
+                opponent_right_taken: null,
+                opponent_left_taken: null,
+                own_right_taken: null,
+                own_left_taken: null,
+                participant_id: guestId,
+              }] };
+            },
+          }),
+        };
+      },
+    };
+
+    const records = await loadMemberMatchRecords(
+      { DB: db as unknown as D1Database },
+      memberId,
+    );
+
+    const linkedQuery = prepared.find(({ sql }) => sql.includes("WITH target_participants"));
+    expect(linkedQuery?.sql).toContain("practice_guest_member_links.member_id = ?");
+    expect(linkedQuery?.values).toEqual([memberId, memberId]);
+    expect(records).toEqual(expect.arrayContaining([
+      expect.objectContaining({ recordId: "PM-1", eventName: "入会前の練習", outcome: "win" }),
+    ]));
+  });
+
   it("returns saved optional details for the member portal popup", async () => {
     const db = {
       prepare(sql: string) {

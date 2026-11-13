@@ -9,6 +9,7 @@ import {
   saveInternalPracticeResult,
   savePracticeMatchResult,
 } from "../practice/service";
+import { listReusableGuestProfiles } from "../practice/guests";
 import {
   listPracticeSchedules,
   savePracticeScheduleMemberResponse,
@@ -17,8 +18,9 @@ import { json, sameOrigin } from "./http";
 import type { PortalEnv, PortalMemberRow } from "./types";
 
 async function dashboard(env: PortalEnv, member: PortalMemberRow) {
-  const [members, sessions, schedules, matchData] = await Promise.all([
+  const [members, guestProfiles, sessions, schedules, matchData] = await Promise.all([
     listPracticeMembers(env),
+    listReusableGuestProfiles(env),
     listPracticeSessions(env),
     listPracticeSchedules(env),
     loadMemberMatchStatistics(env, member.member_id),
@@ -26,6 +28,7 @@ async function dashboard(env: PortalEnv, member: PortalMemberRow) {
   return {
     current_member_id: member.member_id,
     members,
+    guest_profiles: guestProfiles,
     sessions,
     schedules,
     ...matchData,
