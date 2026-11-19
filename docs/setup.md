@@ -6,7 +6,7 @@ This file tracks the initial setup needed to start development.
 
 - Organization: `Saitama-Univ-Karuta-Club`
 - Repository: `tournament-system`
-- Suggested initial visibility: `private`
+- Visibility: `public` while the current GitHub Pages site is in use. Changing visibility, owner, or repository name can stop the links already distributed through LINE.
 
 ## Planned Components
 

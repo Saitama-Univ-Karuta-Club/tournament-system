@@ -1,66 +1,31 @@
-# Tournament System
+# Tournament System — 現行LINE版
 
-Circle tournament management system for Saitama University Karuta Club.
+埼玉大学かるた会で運用中の、GAS + Google Sheets + LINE による大会管理システムです。
 
-This repository contains the initial implementation for a workflow that:
+## 保守する範囲
 
-- stores tournament information in Google Sheets
-- collects attendance intentions from members
-- sends reminders through LINE
-- tracks internal and true application deadlines
+- `gas/`：既存のGoogle Apps Script、Sheets連携、LINE通知、Calendar連携
+- `web/`：参加者向け回答ページ、運営管理画面、案内、マニュアルへの入口
+- `docs/`：現行LINE版の仕様・設定・引き継ぎ資料
+- `.github/workflows/pages.yml`：GitHub Pagesへの画面公開
 
-## Repository Layout
+Google Sheetsがデータの正本で、GitHub Pagesは画面を配信します。GASのデプロイ更新はGitへのpushとは別の操作です。
 
-```text
-docs/        Specifications, setup notes, and design decisions
-gas/         Google Apps Script backend and admin-side logic
-web/         Public-facing web pages, starting with the entry page
-discord-worker/  Discord Bot backend running on Cloudflare Workers
-```
+## 公開先の維持
 
-## Current Architecture
+このリポジトリの所有者と名前は `Saitama-Univ-Karuta-Club/tournament-system` のまま維持します。LINEで配布済みのリンクはGitHub Pagesの公開先に依存しています。現行版の利用が終了するまでは、Pagesを公開できる設定を保ってください。
 
-- `web/entry/`
-  Public entry page
-- `web/board-c7k2m9q4/`
-  Lightweight admin console protected by `ADMIN_CONSOLE_TOKEN`
-- `gas/`
-  Backend API, scheduled jobs, and admin-side functionality
-- `docs/`
-  Source of truth for requirements and implementation notes
-- `discord-worker/`
-  Discord Bot MVP isolated from the current GAS / Google Sheets system
+2026-11-19、organization移管で変更された公開先を元の場所へ復旧しました。復旧時には、旧mainコミット `d72f38870df82983105b882e3634c712b2f61732` から現行版の32ファイルと関連する72コミットを抽出しました。GitHub Pagesで配信する画面とGASコードは元の内容と同一です。復旧コミットは `300695bbfc2a3b418bdc9c9793c77331106d0930` です。
 
-## Current Decisions
+GASのデプロイ、Google Sheetsの内容、LINE通知先は変更していません。メンバー回答画面・管理画面と最新データの表示を運用者が確認済みです。
 
-- Start with a single monorepo to keep specification, frontend, and GAS code in sync
-- Publish `web/` through GitHub Pages
-- Keep secrets in Apps Script Script Properties, not in Git-managed files
-- Build the MVP in the order described in the specification
+## 移行先システム
 
-## GitHub Pages
+Cloudflare / D1 / Discord版と開発中のアプリは `KarutaLab` 側で管理します。このリポジトリには含めません。
 
-The repository is prepared to deploy `web/` through GitHub Pages using GitHub Actions.
+## 資料
 
-Published paths are expected to be:
-
-- `/entry/`
-- `/board-c7k2m9q4/`
-- `/manuals/`
-
-`/manuals/` serves PDF copies of the handover manuals for operators and developers.
-
-## Documents
-
-- Main specification: [docs/line_bot_tournament_system_spec.md](docs/line_bot_tournament_system_spec.md)
-- Basic operation manual: [docs/manuals/basic-operation-manual.md](docs/manuals/basic-operation-manual.md)
-- Developer manual: [docs/manuals/developer-manual.md](docs/manuals/developer-manual.md)
-- Setup notes: [docs/setup.md](docs/setup.md)
-- Design decisions: [docs/decisions.md](docs/decisions.md)
-
-## Next Steps
-
-1. Define the initial Google Sheets schema and operational setup
-2. Implement the GAS tournament read/write API
-3. Build the first admin-side input flow
-4. Build the public entry page and response submission flow
+- [基本操作マニュアル](docs/manuals/basic-operation-manual.md)
+- [技術マニュアル](docs/manuals/developer-manual.md)
+- [GAS設定](gas/SETUP.md)
+- [仕様書](docs/line_bot_tournament_system_spec.md)
